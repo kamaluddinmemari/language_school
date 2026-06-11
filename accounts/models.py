@@ -63,11 +63,13 @@ class ClassRequest(models.Model):
     class ClassType(models.TextChoices):
         PRIVATE = 'private', 'خصوصی'
         MAKEUP = 'makeup', 'جبرانی'
+        OTHER = 'other', 'سایر'
 
     student = models.ForeignKey(User, on_delete=models.CASCADE, related_name='requests', limit_choices_to={'role': 'student'})
     teacher = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='assigned_classes', limit_choices_to={'role': 'teacher'})
     assigned_teachers = models.ManyToManyField(User, blank=True, related_name='referred_classes', limit_choices_to={'role': 'teacher'})
     class_type = models.CharField(max_length=10, choices=ClassType.choices, default=ClassType.PRIVATE)
+    custom_class_type = models.CharField(max_length=100, blank=True)
     language_level = models.CharField(max_length=50)
     proposed_time = models.CharField(max_length=100)
     class_date = models.DateTimeField(null=True, blank=True)
@@ -77,6 +79,9 @@ class ClassRequest(models.Model):
     total_price = models.PositiveIntegerField(default=0)
     teacher_share = models.PositiveIntegerField(default=0)
     school_share = models.PositiveIntegerField(default=0)
+    teacher_payment_status = models.BooleanField(default=False)
+    teacher_payment_date = models.DateTimeField(null=True, blank=True)
+    teacher_payment_amount = models.PositiveIntegerField(default=0)
     receipt = models.ImageField(upload_to='receipts/', null=True, blank=True)
     amount = models.PositiveIntegerField(default=0)
     payment_status = models.CharField(max_length=10, choices=PaymentStatus.choices, default=PaymentStatus.UNPAID)
@@ -90,7 +95,7 @@ class ClassRequest(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
 
     def save(self, *args, kwargs):
-        if self.class_type == 'makeup':
+        if self.class_type in ['makeup', 'other']:
             self.total_price = 0
             self.teacher_share = 0
             self.school_share = 0

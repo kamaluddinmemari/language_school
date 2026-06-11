@@ -27,7 +27,7 @@ class SendNotificationView(APIView):
             )
         serializer = SendNotificationSerializer(data=request.data)
         if serializer.is_valid():
-            notification = serializer.save(sender=request.user)
+            serializer.save(sender=request.user)
             return Response(
                 {'message': 'نوتیفیکیشن ارسال شد'},
                 status=status.HTTP_201_CREATED

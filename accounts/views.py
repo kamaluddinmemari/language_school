@@ -88,3 +88,13 @@ class UserProfileView(generics.RetrieveUpdateAPIView):
 
     def get_object(self):
         return self.request.user
+
+
+class TeacherListView(generics.ListAPIView):
+    permission_classes = [IsAuthenticated]
+    serializer_class = UserProfileSerializer
+
+    def get_queryset(self):
+        if self.request.user.role != 'admin':
+            return User.objects.none()
+        return User.objects.filter(role='teacher')
