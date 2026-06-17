@@ -25,7 +25,7 @@ SECRET_KEY = 'django-insecure-(%3%8g$u*f03t^kcs7i@!@wc)!wj7x4$#^s9wh9%k(=fbc0%=3
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
 
-ALLOWED_HOSTS = []
+ALLOWED_HOSTS = ['*']
 
 
 # Application definition
@@ -40,8 +40,10 @@ INSTALLED_APPS = [
     'corsheaders',
     'rest_framework',
     'accounts',
-    'classes',
-    'notifications'
+    'classes.apps.ClassesConfig',
+    'notifications',
+    'django_jalali',
+    'teachers.apps.TeachersConfig',
 ]
 
 MIDDLEWARE = [
@@ -128,5 +130,7 @@ REST_FRAMEWORK = {
     ),
 }
 CORS_ALLOWED_ORIGINS = [
-    'http://localhost:3000'
+    'http://localhost:3000',
+    'http://localhost:8081',
+    'http://192.168.1.109:8081',
 ]
