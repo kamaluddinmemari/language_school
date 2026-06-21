@@ -4,6 +4,7 @@ from .models import User
 
 
 class RegisterSerializer(serializers.ModelSerializer):
+    """ثبت‌نام عمومی — همیشه با نقش دانش‌آموز (نقش از سمت کاربر قابل تغییر نیست)"""
 
     password = serializers.CharField(
         write_only=True,
@@ -20,7 +21,7 @@ class RegisterSerializer(serializers.ModelSerializer):
         fields = [
             'username', 'password', 'password2',
             'first_name', 'last_name', 'phone',
-            'national_code', 'role'
+            'national_code'
         ]
 
     def validate(self, attrs):
@@ -32,8 +33,44 @@ class RegisterSerializer(serializers.ModelSerializer):
 
     def create(self, validated_data):
         validated_data.pop('password2')
+        validated_data['role'] = User.Role.STUDENT
         user = User.objects.create_user(**validated_data)
         return user
+
+
+class TeacherSerializer(serializers.ModelSerializer):
+    """ثبت/ویرایش اطلاعات استاد — فقط برای مدیر"""
+
+    password = serializers.CharField(write_only=True, required=False, validators=[validate_password])
+    average_rating = serializers.ReadOnlyField()
+
+    class Meta:
+        model = User
+        fields = [
+            'id', 'username', 'password', 'first_name', 'last_name',
+            'phone', 'phone2', 'teacher_level', 'avatar', 'average_rating'
+        ]
+
+    def create(self, validated_data):
+        password = validated_data.pop('password', None)
+        validated_data['role'] = User.Role.TEACHER
+        validated_data.setdefault('username', validated_data.get('phone'))
+        user = User(**validated_data)
+        if password:
+            user.set_password(password)
+        else:
+            user.set_unusable_password()
+        user.save()
+        return user
+
+    def update(self, instance, validated_data):
+        password = validated_data.pop('password', None)
+        for attr, value in validated_data.items():
+            setattr(instance, attr, value)
+        if password:
+            instance.set_password(password)
+        instance.save()
+        return instance
 
 
 class ForgotPasswordSerializer(serializers.Serializer):
@@ -59,11 +96,14 @@ class ResetPasswordSerializer(serializers.Serializer):
 
 class UserProfileSerializer(serializers.ModelSerializer):
 
+    average_rating = serializers.ReadOnlyField()
+
     class Meta:
         model = User
         fields = [
             'id', 'username', 'first_name', 'last_name',
             'phone', 'phone2', 'national_code', 'birth_date',
-            'language_level', 'avatar', 'role'
+            'language_level', 'teacher_level', 'avatar', 'role',
+            'average_rating'
         ]
         read_only_fields = ['username', 'role']

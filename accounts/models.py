@@ -1,6 +1,8 @@
 from django.db import models
 from django.contrib.auth.models import AbstractUser
 from django.core.validators import MinValueValidator, MaxValueValidator
+from django.utils import timezone
+import jdatetime
 
 
 class User(AbstractUser):
@@ -21,7 +23,7 @@ class User(AbstractUser):
     teacher_level = models.CharField(max_length=50, blank=True)
     avatar = models.ImageField(upload_to='avatars/', null=True, blank=True)
 
-    def str(self):
+    def __str__(self):
         return f"{self.get_full_name()} ({self.role})"
 
     @property
@@ -39,7 +41,7 @@ class PriceSetting(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
     updated_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True)
 
-    def str(self):
+    def __str__(self):
         return f"تنظیمات قیمت (آپدیت: {self.updated_at})"
 
 
@@ -47,9 +49,11 @@ class ClassRequest(models.Model):
 
     class Status(models.TextChoices):
         PENDING = 'pending', 'در انتظار تایید'
-        APPROVED = 'approved', 'تایید شده'
-        REJECTED = 'rejected', 'رد شده'
+        REFERRED = 'referred', 'ارجاع‌شده به استاد'
+        CONFIRMED = 'confirmed', 'تایید نهایی - منتظر برگزاری'
         COMPLETED = 'completed', 'مختومه'
+        REJECTED = 'rejected', 'رد شده'
+        CANCELLED = 'cancelled', 'کنسل شده'
 
     class PaymentStatus(models.TextChoices):
         UNPAID = 'unpaid', 'پرداخت نشده'
@@ -68,10 +72,11 @@ class ClassRequest(models.Model):
     student = models.ForeignKey(User, on_delete=models.CASCADE, related_name='requests', limit_choices_to={'role': 'student'})
     teacher = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='assigned_classes', limit_choices_to={'role': 'teacher'})
     assigned_teachers = models.ManyToManyField(User, blank=True, related_name='referred_classes', limit_choices_to={'role': 'teacher'})
+    accepted_teachers = models.ManyToManyField(User, blank=True, related_name='accepted_classes', limit_choices_to={'role': 'teacher'})
     class_type = models.CharField(max_length=10, choices=ClassType.choices, default=ClassType.PRIVATE)
     custom_class_type = models.CharField(max_length=100, blank=True)
     language_level = models.CharField(max_length=50)
-    proposed_time = models.CharField(max_length=100)
+    proposed_time = models.CharField(max_length=100, blank=True)
     class_date = models.DateTimeField(null=True, blank=True)
     class_date_approved = models.BooleanField(default=False)
     session_duration = models.CharField(max_length=5, choices=SessionDuration.choices, default=SessionDuration.ONE_HOUR)
@@ -90,11 +95,20 @@ class ClassRequest(models.Model):
     is_completed = models.BooleanField(default=False)
     completed_at = models.DateTimeField(null=True, blank=True)
     satisfaction = models.IntegerField(null=True, blank=True, validators=[MinValueValidator(1), MaxValueValidator(5)])
+    satisfaction_text = models.TextField(blank=True)
     satisfaction_approved = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
-    def save(self, *args, kwargs):
+    @property
+    def created_at_jalali(self):
+        """تاریخ و ساعت ثبت به شمسی، برای نمایش در پنل/اپ"""
+        if not self.created_at:
+            return None
+        local_dt = timezone.localtime(self.created_at)
+        return jdatetime.datetime.fromgregorian(datetime=local_dt).strftime('%Y/%m/%d - %H:%M')
+
+    def save(self, *args, **kwargs):
         if self.class_type in ['makeup', 'other']:
             self.total_price = 0
             self.teacher_share = 0
@@ -113,9 +127,9 @@ class ClassRequest(models.Model):
             self.total_price = price_per_session * self.session_count
             self.teacher_share = int(self.total_price * teacher_percent / 100)
             self.school_share = int(self.total_price * school_percent / 100)
-        super().save(*args, kwargs)
+        super().save(*args, **kwargs)
 
-    def str(self):
+    def __str__(self):
         return f"{self.student} - {self.language_level} ({self.status})"
 
 
@@ -131,5 +145,5 @@ class OTPCode(models.Model):
     is_used = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
 
-    def str(self):
+    def __str__(self):
         return f"{self.user} - {self.code} ({self.purpose})"

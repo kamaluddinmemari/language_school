@@ -2,21 +2,31 @@ from django.urls import path
 from .views import (
     ClassRequestListCreateView,
     ClassRequestDetailView,
-    ApproveClassView,
-    RejectClassView,
+    AssignTeachersView,
     TeacherAcceptView,
+    TeacherDeclineView,
+    FinalizeClassView,
+    CancelClassView,
+    RejectClassView,
     CompleteClassView,
     AdminConfirmCompleteView,
-    SatisfactionView
+    SatisfactionView,
+    ApproveSatisfactionView,
+    PayTeacherView,
 )
 
 urlpatterns = [
     path('classes/', ClassRequestListCreateView.as_view(), name='class_list'),
     path('classes/<int:pk>/', ClassRequestDetailView.as_view(), name='class_detail'),
-    path('classes/<int:pk>/approve/', ApproveClassView.as_view(), name='class_approve'),
-    path('classes/<int:pk>/reject/', RejectClassView.as_view(), name='class_reject'),
+    path('classes/<int:pk>/assign/', AssignTeachersView.as_view(), name='class_assign'),
     path('classes/<int:pk>/accept/', TeacherAcceptView.as_view(), name='class_accept'),
+    path('classes/<int:pk>/decline/', TeacherDeclineView.as_view(), name='class_decline'),
+    path('classes/<int:pk>/finalize/', FinalizeClassView.as_view(), name='class_finalize'),
+    path('classes/<int:pk>/cancel/', CancelClassView.as_view(), name='class_cancel'),
+    path('classes/<int:pk>/reject/', RejectClassView.as_view(), name='class_reject'),
     path('classes/<int:pk>/complete/', CompleteClassView.as_view(), name='class_complete'),
     path('classes/<int:pk>/confirm/', AdminConfirmCompleteView.as_view(), name='class_confirm'),
     path('classes/<int:pk>/satisfaction/', SatisfactionView.as_view(), name='class_satisfaction'),
+    path('classes/<int:pk>/approve-satisfaction/', ApproveSatisfactionView.as_view(), name='class_approve_satisfaction'),
+    path('classes/<int:pk>/payment/', PayTeacherView.as_view(), name='class_payment'),
 ]

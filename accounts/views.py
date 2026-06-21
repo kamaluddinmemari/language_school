@@ -10,7 +10,8 @@ from .serializers import (
     RegisterSerializer,
     ForgotPasswordSerializer,
     ResetPasswordSerializer,
-    UserProfileSerializer
+    UserProfileSerializer,
+    TeacherSerializer
 )
 
 
@@ -90,11 +91,41 @@ class UserProfileView(generics.RetrieveUpdateAPIView):
         return self.request.user
 
 
-class TeacherListView(generics.ListAPIView):
+class TeacherListCreateView(generics.ListCreateAPIView):
     permission_classes = [IsAuthenticated]
-    serializer_class = UserProfileSerializer
+    serializer_class = TeacherSerializer
 
     def get_queryset(self):
         if self.request.user.role != 'admin':
             return User.objects.none()
         return User.objects.filter(role='teacher')
+
+    def create(self, request, *args, **kwargs):
+        if request.user.role != 'admin':
+            return Response({'error': 'فقط مدیر می‌تونه استاد اضافه کنه'}, status=status.HTTP_403_FORBIDDEN)
+        return super().create(request, *args, **kwargs)
+
+
+class TeacherDetailView(generics.RetrieveUpdateDestroyAPIView):
+    permission_classes = [IsAuthenticated]
+    serializer_class = TeacherSerializer
+
+    def get_queryset(self):
+        return User.objects.filter(role='teacher')
+
+    def check_admin(self, request):
+        if request.user.role != 'admin':
+            return Response({'error': 'فقط مدیر دسترسی دارد'}, status=status.HTTP_403_FORBIDDEN)
+        return None
+
+    def update(self, request, *args, **kwargs):
+        denied = self.check_admin(request)
+        if denied:
+            return denied
+        return super().update(request, *args, **kwargs)
+
+    def destroy(self, request, *args, **kwargs):
+        denied = self.check_admin(request)
+        if denied:
+            return denied
+        return super().destroy(request, *args, **kwargs)
