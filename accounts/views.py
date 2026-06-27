@@ -5,13 +5,14 @@ from rest_framework.permissions import AllowAny, IsAuthenticated
 from django.utils import timezone
 from datetime import timedelta
 import random
-from .models import User, OTPCode
+from .models import User, OTPCode, PriceSetting
 from .serializers import (
     RegisterSerializer,
     ForgotPasswordSerializer,
     ResetPasswordSerializer,
     UserProfileSerializer,
-    TeacherSerializer
+    TeacherSerializer,
+    PriceSettingSerializer
 )
 
 
@@ -129,3 +130,31 @@ class TeacherDetailView(generics.RetrieveUpdateDestroyAPIView):
         if denied:
             return denied
         return super().destroy(request, *args, **kwargs)
+
+
+class PriceSettingView(APIView):
+    """
+    تنظیمات قیمت فعلی. هر کاربر لاگین‌شده (مثلاً اپ دانش‌آموز برای پیش‌نمایش قیمت)
+    می‌تواند بخواند؛ فقط مدیر می‌تواند تغییر دهد.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get_current(self):
+        price_setting = PriceSetting.objects.order_by('-updated_at').first()
+        if not price_setting:
+            price_setting = PriceSetting.objects.create()
+        return price_setting
+
+    def get(self, request):
+        serializer = PriceSettingSerializer(self.get_current())
+        return Response(serializer.data)
+
+    def patch(self, request):
+        if request.user.role != 'admin':
+            return Response({'error': 'فقط مدیر می‌تونه قیمت رو تغییر بده'}, status=status.HTTP_403_FORBIDDEN)
+        price_setting = self.get_current()
+        serializer = PriceSettingSerializer(price_setting, data=request.data, partial=True)
+        if serializer.is_valid():
+            serializer.save(updated_by=request.user)
+            return Response(serializer.data)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)

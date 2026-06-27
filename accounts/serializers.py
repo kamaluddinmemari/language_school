@@ -1,6 +1,6 @@
 from rest_framework import serializers
 from django.contrib.auth.password_validation import validate_password
-from .models import User
+from .models import User, PriceSetting
 
 
 class RegisterSerializer(serializers.ModelSerializer):
@@ -107,3 +107,15 @@ class UserProfileSerializer(serializers.ModelSerializer):
             'average_rating'
         ]
         read_only_fields = ['username', 'role']
+
+
+class PriceSettingSerializer(serializers.ModelSerializer):
+    """تنظیمات قیمت فعلی — برای محاسبه‌ی پیش‌نمایش قیمت در اپ دانش‌آموز"""
+
+    class Meta:
+        model = PriceSetting
+        fields = [
+            'id', 'one_hour_price', 'one_half_hour_price',
+            'teacher_share_percent', 'school_share_percent', 'updated_at'
+        ]
+        read_only_fields = ['updated_at']

@@ -5,7 +5,8 @@ from .views import (
     ResetPasswordView,
     UserProfileView,
     TeacherListCreateView,
-    TeacherDetailView
+    TeacherDetailView,
+    PriceSettingView
 )
 
 urlpatterns = [
@@ -15,4 +16,5 @@ urlpatterns = [
     path('profile/', UserProfileView.as_view(), name='profile'),
     path('teachers/', TeacherListCreateView.as_view(), name='teacher_list'),
     path('teachers/<int:pk>/', TeacherDetailView.as_view(), name='teacher_detail'),
+    path('price-settings/', PriceSettingView.as_view(), name='price_settings'),
 ]
