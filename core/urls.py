@@ -14,6 +14,8 @@ urlpatterns = [
     path('api/', include('accounts.urls')),
     path('api/', include('classes.urls')),
     path('api/', include('notifications.urls')),
+    path('api/', include('group_classes.urls')),
+    path('api/', include('level_tests.urls')),
 ]
 
 if settings.DEBUG:

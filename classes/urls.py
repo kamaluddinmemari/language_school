@@ -13,10 +13,14 @@ from .views import (
     SatisfactionView,
     ApproveSatisfactionView,
     PayTeacherView,
+    ClassStatsView,
+    ClassSessionListView,
+    ClassSessionUpdateView,
 )
 
 urlpatterns = [
     path('classes/', ClassRequestListCreateView.as_view(), name='class_list'),
+    path('classes/stats/', ClassStatsView.as_view(), name='class_stats'),
     path('classes/<int:pk>/', ClassRequestDetailView.as_view(), name='class_detail'),
     path('classes/<int:pk>/assign/', AssignTeachersView.as_view(), name='class_assign'),
     path('classes/<int:pk>/accept/', TeacherAcceptView.as_view(), name='class_accept'),
@@ -29,4 +33,6 @@ urlpatterns = [
     path('classes/<int:pk>/satisfaction/', SatisfactionView.as_view(), name='class_satisfaction'),
     path('classes/<int:pk>/approve-satisfaction/', ApproveSatisfactionView.as_view(), name='class_approve_satisfaction'),
     path('classes/<int:pk>/payment/', PayTeacherView.as_view(), name='class_payment'),
+    path('classes/<int:pk>/sessions/', ClassSessionListView.as_view(), name='class_sessions'),
+    path('classes/<int:pk>/sessions/<int:session_number>/', ClassSessionUpdateView.as_view(), name='class_session_update'),
 ]

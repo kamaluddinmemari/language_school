@@ -1,5 +1,14 @@
 from rest_framework import serializers
-from accounts.models import ClassRequest, User
+from accounts.models import ClassRequest, User, persian_only_validator
+from .models import ClassSession
+
+
+class ClassSessionSerializer(serializers.ModelSerializer):
+    completed_at_jalali = serializers.ReadOnlyField()
+
+    class Meta:
+        model = ClassSession
+        fields = ['id', 'session_number', 'completed_at', 'completed_at_jalali', 'notes']
 
 
 class StudentInfoSerializer(serializers.ModelSerializer):
@@ -22,6 +31,9 @@ class ClassRequestAdminSerializer(serializers.ModelSerializer):
     assigned_teachers_info = TeacherInfoSerializer(source='assigned_teachers', many=True, read_only=True)
     accepted_teachers_info = TeacherInfoSerializer(source='accepted_teachers', many=True, read_only=True)
     created_at_jalali = serializers.ReadOnlyField()
+    completed_at_jalali = serializers.ReadOnlyField()
+    class_date_jalali = serializers.ReadOnlyField()
+    sessions = ClassSessionSerializer(many=True, read_only=True)
 
     class Meta:
         model = ClassRequest
@@ -30,20 +42,23 @@ class ClassRequestAdminSerializer(serializers.ModelSerializer):
             'assigned_teachers', 'assigned_teachers_info',
             'accepted_teachers', 'accepted_teachers_info',
             'class_type', 'custom_class_type', 'language_level',
-            'proposed_time', 'class_date', 'class_date_approved',
-            'session_duration', 'session_count',
+            'proposed_time', 'class_date', 'class_date_jalali', 'class_date_approved',
+            'suggested_teacher_name',
+            'session_duration', 'session_count', 'sessions',
             'total_price', 'teacher_share', 'school_share',
             'teacher_payment_status', 'teacher_payment_date', 'teacher_payment_amount',
             'receipt', 'amount', 'payment_status', 'status', 'notes',
-            'is_completed', 'completed_at',
+            'is_completed', 'completed_at', 'completed_at_jalali',
             'satisfaction', 'satisfaction_text', 'satisfaction_approved',
             'created_at', 'created_at_jalali', 'updated_at',
         ]
         read_only_fields = [
             'status', 'created_at', 'updated_at', 'total_price',
-            'teacher_share', 'school_share', 'is_completed', 'completed_at',
+            'teacher_share', 'school_share', 'is_completed',
             'accepted_teachers',
         ]
+        # نکته: completed_at عمداً از read_only خارج شده تا مدیر همیشه بتونه
+        # تاریخ و ساعت اتمام کلاس رو از پنل ویرایش کنه (حتی بعد از مختومه شدن)
 
 
 class ClassRequestAdminCreateSerializer(serializers.Serializer):
@@ -51,8 +66,8 @@ class ClassRequestAdminCreateSerializer(serializers.Serializer):
     ثبت درخواست کلاس از طریق کانتر توسط مدیر/کارمند.
     اگر دانش‌آموزی با این شماره موبایل قبلاً ثبت نشده باشد، خودکار ساخته می‌شود.
     """
-    first_name = serializers.CharField(max_length=150)
-    last_name = serializers.CharField(max_length=150)
+    first_name = serializers.CharField(max_length=150, validators=[persian_only_validator])
+    last_name = serializers.CharField(max_length=150, validators=[persian_only_validator])
     national_code = serializers.CharField(max_length=10)
     phone = serializers.CharField(max_length=11)
     class_type = serializers.ChoiceField(choices=ClassRequest.ClassType.choices, default=ClassRequest.ClassType.PRIVATE)
@@ -62,24 +77,29 @@ class ClassRequestAdminCreateSerializer(serializers.Serializer):
     session_count = serializers.IntegerField(min_value=1)
     session_duration = serializers.ChoiceField(
         choices=ClassRequest.SessionDuration.choices,
-        default=ClassRequest.SessionDuration.ONE_HOUR
+        default=ClassRequest.SessionDuration.ONE_HALF
     )
     payment_status = serializers.ChoiceField(
         choices=ClassRequest.PaymentStatus.choices,
         default=ClassRequest.PaymentStatus.UNPAID
     )
     notes = serializers.CharField(required=False, allow_blank=True)
+    suggested_teacher_name = serializers.CharField(max_length=150, required=False, allow_blank=True)
+    username = serializers.CharField(max_length=150, required=False, allow_blank=True)
+    password = serializers.CharField(max_length=128, required=False, allow_blank=True)
 
     def create(self, validated_data):
         phone = validated_data.pop('phone')
         first_name = validated_data.pop('first_name')
         last_name = validated_data.pop('last_name')
-        national_code = validated_data.pop('national_code', '')
+        national_code = validated_data.pop('national_code', None)
+        username = validated_data.pop('username', '') or phone
+        password = validated_data.pop('password', '')
 
         student, created = User.objects.get_or_create(
             phone=phone,
             defaults={
-                'username': phone,
+                'username': username,
                 'first_name': first_name,
                 'last_name': last_name,
                 'national_code': national_code,
@@ -87,7 +107,10 @@ class ClassRequestAdminCreateSerializer(serializers.Serializer):
             }
         )
         if created:
-            student.set_unusable_password()
+            if password:
+                student.set_password(password)
+            else:
+                student.set_unusable_password()
             student.save()
 
         return ClassRequest.objects.create(student=student, **validated_data)
@@ -102,7 +125,7 @@ class ClassRequestCreateSerializer(serializers.ModelSerializer):
     class Meta:
         model = ClassRequest
         fields = [
-            'class_type', 'language_level',
+            'class_type', 'language_level', 'proposed_time',
             'session_count', 'session_duration', 'receipt', 'notes',
         ]
         extra_kwargs = {
@@ -121,17 +144,20 @@ class ClassRequestTeacherSerializer(serializers.ModelSerializer):
     """
     student_name = serializers.SerializerMethodField()
     has_accepted = serializers.SerializerMethodField()
+    is_assigned_to_me = serializers.SerializerMethodField()
     satisfaction = serializers.SerializerMethodField()
     satisfaction_text = serializers.SerializerMethodField()
     created_at_jalali = serializers.ReadOnlyField()
+    class_date_jalali = serializers.ReadOnlyField()
+    sessions = ClassSessionSerializer(many=True, read_only=True)
 
     class Meta:
         model = ClassRequest
         fields = [
             'id', 'student_name', 'class_type', 'custom_class_type',
-            'language_level', 'proposed_time', 'class_date',
-            'session_duration', 'session_count', 'total_price', 'teacher_share',
-            'status', 'has_accepted', 'is_completed',
+            'language_level', 'proposed_time', 'class_date', 'class_date_jalali',
+            'session_duration', 'session_count', 'sessions', 'total_price', 'teacher_share',
+            'status', 'has_accepted', 'is_assigned_to_me', 'is_completed',
             'satisfaction', 'satisfaction_text',
             'created_at', 'created_at_jalali',
         ]
@@ -145,11 +171,25 @@ class ClassRequestTeacherSerializer(serializers.ModelSerializer):
             return False
         return obj.accepted_teachers.filter(pk=request.user.pk).exists()
 
+    def get_is_assigned_to_me(self, obj):
+        request = self.context.get('request')
+        if not request or not request.user.is_authenticated:
+            return False
+        return obj.teacher_id == request.user.id
+
     def get_satisfaction(self, obj):
-        return obj.satisfaction if obj.satisfaction_approved else None
+        if not obj.satisfaction_approved:
+            return None
+        if not self.get_is_assigned_to_me(obj):
+            return None
+        return obj.satisfaction
 
     def get_satisfaction_text(self, obj):
-        return obj.satisfaction_text if obj.satisfaction_approved else None
+        if not obj.satisfaction_approved:
+            return None
+        if not self.get_is_assigned_to_me(obj):
+            return None
+        return obj.satisfaction_text
 
 
 class ClassRequestStudentSerializer(serializers.ModelSerializer):
@@ -159,13 +199,15 @@ class ClassRequestStudentSerializer(serializers.ModelSerializer):
     """
     teacher_name = serializers.SerializerMethodField()
     created_at_jalali = serializers.ReadOnlyField()
+    class_date_jalali = serializers.ReadOnlyField()
+    sessions = ClassSessionSerializer(many=True, read_only=True)
 
     class Meta:
         model = ClassRequest
         fields = [
             'id', 'teacher_name', 'class_type', 'custom_class_type',
-            'language_level', 'proposed_time', 'class_date',
-            'session_duration', 'session_count', 'amount', 'total_price',
+            'language_level', 'proposed_time', 'class_date', 'class_date_jalali',
+            'session_duration', 'session_count', 'sessions', 'amount', 'total_price',
             'payment_status', 'status', 'notes', 'receipt',
             'satisfaction', 'satisfaction_text',
             'created_at', 'created_at_jalali',

@@ -12,7 +12,9 @@ from .serializers import (
     ResetPasswordSerializer,
     UserProfileSerializer,
     TeacherSerializer,
-    PriceSettingSerializer
+    PriceSettingSerializer,
+    StudentSerializer,
+    UserRoleSerializer
 )
 
 
@@ -158,3 +160,49 @@ class PriceSettingView(APIView):
             serializer.save(updated_by=request.user)
             return Response(serializer.data)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+class StudentListView(generics.ListAPIView):
+    """لیست همه‌ی دانش‌آموزان (هم ثبت‌شده از کانتر، هم از طریق اپ) — فقط برای مدیر"""
+    permission_classes = [IsAuthenticated]
+    serializer_class = StudentSerializer
+
+    def get_queryset(self):
+        if self.request.user.role != 'admin':
+            return User.objects.none()
+        return User.objects.filter(role='student').order_by('-id')
+
+
+class StudentDetailView(generics.RetrieveUpdateAPIView):
+    """ویرایش مشخصات یک دانش‌آموز (نام، نام‌خانوادگی، موبایل، کد ملی، سطح) — فقط برای مدیر"""
+    permission_classes = [IsAuthenticated]
+    serializer_class = StudentSerializer
+
+    def get_queryset(self):
+        return User.objects.filter(role='student')
+
+    def update(self, request, *args, **kwargs):
+        if request.user.role != 'admin':
+            return Response({'error': 'فقط مدیر می‌تونه ویرایش کنه'}, status=status.HTTP_403_FORBIDDEN)
+        return super().update(request, *args, **kwargs)
+
+
+class UserRoleView(APIView):
+    """تغییر نقش هر کاربری (مثلاً ارتقای کاربری که از اپ ثبت‌نام کرده) — فقط برای مدیر"""
+    permission_classes = [IsAuthenticated]
+
+    def patch(self, request, pk):
+        if request.user.role != 'admin':
+            return Response({'error': 'فقط مدیر می‌تونه نقش رو تغییر بده'}, status=status.HTTP_403_FORBIDDEN)
+        try:
+            user = User.objects.get(pk=pk)
+        except User.DoesNotExist:
+            return Response({'error': 'کاربر پیدا نشد'}, status=status.HTTP_404_NOT_FOUND)
+
+        new_role = request.data.get('role')
+        if new_role not in [User.Role.ADMIN, User.Role.TEACHER, User.Role.STUDENT, User.Role.EVALUATOR]:
+            return Response({'error': 'نقش نامعتبر است'}, status=status.HTTP_400_BAD_REQUEST)
+
+        user.role = new_role
+        user.save()
+        return Response(UserRoleSerializer(user).data)

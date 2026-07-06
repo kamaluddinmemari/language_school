@@ -42,6 +42,8 @@ INSTALLED_APPS = [
     'accounts',
     'classes.apps.ClassesConfig',
     'notifications',
+    'group_classes',
+    'level_tests',
     'django_jalali',
 ]
 

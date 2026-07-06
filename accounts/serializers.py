@@ -15,6 +15,7 @@ class RegisterSerializer(serializers.ModelSerializer):
         write_only=True,
         required=True
     )
+    national_code = serializers.CharField(required=True, max_length=10)
 
     class Meta:
         model = User
@@ -55,6 +56,7 @@ class TeacherSerializer(serializers.ModelSerializer):
         password = validated_data.pop('password', None)
         validated_data['role'] = User.Role.TEACHER
         validated_data.setdefault('username', validated_data.get('phone'))
+        validated_data.setdefault('national_code', None)
         user = User(**validated_data)
         if password:
             user.set_password(password)
@@ -119,3 +121,23 @@ class PriceSettingSerializer(serializers.ModelSerializer):
             'teacher_share_percent', 'school_share_percent', 'updated_at'
         ]
         read_only_fields = ['updated_at']
+
+
+class StudentSerializer(serializers.ModelSerializer):
+    """نمایش اطلاعات دانش‌آموزان برای مدیر (هم آن‌هایی که از کانتر ثبت شدند هم از طریق اپ)"""
+
+    class Meta:
+        model = User
+        fields = [
+            'id', 'first_name', 'last_name', 'phone', 'phone2',
+            'national_code', 'language_level'
+        ]
+
+
+class UserRoleSerializer(serializers.ModelSerializer):
+    """برای تغییر نقش یک کاربر (مثلاً کاربری که از اپ ثبت‌نام کرده) توسط مدیر"""
+
+    class Meta:
+        model = User
+        fields = ['id', 'username', 'first_name', 'last_name', 'phone', 'role']
+        read_only_fields = ['id', 'username', 'first_name', 'last_name', 'phone']

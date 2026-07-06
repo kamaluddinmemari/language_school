@@ -1,8 +1,13 @@
 from django.db import models
 from django.contrib.auth.models import AbstractUser
-from django.core.validators import MinValueValidator, MaxValueValidator
+from django.core.validators import MinValueValidator, MaxValueValidator, RegexValidator
 from django.utils import timezone
 import jdatetime
+
+persian_only_validator = RegexValidator(
+    regex=r'^[\u0600-\u06FF\s\u200C]+$',
+    message='این فیلد فقط باید با حروف فارسی نوشته شود (نه انگلیسی یا اعداد لاتین).'
+)
 
 
 class User(AbstractUser):
@@ -11,13 +16,14 @@ class User(AbstractUser):
         ADMIN = 'admin', 'مدیر'
         TEACHER = 'teacher', 'معلم'
         STUDENT = 'student', 'دانش‌آموز'
+        EVALUATOR = 'evaluator', 'مدیر آموزش'
 
     role = models.CharField(max_length=10, choices=Role.choices, default=Role.STUDENT)
-    first_name = models.CharField(max_length=150)
-    last_name = models.CharField(max_length=150)
-    phone = models.CharField(max_length=11)
+    first_name = models.CharField(max_length=150, validators=[persian_only_validator])
+    last_name = models.CharField(max_length=150, validators=[persian_only_validator])
+    phone = models.CharField(max_length=11, unique=True)
     phone2 = models.CharField(max_length=11, blank=True)
-    national_code = models.CharField(max_length=10)
+    national_code = models.CharField(max_length=10, unique=True, null=True, blank=True)
     birth_date = models.DateField(null=True, blank=True)
     language_level = models.CharField(max_length=50, blank=True)
     teacher_level = models.CharField(max_length=50, blank=True)
@@ -77,9 +83,10 @@ class ClassRequest(models.Model):
     custom_class_type = models.CharField(max_length=100, blank=True)
     language_level = models.CharField(max_length=50)
     proposed_time = models.CharField(max_length=100, blank=True)
+    suggested_teacher_name = models.CharField(max_length=150, blank=True)
     class_date = models.DateTimeField(null=True, blank=True)
     class_date_approved = models.BooleanField(default=False)
-    session_duration = models.CharField(max_length=5, choices=SessionDuration.choices, default=SessionDuration.ONE_HOUR)
+    session_duration = models.CharField(max_length=5, choices=SessionDuration.choices, default=SessionDuration.ONE_HALF)
     session_count = models.PositiveIntegerField(default=1)
     total_price = models.PositiveIntegerField(default=0)
     teacher_share = models.PositiveIntegerField(default=0)
@@ -106,6 +113,22 @@ class ClassRequest(models.Model):
         if not self.created_at:
             return None
         local_dt = timezone.localtime(self.created_at)
+        return jdatetime.datetime.fromgregorian(datetime=local_dt).strftime('%Y/%m/%d - %H:%M')
+
+    @property
+    def completed_at_jalali(self):
+        """تاریخ و ساعت اتمام کلاس به شمسی"""
+        if not self.completed_at:
+            return None
+        local_dt = timezone.localtime(self.completed_at)
+        return jdatetime.datetime.fromgregorian(datetime=local_dt).strftime('%Y/%m/%d - %H:%M')
+
+    @property
+    def class_date_jalali(self):
+        """تاریخ و ساعت برگزاری کلاس به شمسی"""
+        if not self.class_date:
+            return None
+        local_dt = timezone.localtime(self.class_date)
         return jdatetime.datetime.fromgregorian(datetime=local_dt).strftime('%Y/%m/%d - %H:%M')
 
     def save(self, *args, **kwargs):

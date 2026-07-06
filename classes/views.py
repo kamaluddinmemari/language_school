@@ -1,30 +1,21 @@
 from rest_framework import generics, status
+from rest_framework.exceptions import PermissionDenied
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from django.utils import timezone
+from django.db.models import Q
 from accounts.models import ClassRequest, User
-from notifications.models import Notification
+from notifications.utils import send_notification
+from .models import ClassSession, ensure_sessions
 from .serializers import (
     ClassRequestAdminSerializer,
     ClassRequestAdminCreateSerializer,
     ClassRequestCreateSerializer,
     ClassRequestTeacherSerializer,
     ClassRequestStudentSerializer,
+    ClassSessionSerializer,
 )
-
-
-def send_notification(sender, recipients, title, body, notif_type='general'):
-    recipients = [r for r in recipients if r is not None]
-    if not recipients:
-        return
-    notif = Notification.objects.create(
-        sender=sender,
-        title=title,
-        body=body,
-        notif_type=notif_type
-    )
-    notif.recipients.set(recipients)
 
 
 class ClassRequestListCreateView(generics.ListCreateAPIView):
@@ -35,7 +26,7 @@ class ClassRequestListCreateView(generics.ListCreateAPIView):
             if self.request.user.role == 'admin':
                 return ClassRequestAdminCreateSerializer
             return ClassRequestCreateSerializer
-        if self.request.user.role == 'admin':
+        if self.request.user.role in ('admin', 'evaluator'):
             return ClassRequestAdminSerializer
         if self.request.user.role == 'teacher':
             return ClassRequestTeacherSerializer
@@ -43,7 +34,7 @@ class ClassRequestListCreateView(generics.ListCreateAPIView):
 
     def get_queryset(self):
         user = self.request.user
-        if user.role == 'admin':
+        if user.role in ('admin', 'evaluator'):
             return ClassRequest.objects.all().order_by('-created_at')
         elif user.role == 'teacher':
             from django.db.models import Q
@@ -53,6 +44,8 @@ class ClassRequestListCreateView(generics.ListCreateAPIView):
         return ClassRequest.objects.filter(student=user).order_by('-created_at')
 
     def perform_create(self, serializer):
+        if self.request.user.role == 'evaluator':
+            raise PermissionDenied('مدیر آموزش نمی‌تواند درخواست کلاس بسازد — فقط گزارش‌گیری/ویرایش/حذف')
         if self.request.user.role == 'admin':
             serializer.save()
         else:
@@ -67,7 +60,11 @@ class ClassRequestListCreateView(generics.ListCreateAPIView):
             )
 
 
-class ClassRequestDetailView(generics.RetrieveUpdateAPIView):
+class ClassRequestDetailView(generics.RetrieveUpdateDestroyAPIView):
+    """
+    گزارش‌گیری/ویرایش/حذف: مدیر روی هر کلاسی، مدیر آموزش هم مثل مدیر (فقط دسترسی گزارشی —
+    اکشن‌های گردش‌کاری مثل ارجاع/تایید/پرداخت جدا هستند و فقط مدیر می‌تواند آن‌ها را بزند).
+    """
     permission_classes = [IsAuthenticated]
 
     def get_serializer_class(self):
@@ -80,7 +77,7 @@ class ClassRequestDetailView(generics.RetrieveUpdateAPIView):
 
     def get_queryset(self):
         user = self.request.user
-        if user.role == 'admin':
+        if user.role in ('admin', 'evaluator'):
             return ClassRequest.objects.all()
         elif user.role == 'teacher':
             from django.db.models import Q
@@ -88,9 +85,14 @@ class ClassRequestDetailView(generics.RetrieveUpdateAPIView):
         return ClassRequest.objects.filter(student=user)
 
     def update(self, request, *args, **kwargs):
-        if request.user.role != 'admin':
-            return Response({'error': 'فقط مدیر می‌تونه ویرایش کنه'}, status=status.HTTP_403_FORBIDDEN)
+        if request.user.role not in ('admin', 'evaluator'):
+            return Response({'error': 'فقط مدیر یا مدیر آموزش می‌تونه ویرایش کنه'}, status=status.HTTP_403_FORBIDDEN)
         return super().update(request, *args, **kwargs)
+
+    def destroy(self, request, *args, **kwargs):
+        if request.user.role not in ('admin', 'evaluator'):
+            return Response({'error': 'فقط مدیر یا مدیر آموزش می‌تونه حذف کنه'}, status=status.HTTP_403_FORBIDDEN)
+        return super().destroy(request, *args, **kwargs)
 
 
 class AssignTeachersView(APIView):
@@ -205,6 +207,7 @@ class FinalizeClassView(APIView):
         class_request.teacher = chosen_teacher
         class_request.status = ClassRequest.Status.CONFIRMED
         class_request.save()
+        ensure_sessions(class_request)
 
         not_chosen = class_request.accepted_teachers.exclude(pk=chosen_teacher.pk)
         send_notification(
@@ -303,8 +306,9 @@ class CompleteClassView(APIView):
         except ClassRequest.DoesNotExist:
             return Response({'error': 'درخواست پیدا نشد'}, status=status.HTTP_404_NOT_FOUND)
 
+        completed_at = request.data.get('completed_at')
         class_request.is_completed = True
-        class_request.completed_at = timezone.now()
+        class_request.completed_at = completed_at if completed_at else timezone.now()
         class_request.save()
 
         admins = User.objects.filter(role='admin')
@@ -316,6 +320,88 @@ class CompleteClassView(APIView):
             notif_type='class_accepted'
         )
         return Response({'message': 'کلاس تموم شد — منتظر تایید مدیر'})
+
+
+class ClassSessionListView(APIView):
+    """لیست جلسات یک کلاس (برای کلاس‌هایی با بیش از یک جلسه). ردیف‌های ناموجود خودکار ساخته می‌شن."""
+    permission_classes = [IsAuthenticated]
+
+    def _get_class_request(self, request, pk):
+        user = request.user
+        if user.role == 'admin':
+            qs = ClassRequest.objects.all()
+        elif user.role == 'teacher':
+            qs = ClassRequest.objects.filter(Q(assigned_teachers=user) | Q(teacher=user)).distinct()
+        else:
+            qs = ClassRequest.objects.filter(student=user)
+        return qs.get(pk=pk)
+
+    def get(self, request, pk):
+        try:
+            class_request = self._get_class_request(request, pk)
+        except ClassRequest.DoesNotExist:
+            return Response({'error': 'درخواست پیدا نشد'}, status=status.HTTP_404_NOT_FOUND)
+        sessions = ensure_sessions(class_request)
+        return Response(ClassSessionSerializer(sessions, many=True).data)
+
+
+class ClassSessionUpdateView(APIView):
+    """
+    ثبت/ویرایش تاریخ و ساعت اتمام یک جلسه‌ی مشخص.
+    همیشه توسط استاد (کلاس خودش) یا مدیر قابل ویرایشه — حتی بعد از مختومه شدن کلاس.
+    وقتی همه‌ی جلسات تاریخ اتمام داشته باشن، کلاس خودکار «برگزار شده» علامت می‌خوره (منتظر تایید مدیر).
+    """
+    permission_classes = [IsAuthenticated]
+
+    def patch(self, request, pk, session_number):
+        user = request.user
+        if user.role not in ('admin', 'teacher'):
+            return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
+        try:
+            if user.role == 'admin':
+                class_request = ClassRequest.objects.get(pk=pk)
+            else:
+                class_request = ClassRequest.objects.filter(
+                    Q(assigned_teachers=user) | Q(teacher=user)
+                ).distinct().get(pk=pk)
+        except ClassRequest.DoesNotExist:
+            return Response({'error': 'درخواست پیدا نشد'}, status=status.HTTP_404_NOT_FOUND)
+
+        ensure_sessions(class_request)
+        try:
+            session = class_request.sessions.get(session_number=session_number)
+        except ClassSession.DoesNotExist:
+            return Response({'error': 'جلسه پیدا نشد'}, status=status.HTTP_404_NOT_FOUND)
+
+        completed_at = request.data.get('completed_at')
+        if completed_at is not None:
+            session.completed_at = completed_at or None
+        notes = request.data.get('notes')
+        if notes is not None:
+            session.notes = notes
+        session.completed_by = user
+        session.save()
+
+        total = class_request.session_count
+        done = class_request.sessions.filter(completed_at__isnull=False).count()
+        if done >= total and not class_request.is_completed:
+            class_request.is_completed = True
+            class_request.completed_at = timezone.now()
+            class_request.save()
+            admins = User.objects.filter(role='admin')
+            send_notification(
+                sender=user,
+                recipients=list(admins),
+                title='کلاس برگزار شد',
+                body='همه‌ی جلسات این کلاس ثبت شدند — منتظر تایید مدیر',
+                notif_type='class_accepted'
+            )
+        elif done < total and class_request.is_completed:
+            # اگر یکی از جلسات ویرایش و تاریخش پاک شد، حالت «برگزار شده» رو برگردون
+            class_request.is_completed = False
+            class_request.save()
+
+        return Response(ClassSessionSerializer(session).data)
 
 
 class AdminConfirmCompleteView(APIView):
@@ -352,18 +438,26 @@ class AdminConfirmCompleteView(APIView):
 
 
 class SatisfactionView(APIView):
-    """دانش‌آموز پس از اتمام کلاس به آن امتیاز می‌دهد"""
+    """دانش‌آموز پس از اتمام کلاس به آن امتیاز می‌دهد (یا مدیر، به‌جای دانش‌آموزی که اپ ندارد)"""
     permission_classes = [IsAuthenticated]
 
     def post(self, request, pk):
-        if request.user.role != 'student':
-            return Response({'error': 'فقط دانش‌آموز می‌تونه نظر بده'}, status=status.HTTP_403_FORBIDDEN)
-        try:
-            class_request = ClassRequest.objects.get(
-                pk=pk, student=request.user, status=ClassRequest.Status.COMPLETED
-            )
-        except ClassRequest.DoesNotExist:
-            return Response({'error': 'کلاس پیدا نشد'}, status=status.HTTP_404_NOT_FOUND)
+        if request.user.role == 'student':
+            try:
+                class_request = ClassRequest.objects.get(
+                    pk=pk, student=request.user, status=ClassRequest.Status.COMPLETED
+                )
+            except ClassRequest.DoesNotExist:
+                return Response({'error': 'کلاس پیدا نشد'}, status=status.HTTP_404_NOT_FOUND)
+        elif request.user.role == 'admin':
+            try:
+                class_request = ClassRequest.objects.get(
+                    pk=pk, status=ClassRequest.Status.COMPLETED
+                )
+            except ClassRequest.DoesNotExist:
+                return Response({'error': 'کلاس پیدا نشد'}, status=status.HTTP_404_NOT_FOUND)
+        else:
+            return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
 
         satisfaction = request.data.get('satisfaction')
         if not satisfaction or int(satisfaction) not in range(1, 6):
@@ -440,3 +534,66 @@ class PayTeacherView(APIView):
                 notif_type='general'
             )
         return Response({'message': 'پرداخت ثبت شد'})
+
+
+class ClassStatsView(APIView):
+    """
+    گزارش آمار تجمیعی کلاس‌های برگزار شده (مختومه) در یک بازه‌ی زمانی.
+    پارامترهای اختیاری: start_date و end_date (فرمت YYYY-MM-DD) — بر اساس تاریخ اتمام کلاس.
+    اگر داده نشوند، همه‌ی کلاس‌های مختومه در نظر گرفته می‌شوند.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        if request.user.role != 'admin':
+            return Response({'error': 'فقط مدیر به این گزارش دسترسی دارد'}, status=status.HTTP_403_FORBIDDEN)
+
+        queryset = ClassRequest.objects.filter(status=ClassRequest.Status.COMPLETED)
+
+        start_date = request.query_params.get('start_date')
+        end_date = request.query_params.get('end_date')
+        if start_date:
+            queryset = queryset.filter(completed_at__date__gte=start_date)
+        if end_date:
+            queryset = queryset.filter(completed_at__date__lte=end_date)
+
+        total_classes = queryset.count()
+        total_sessions = sum(c.session_count for c in queryset)
+        total_price = sum(c.total_price for c in queryset)
+        total_teacher_share = sum(c.teacher_share for c in queryset)
+        total_school_share = sum(c.school_share for c in queryset)
+
+        by_type = {}
+        for c in queryset:
+            key = c.class_type
+            if key not in by_type:
+                by_type[key] = {'count': 0, 'total_price': 0}
+            by_type[key]['count'] += 1
+            by_type[key]['total_price'] += c.total_price
+
+        by_teacher = {}
+        for c in queryset:
+            if not c.teacher:
+                continue
+            key = c.teacher.id
+            if key not in by_teacher:
+                by_teacher[key] = {
+                    'teacher_id': c.teacher.id,
+                    'teacher_name': c.teacher.get_full_name(),
+                    'count': 0,
+                    'total_teacher_share': 0,
+                }
+            by_teacher[key]['count'] += 1
+            by_teacher[key]['total_teacher_share'] += c.teacher_share
+
+        return Response({
+            'start_date': start_date,
+            'end_date': end_date,
+            'total_classes': total_classes,
+            'total_sessions': total_sessions,
+            'total_price': total_price,
+            'total_teacher_share': total_teacher_share,
+            'total_school_share': total_school_share,
+            'by_class_type': by_type,
+            'by_teacher': list(by_teacher.values()),
+        })
