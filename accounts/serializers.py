@@ -1,6 +1,7 @@
 from rest_framework import serializers
 from django.contrib.auth.password_validation import validate_password
 from .models import User, PriceSetting
+from .validators import username_validator, password_validator
 
 
 class RegisterSerializer(serializers.ModelSerializer):
@@ -9,7 +10,7 @@ class RegisterSerializer(serializers.ModelSerializer):
     password = serializers.CharField(
         write_only=True,
         required=True,
-        validators=[validate_password]
+        validators=[validate_password, password_validator]
     )
     password2 = serializers.CharField(
         write_only=True,
@@ -42,7 +43,7 @@ class RegisterSerializer(serializers.ModelSerializer):
 class TeacherSerializer(serializers.ModelSerializer):
     """ثبت/ویرایش اطلاعات استاد — فقط برای مدیر"""
 
-    password = serializers.CharField(write_only=True, required=False, validators=[validate_password])
+    password = serializers.CharField(write_only=True, required=False, validators=[validate_password, password_validator])
     average_rating = serializers.ReadOnlyField()
 
     class Meta:
@@ -84,7 +85,7 @@ class ResetPasswordSerializer(serializers.Serializer):
     code = serializers.CharField(max_length=6)
     new_password = serializers.CharField(
         write_only=True,
-        validators=[validate_password]
+        validators=[validate_password, password_validator]
     )
     new_password2 = serializers.CharField(write_only=True)
 
@@ -124,14 +125,59 @@ class PriceSettingSerializer(serializers.ModelSerializer):
 
 
 class StudentSerializer(serializers.ModelSerializer):
-    """نمایش اطلاعات دانش‌آموزان برای مدیر (هم آن‌هایی که از کانتر ثبت شدند هم از طریق اپ)"""
+    """
+    نمایش/ساخت/ویرایش اطلاعات دانش‌آموزان برای مدیر (هم آن‌هایی که از کانتر ثبت شدند هم از طریق اپ).
+    username/password اختیاری‌اند: اگر موقع ساخت پر نشوند، حساب بدون رمز قابل‌استفاده ساخته می‌شود
+    (بعداً هم از همین‌جا با ویرایش قابل تنظیم است).
+    """
+    username = serializers.CharField(required=False, allow_blank=True, validators=[username_validator])
+    password = serializers.CharField(write_only=True, required=False, allow_blank=True, validators=[password_validator])
+    has_app_account = serializers.SerializerMethodField()
 
     class Meta:
         model = User
         fields = [
-            'id', 'first_name', 'last_name', 'phone', 'phone2',
-            'national_code', 'language_level'
+            'id', 'first_name', 'last_name', 'father_name', 'phone', 'phone2',
+            'national_code', 'birth_date', 'language_level',
+            'username', 'password', 'has_app_account',
         ]
+
+    def get_has_app_account(self, obj):
+        return obj.has_usable_password()
+
+    def validate_username(self, value):
+        if not value:
+            return value
+        qs = User.objects.filter(username=value)
+        if self.instance:
+            qs = qs.exclude(pk=self.instance.pk)
+        if qs.exists():
+            raise serializers.ValidationError('این نام کاربری قبلاً استفاده شده است')
+        return value
+
+    def create(self, validated_data):
+        password = validated_data.pop('password', '')
+        username = validated_data.pop('username', '') or validated_data.get('phone')
+        validated_data['role'] = User.Role.STUDENT
+        user = User(username=username, **validated_data)
+        if password:
+            user.set_password(password)
+        else:
+            user.set_unusable_password()
+        user.save()
+        return user
+
+    def update(self, instance, validated_data):
+        password = validated_data.pop('password', None)
+        username = validated_data.pop('username', None)
+        if username:
+            instance.username = username
+        for attr, value in validated_data.items():
+            setattr(instance, attr, value)
+        if password:
+            instance.set_password(password)
+        instance.save()
+        return instance
 
 
 class UserRoleSerializer(serializers.ModelSerializer):

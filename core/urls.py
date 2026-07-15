@@ -16,6 +16,10 @@ urlpatterns = [
     path('api/', include('notifications.urls')),
     path('api/', include('group_classes.urls')),
     path('api/', include('level_tests.urls')),
+    path('api/', include('staff_messages.urls')),
+    path('api/', include('library.urls')),
+    path('api/', include('leads.urls')),
+    path('api/', include('class_management.urls')),
 ]
 
 if settings.DEBUG:

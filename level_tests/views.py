@@ -109,8 +109,16 @@ class LevelTestDetailView(APIView):
             return Response({'error': 'پیدا نشد'}, status=status.HTTP_404_NOT_FOUND)
 
         data = request.data.copy()
-        if data.get('level') and not data.get('evaluator') and not obj.evaluator:
-            data['evaluator'] = user.id
+        # وقتی خودِ مدیر (نه یک حساب با نقش evaluator) نتیجه را ثبت می‌کند، فیلد FK اسم «evaluator»
+        # طبق طراحی فقط به حساب‌های نقش evaluator اجازه می‌دهد (limit_choices_to روی مدل) — پس
+        # نباید مدیر را در آن FK بگذاریم (باعث خطای «Invalid pk» می‌شود)، به‌جایش در فیلد متنی
+        # evaluator_name (که دقیقاً برای همین حالت طراحی شده) اسمش را ثبت می‌کنیم.
+        if data.get('level') and not data.get('evaluator') and not data.get('evaluator_name') \
+                and not obj.evaluator and not obj.evaluator_name:
+            if user.role == 'evaluator':
+                data['evaluator'] = user.id
+            else:
+                data['evaluator_name'] = f"{user.first_name} {user.last_name}"
         if data.get('level') and not data.get('test_date') and not obj.test_date:
             data['test_date'] = timezone.now().isoformat()
 

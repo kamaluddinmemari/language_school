@@ -1,5 +1,6 @@
 from rest_framework import serializers
 from accounts.models import ClassRequest, User, persian_only_validator
+from accounts.validators import username_validator, password_validator
 from .models import ClassSession
 
 
@@ -85,8 +86,8 @@ class ClassRequestAdminCreateSerializer(serializers.Serializer):
     )
     notes = serializers.CharField(required=False, allow_blank=True)
     suggested_teacher_name = serializers.CharField(max_length=150, required=False, allow_blank=True)
-    username = serializers.CharField(max_length=150, required=False, allow_blank=True)
-    password = serializers.CharField(max_length=128, required=False, allow_blank=True)
+    username = serializers.CharField(max_length=150, required=False, allow_blank=True, validators=[username_validator])
+    password = serializers.CharField(max_length=128, required=False, allow_blank=True, validators=[password_validator])
 
     def create(self, validated_data):
         phone = validated_data.pop('phone')

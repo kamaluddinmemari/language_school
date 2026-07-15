@@ -101,7 +101,7 @@ class TeacherListCreateView(generics.ListCreateAPIView):
     def get_queryset(self):
         if self.request.user.role != 'admin':
             return User.objects.none()
-        return User.objects.filter(role='teacher')
+        return User.objects.filter(role__in=User.TEACHER_LIKE_ROLES)
 
     def create(self, request, *args, **kwargs):
         if request.user.role != 'admin':
@@ -114,7 +114,7 @@ class TeacherDetailView(generics.RetrieveUpdateDestroyAPIView):
     serializer_class = TeacherSerializer
 
     def get_queryset(self):
-        return User.objects.filter(role='teacher')
+        return User.objects.filter(role__in=User.TEACHER_LIKE_ROLES)
 
     def check_admin(self, request):
         if request.user.role != 'admin':
@@ -162,8 +162,8 @@ class PriceSettingView(APIView):
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 
-class StudentListView(generics.ListAPIView):
-    """لیست همه‌ی دانش‌آموزان (هم ثبت‌شده از کانتر، هم از طریق اپ) — فقط برای مدیر"""
+class StudentListView(generics.ListCreateAPIView):
+    """لیست + افزودن دانش‌آموز جدید (هم آن‌هایی که از کانتر ثبت شدند هم از طریق اپ) — فقط برای مدیر"""
     permission_classes = [IsAuthenticated]
     serializer_class = StudentSerializer
 
@@ -172,9 +172,14 @@ class StudentListView(generics.ListAPIView):
             return User.objects.none()
         return User.objects.filter(role='student').order_by('-id')
 
+    def create(self, request, *args, **kwargs):
+        if request.user.role != 'admin':
+            return Response({'error': 'فقط مدیر می‌تونه دانش‌آموز اضافه کنه'}, status=status.HTTP_403_FORBIDDEN)
+        return super().create(request, *args, **kwargs)
 
-class StudentDetailView(generics.RetrieveUpdateAPIView):
-    """ویرایش مشخصات یک دانش‌آموز (نام، نام‌خانوادگی، موبایل، کد ملی، سطح) — فقط برای مدیر"""
+
+class StudentDetailView(generics.RetrieveUpdateDestroyAPIView):
+    """ویرایش/حذف مشخصات یک دانش‌آموز (نام، نام‌خانوادگی، موبایل، کد ملی، سطح) — فقط برای مدیر"""
     permission_classes = [IsAuthenticated]
     serializer_class = StudentSerializer
 
@@ -185,6 +190,11 @@ class StudentDetailView(generics.RetrieveUpdateAPIView):
         if request.user.role != 'admin':
             return Response({'error': 'فقط مدیر می‌تونه ویرایش کنه'}, status=status.HTTP_403_FORBIDDEN)
         return super().update(request, *args, **kwargs)
+
+    def destroy(self, request, *args, **kwargs):
+        if request.user.role != 'admin':
+            return Response({'error': 'فقط مدیر می‌تونه حذف کنه'}, status=status.HTTP_403_FORBIDDEN)
+        return super().destroy(request, *args, **kwargs)
 
 
 class UserRoleView(APIView):
@@ -206,3 +216,56 @@ class UserRoleView(APIView):
         user.role = new_role
         user.save()
         return Response(UserRoleSerializer(user).data)
+
+
+class PeopleSearchView(APIView):
+    """
+    جستجوی سراسری افراد بر اساس کد ملی، نام، یا نام‌خانوادگی، برای پرکردن خودکار فرم‌ها با اطلاعات
+    قبلاً ثبت‌شده (دانش‌آموزان، لیست انتظار ورودی جدید، زبان‌آموزان ثبت‌نام‌نشده، بدهکاران) —
+    تا کاربر مجبور به تایپ دوباره‌ی اطلاعات یک نفر که قبلاً جایی ثبت شده نباشد.
+    فقط برای مدیر/مسئول آموزش (کسانی که این فرم‌ها را پر می‌کنند).
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        if request.user.role not in ('admin', 'evaluator'):
+            return Response([])
+        q = request.query_params.get('q', '').strip()
+        if len(q) < 2:
+            return Response([])
+
+        from django.db.models import Q
+        results = []
+        seen = set()
+
+        def add(first_name, last_name, father_name, national_code, phone, phone2, source):
+            key = (national_code or '', phone or '', first_name, last_name)
+            if key in seen:
+                return
+            seen.add(key)
+            results.append({
+                'first_name': first_name, 'last_name': last_name, 'father_name': father_name or '',
+                'national_code': national_code or '', 'phone': phone or '', 'phone2': phone2 or '',
+                'source': source,
+            })
+
+        students = User.objects.filter(role='student').filter(
+            Q(national_code__icontains=q) | Q(last_name__icontains=q) | Q(first_name__icontains=q)
+        )[:8]
+        for s in students:
+            add(s.first_name, s.last_name, s.father_name, s.national_code, s.phone, s.phone2, 'دانش‌آموز')
+
+        try:
+            from leads.models import NewLead, UnregisteredStudent, Debtor, DiscountedPerson
+            for lead in NewLead.objects.filter(Q(national_code__icontains=q) | Q(last_name__icontains=q) | Q(first_name__icontains=q))[:8]:
+                add(lead.first_name, lead.last_name, lead.father_name, lead.national_code, lead.phone, '', 'لیست انتظار')
+            for us in UnregisteredStudent.objects.filter(Q(national_code__icontains=q) | Q(last_name__icontains=q) | Q(first_name__icontains=q))[:8]:
+                add(us.first_name, us.last_name, '', us.national_code, us.phone, '', 'ثبت‌نام‌نشده')
+            for d in Debtor.objects.filter(Q(last_name__icontains=q) | Q(first_name__icontains=q))[:8]:
+                add(d.first_name, d.last_name, '', '', d.phone, '', 'بدهکار')
+            for dp in DiscountedPerson.objects.filter(Q(national_code__icontains=q) | Q(last_name__icontains=q) | Q(first_name__icontains=q))[:8]:
+                add(dp.first_name, dp.last_name, '', dp.national_code, '', '', 'دارای تخفیف')
+        except ImportError:
+            pass
+
+        return Response(results[:10])

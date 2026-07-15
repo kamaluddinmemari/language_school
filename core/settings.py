@@ -44,6 +44,10 @@ INSTALLED_APPS = [
     'notifications',
     'group_classes',
     'level_tests',
+    'staff_messages',
+    'library',
+    'leads',
+    'class_management',
     'django_jalali',
 ]
 

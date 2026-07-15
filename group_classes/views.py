@@ -4,17 +4,24 @@ from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from django.utils import timezone
 from django.db.models import Q
+from django.core.exceptions import ValidationError as DjangoValidationError
 from accounts.models import User
+from accounts.validators import username_validator, password_validator
 from notifications.utils import send_notification
-from .models import GroupSession, GroupSessionParticipant, GroupSessionMeeting, GroupPriceSetting, ensure_meetings
+from .models import (
+    GroupSession, GroupSessionParticipant, GroupSessionMeeting, GroupPriceSetting,
+    GroupSessionAttendance, ensure_meetings, ensure_attendance_rows,
+)
 from .serializers import (
     GroupSessionAdminSerializer,
     GroupSessionCreateSerializer,
     GroupSessionTeacherSerializer,
     GroupSessionStudentSerializer,
     GroupSessionMeetingSerializer,
+    GroupSessionMeetingDetailSerializer,
     ParticipantSerializer,
     GroupPriceSettingSerializer,
+    AttendanceSerializer,
 )
 
 
@@ -22,7 +29,7 @@ def _serializer_for(request, instance=None, many=False):
     role = request.user.role
     if role in ('admin', 'evaluator'):
         return GroupSessionAdminSerializer
-    if role == 'teacher':
+    if role in User.TEACHER_LIKE_ROLES:
         return GroupSessionTeacherSerializer
     return GroupSessionStudentSerializer
 
@@ -34,7 +41,7 @@ class GroupSessionListCreateView(APIView):
         user = request.user
         if user.role in ('admin', 'evaluator'):
             qs = GroupSession.objects.all()
-        elif user.role == 'teacher':
+        elif user.role in User.TEACHER_LIKE_ROLES:
             qs = GroupSession.objects.filter(Q(assigned_teachers=user) | Q(teacher=user)).distinct()
         else:
             qs = GroupSession.objects.filter(Q(status=GroupSession.Status.OPEN) | Q(participants__student=user)).distinct()
@@ -62,7 +69,7 @@ class GroupSessionDetailView(APIView):
         user = request.user
         if user.role in ('admin', 'evaluator'):
             qs = GroupSession.objects.all()
-        elif user.role == 'teacher':
+        elif user.role in User.TEACHER_LIKE_ROLES:
             qs = GroupSession.objects.filter(Q(assigned_teachers=user) | Q(teacher=user)).distinct()
         else:
             qs = GroupSession.objects.filter(Q(status=GroupSession.Status.OPEN) | Q(participants__student=user)).distinct()
@@ -111,13 +118,19 @@ class JoinGroupSessionView(APIView):
         except GroupSession.DoesNotExist:
             return Response({'error': 'جلسه پیدا نشد'}, status=status.HTTP_404_NOT_FOUND)
 
-        if group_session.status != GroupSession.Status.OPEN:
-            return Response({'error': 'ثبت‌نام این جلسه بسته شده'}, status=status.HTTP_400_BAD_REQUEST)
-        if group_session.seats_left <= 0:
-            return Response({'error': 'ظرفیت این جلسه تکمیل شده'}, status=status.HTTP_400_BAD_REQUEST)
-
         user = request.user
-        if user.role == 'admin':
+        is_staff = user.role in ('admin', 'evaluator')
+
+        # مدیر/مسئول آموزش می‌توانند در هر وضعیتی (حتی بعد از بسته‌شدن ثبت‌نام یا تایید نهایی) نفر
+        # اضافه کنند — چون ممکن است بعد از شروع دوره هم لازم باشد کسی به کلاس اضافه شود.
+        # فقط ثبت‌نام مستقیم خودِ دانش‌آموز (از اپ) باید همچنان به وضعیت «باز» و ظرفیت خالی محدود بماند.
+        if not is_staff:
+            if group_session.status != GroupSession.Status.OPEN:
+                return Response({'error': 'ثبت‌نام این جلسه بسته شده'}, status=status.HTTP_400_BAD_REQUEST)
+            if group_session.seats_left <= 0:
+                return Response({'error': 'ظرفیت این جلسه تکمیل شده'}, status=status.HTTP_400_BAD_REQUEST)
+
+        if is_staff:
             student_id = request.data.get('student_id')
             if student_id:
                 try:
@@ -130,18 +143,26 @@ class JoinGroupSessionView(APIView):
                 last_name = request.data.get('last_name')
                 if not (phone and first_name and last_name):
                     return Response({'error': 'شماره موبایل و نام و نام‌خانوادگی لازم است'}, status=status.HTTP_400_BAD_REQUEST)
+                username = request.data.get('username') or phone
+                password = request.data.get('password')
+                try:
+                    username_validator(username)
+                    if password:
+                        password_validator(password)
+                except DjangoValidationError as exc:
+                    return Response({'error': ' / '.join(exc.messages)}, status=status.HTTP_400_BAD_REQUEST)
                 student, created = User.objects.get_or_create(
                     phone=phone,
                     defaults={
-                        'username': request.data.get('username') or phone,
+                        'username': username,
                         'first_name': first_name,
                         'last_name': last_name,
                         'national_code': request.data.get('national_code'),
+                        'language_level': request.data.get('language_level', ''),
                         'role': User.Role.STUDENT,
                     }
                 )
                 if created:
-                    password = request.data.get('password')
                     if password:
                         student.set_password(password)
                     else:
@@ -220,7 +241,7 @@ class AssignTeachersView(APIView):
             return Response({'error': 'جلسه پیدا نشد یا در مرحله‌ی ارجاع نیست'}, status=status.HTTP_404_NOT_FOUND)
 
         teacher_ids = request.data.get('teacher_ids', [])
-        teachers = User.objects.filter(pk__in=teacher_ids, role='teacher')
+        teachers = User.objects.filter(pk__in=teacher_ids, role__in=User.TEACHER_LIKE_ROLES)
         group_session.assigned_teachers.set(teachers)
         group_session.save()
 
@@ -239,7 +260,7 @@ class TeacherAcceptView(APIView):
 
     def post(self, request, pk):
         user = request.user
-        if user.role != 'teacher':
+        if user.role not in User.TEACHER_LIKE_ROLES:
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         try:
             group_session = GroupSession.objects.filter(assigned_teachers=user, status=GroupSession.Status.ASSIGNING).get(pk=pk)
@@ -261,7 +282,7 @@ class TeacherDeclineView(APIView):
 
     def post(self, request, pk):
         user = request.user
-        if user.role != 'teacher':
+        if user.role not in User.TEACHER_LIKE_ROLES:
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         try:
             group_session = GroupSession.objects.filter(assigned_teachers=user).get(pk=pk)
@@ -331,7 +352,7 @@ class GroupSessionMeetingListView(APIView):
         try:
             if user.role == 'admin':
                 group_session = GroupSession.objects.get(pk=pk)
-            elif user.role == 'teacher':
+            elif user.role in User.TEACHER_LIKE_ROLES:
                 group_session = GroupSession.objects.filter(Q(assigned_teachers=user) | Q(teacher=user)).distinct().get(pk=pk)
             else:
                 group_session = GroupSession.objects.filter(participants__student=user).get(pk=pk)
@@ -393,6 +414,49 @@ class GroupSessionMeetingUpdateView(APIView):
             group_session.save()
 
         return Response(GroupSessionMeetingSerializer(meeting).data)
+
+
+class GroupSessionAttendanceUpdateView(APIView):
+    """
+    ثبت/ویرایش حضور و غیاب + وضعیت پرداخت یک شرکت‌کننده‌ی مشخص برای یک جلسه‌ی مجزا.
+    قابل استفاده توسط مدیر یا استاد ارجاع‌شده/نهایی همان دوره — هم از پنل وب هم از اپ استاد.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def patch(self, request, pk, meeting_number, participant_id):
+        user = request.user
+        if user.role not in ('admin', 'teacher', 'evaluator'):
+            return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
+        try:
+            if user.role in ('admin', 'evaluator'):
+                group_session = GroupSession.objects.get(pk=pk)
+            else:
+                group_session = GroupSession.objects.filter(Q(assigned_teachers=user) | Q(teacher=user)).distinct().get(pk=pk)
+        except GroupSession.DoesNotExist:
+            return Response({'error': 'جلسه پیدا نشد'}, status=status.HTTP_404_NOT_FOUND)
+
+        ensure_meetings(group_session)
+        try:
+            meeting = group_session.meetings.get(meeting_number=meeting_number)
+        except GroupSessionMeeting.DoesNotExist:
+            return Response({'error': 'جلسه پیدا نشد'}, status=status.HTTP_404_NOT_FOUND)
+        try:
+            participant = group_session.participants.get(pk=participant_id)
+        except GroupSessionParticipant.DoesNotExist:
+            return Response({'error': 'شرکت‌کننده پیدا نشد'}, status=status.HTTP_404_NOT_FOUND)
+
+        attendance, _ = GroupSessionAttendance.objects.get_or_create(meeting=meeting, participant=participant)
+
+        status_value = request.data.get('status')
+        if status_value is not None:
+            if status_value not in GroupSessionAttendance.Status.values:
+                return Response({'error': 'وضعیت نامعتبر است'}, status=status.HTTP_400_BAD_REQUEST)
+            attendance.status = status_value
+        if 'paid' in request.data:
+            attendance.paid = bool(request.data.get('paid'))
+        attendance.updated_by = user
+        attendance.save()
+        return Response(AttendanceSerializer(attendance).data)
 
 
 class AdminConfirmCompleteView(APIView):

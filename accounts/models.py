@@ -3,6 +3,7 @@ from django.contrib.auth.models import AbstractUser
 from django.core.validators import MinValueValidator, MaxValueValidator, RegexValidator
 from django.utils import timezone
 import jdatetime
+from .validators import username_validator
 
 persian_only_validator = RegexValidator(
     regex=r'^[\u0600-\u06FF\s\u200C]+$',
@@ -18,9 +19,18 @@ class User(AbstractUser):
         STUDENT = 'student', 'دانش‌آموز'
         EVALUATOR = 'evaluator', 'مدیر آموزش'
 
+    # نقش‌هایی که باید مثل استاد در لیست اساتید دیده بشن و بتونن کلاس بگیرن/تدریس کنن.
+    # مدیر آموزش هم استاد محسوب می‌شه (اشتراکی، یک‌طرفه) — عکسش صادق نیست، یک استاد ساده مدیر آموزش نیست.
+    TEACHER_LIKE_ROLES = ['teacher', 'evaluator']
+
+    # override می‌کنیم چون AbstractUser پیش‌فرض یونیکد (شامل حروف فارسی) رو قبول می‌کنه؛
+    # طبق تصمیم کارفرما، نام کاربری فقط باید حروف/اعداد/کاراکترهای انگلیسی باشد.
+    username = models.CharField(max_length=150, unique=True, validators=[username_validator])
+
     role = models.CharField(max_length=10, choices=Role.choices, default=Role.STUDENT)
     first_name = models.CharField(max_length=150, validators=[persian_only_validator])
     last_name = models.CharField(max_length=150, validators=[persian_only_validator])
+    father_name = models.CharField(max_length=150, blank=True, validators=[persian_only_validator])
     phone = models.CharField(max_length=11, unique=True)
     phone2 = models.CharField(max_length=11, blank=True)
     national_code = models.CharField(max_length=10, unique=True, null=True, blank=True)
@@ -76,9 +86,9 @@ class ClassRequest(models.Model):
         OTHER = 'other', 'سایر'
 
     student = models.ForeignKey(User, on_delete=models.CASCADE, related_name='requests', limit_choices_to={'role': 'student'})
-    teacher = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='assigned_classes', limit_choices_to={'role': 'teacher'})
-    assigned_teachers = models.ManyToManyField(User, blank=True, related_name='referred_classes', limit_choices_to={'role': 'teacher'})
-    accepted_teachers = models.ManyToManyField(User, blank=True, related_name='accepted_classes', limit_choices_to={'role': 'teacher'})
+    teacher = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='assigned_classes', limit_choices_to={'role__in': User.TEACHER_LIKE_ROLES})
+    assigned_teachers = models.ManyToManyField(User, blank=True, related_name='referred_classes', limit_choices_to={'role__in': User.TEACHER_LIKE_ROLES})
+    accepted_teachers = models.ManyToManyField(User, blank=True, related_name='accepted_classes', limit_choices_to={'role__in': User.TEACHER_LIKE_ROLES})
     class_type = models.CharField(max_length=10, choices=ClassType.choices, default=ClassType.PRIVATE)
     custom_class_type = models.CharField(max_length=100, blank=True)
     language_level = models.CharField(max_length=50)

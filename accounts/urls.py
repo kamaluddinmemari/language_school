@@ -9,7 +9,8 @@ from .views import (
     PriceSettingView,
     StudentListView,
     StudentDetailView,
-    UserRoleView
+    UserRoleView,
+    PeopleSearchView,
 )
 
 urlpatterns = [
@@ -22,5 +23,6 @@ urlpatterns = [
     path('price-settings/', PriceSettingView.as_view(), name='price_settings'),
     path('students/', StudentListView.as_view(), name='student_list'),
     path('students/<int:pk>/', StudentDetailView.as_view(), name='student_detail'),
+    path('people-search/', PeopleSearchView.as_view(), name='people_search'),
     path('users/<int:pk>/role/', UserRoleView.as_view(), name='user_role'),
 ]

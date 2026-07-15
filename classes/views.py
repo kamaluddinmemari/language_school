@@ -28,7 +28,7 @@ class ClassRequestListCreateView(generics.ListCreateAPIView):
             return ClassRequestCreateSerializer
         if self.request.user.role in ('admin', 'evaluator'):
             return ClassRequestAdminSerializer
-        if self.request.user.role == 'teacher':
+        if self.request.user.role in User.TEACHER_LIKE_ROLES:
             return ClassRequestTeacherSerializer
         return ClassRequestStudentSerializer
 
@@ -36,7 +36,7 @@ class ClassRequestListCreateView(generics.ListCreateAPIView):
         user = self.request.user
         if user.role in ('admin', 'evaluator'):
             return ClassRequest.objects.all().order_by('-created_at')
-        elif user.role == 'teacher':
+        elif user.role in User.TEACHER_LIKE_ROLES:
             from django.db.models import Q
             return ClassRequest.objects.filter(
                 Q(assigned_teachers=user) | Q(teacher=user)
@@ -69,7 +69,7 @@ class ClassRequestDetailView(generics.RetrieveUpdateDestroyAPIView):
 
     def get_serializer_class(self):
         user = self.request.user
-        if user.role == 'teacher':
+        if user.role in User.TEACHER_LIKE_ROLES:
             return ClassRequestTeacherSerializer
         if user.role == 'student':
             return ClassRequestStudentSerializer
@@ -79,7 +79,7 @@ class ClassRequestDetailView(generics.RetrieveUpdateDestroyAPIView):
         user = self.request.user
         if user.role in ('admin', 'evaluator'):
             return ClassRequest.objects.all()
-        elif user.role == 'teacher':
+        elif user.role in User.TEACHER_LIKE_ROLES:
             from django.db.models import Q
             return ClassRequest.objects.filter(Q(assigned_teachers=user) | Q(teacher=user)).distinct()
         return ClassRequest.objects.filter(student=user)
@@ -111,7 +111,7 @@ class AssignTeachersView(APIView):
             return Response({'error': 'این کلاس در مرحله‌ای نیست که قابل ارجاع باشد'}, status=status.HTTP_400_BAD_REQUEST)
 
         teacher_ids = request.data.get('teacher_ids', [])
-        teachers = list(User.objects.filter(id__in=teacher_ids, role='teacher'))
+        teachers = list(User.objects.filter(id__in=teacher_ids, role__in=User.TEACHER_LIKE_ROLES))
         if not teachers:
             return Response({'error': 'حداقل یک استاد معتبر باید انتخاب شود'}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -135,7 +135,7 @@ class TeacherAcceptView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request, pk):
-        if request.user.role != 'teacher':
+        if request.user.role not in User.TEACHER_LIKE_ROLES:
             return Response({'error': 'فقط استاد می‌تونه قبول کنه'}, status=status.HTTP_403_FORBIDDEN)
         try:
             class_request = ClassRequest.objects.get(
@@ -162,7 +162,7 @@ class TeacherDeclineView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request, pk):
-        if request.user.role != 'teacher':
+        if request.user.role not in User.TEACHER_LIKE_ROLES:
             return Response({'error': 'فقط استاد می‌تونه رد کنه'}, status=status.HTTP_403_FORBIDDEN)
         try:
             class_request = ClassRequest.objects.get(pk=pk, assigned_teachers=request.user)
@@ -297,7 +297,7 @@ class CompleteClassView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request, pk):
-        if request.user.role != 'teacher':
+        if request.user.role not in User.TEACHER_LIKE_ROLES:
             return Response({'error': 'فقط استاد می‌تونه کلاس رو تموم کنه'}, status=status.HTTP_403_FORBIDDEN)
         try:
             class_request = ClassRequest.objects.get(
@@ -330,7 +330,7 @@ class ClassSessionListView(APIView):
         user = request.user
         if user.role == 'admin':
             qs = ClassRequest.objects.all()
-        elif user.role == 'teacher':
+        elif user.role in User.TEACHER_LIKE_ROLES:
             qs = ClassRequest.objects.filter(Q(assigned_teachers=user) | Q(teacher=user)).distinct()
         else:
             qs = ClassRequest.objects.filter(student=user)

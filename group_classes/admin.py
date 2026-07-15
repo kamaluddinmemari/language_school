@@ -1,5 +1,5 @@
 from django.contrib import admin
-from .models import GroupSession, GroupSessionParticipant, GroupSessionMeeting, GroupPriceSetting
+from .models import GroupSession, GroupSessionParticipant, GroupSessionMeeting, GroupPriceSetting, GroupSessionAttendance
 
 
 @admin.register(GroupSession)
@@ -21,3 +21,9 @@ class GroupSessionMeetingAdmin(admin.ModelAdmin):
 @admin.register(GroupPriceSetting)
 class GroupPriceSettingAdmin(admin.ModelAdmin):
     list_display = ('price_for_two', 'price_for_three_plus', 'teacher_share_percent', 'school_share_percent', 'updated_at')
+
+
+@admin.register(GroupSessionAttendance)
+class GroupSessionAttendanceAdmin(admin.ModelAdmin):
+    list_display = ('meeting', 'participant', 'status', 'paid', 'updated_at')
+    list_filter = ('status', 'paid')

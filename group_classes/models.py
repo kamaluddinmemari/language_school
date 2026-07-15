@@ -55,10 +55,18 @@ class GroupSession(models.Model):
     session_count = models.PositiveIntegerField(default=1)
     capacity = models.PositiveIntegerField(validators=[MinValueValidator(2)])
     price_per_person = models.PositiveIntegerField(null=True, blank=True, help_text='فقط برای ورکشاپ؛ می‌تواند ۰ (رایگان) باشد')
+    price_per_session = models.PositiveIntegerField(
+        null=True, blank=True,
+        help_text='قیمت هرنفر برای هر جلسه (اختیاری). اگر پر شود، قیمت کل هرنفر = این مقدار × تعداد جلسات'
+    )
+    teacher_share_percent_override = models.PositiveIntegerField(
+        null=True, blank=True,
+        help_text='درصد اختصاصی سهم استاد برای همین جلسه (اختیاری). اگر خالی باشد، از تنظیمات مشترک استفاده می‌شود'
+    )
 
-    assigned_teachers = models.ManyToManyField(User, blank=True, related_name='group_sessions_referred', limit_choices_to={'role': 'teacher'})
-    accepted_teachers = models.ManyToManyField(User, blank=True, related_name='group_sessions_accepted', limit_choices_to={'role': 'teacher'})
-    teacher = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='group_sessions_teaching', limit_choices_to={'role': 'teacher'})
+    assigned_teachers = models.ManyToManyField(User, blank=True, related_name='group_sessions_referred', limit_choices_to={'role__in': User.TEACHER_LIKE_ROLES})
+    accepted_teachers = models.ManyToManyField(User, blank=True, related_name='group_sessions_accepted', limit_choices_to={'role__in': User.TEACHER_LIKE_ROLES})
+    teacher = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='group_sessions_teaching', limit_choices_to={'role__in': User.TEACHER_LIKE_ROLES})
 
     status = models.CharField(max_length=15, choices=Status.choices, default=Status.OPEN)
     notes = models.TextField(blank=True)
@@ -97,8 +105,23 @@ class GroupSession(models.Model):
     def seats_left(self):
         return max(self.capacity - self.participant_count, 0)
 
+    def get_price_per_session_amount(self):
+        """قیمت هرنفر برای یک جلسه — اگر تنظیم اختصاصی شده باشد همان، وگرنه قیمت کل هرنفر تقسیم بر تعداد جلسات"""
+        if self.price_per_session is not None:
+            return self.price_per_session
+        if self.session_count:
+            return int(round(self.get_price_per_person() / self.session_count))
+        return self.get_price_per_person()
+
     def get_price_per_person(self):
-        """قیمت نهایی هرنفر — برای ورکشاپ مستقیم از خود جلسه، برای خصوصی گروهی پلکانی از تنظیمات مشترک"""
+        """
+        قیمت نهایی هرنفر برای کل دوره.
+        اگر `price_per_session` تنظیم شده باشد (قابلیت تنظیم مجزا برای هر ورکشاپ/کلاس گروهی)،
+        قیمت کل = قیمت هر جلسه × تعداد جلسات. در غیر این صورت رفتار قبلی حفظ می‌شود:
+        برای ورکشاپ مستقیم از خود جلسه، برای خصوصی گروهی پلکانی از تنظیمات مشترک.
+        """
+        if self.price_per_session is not None:
+            return self.price_per_session * self.session_count
         if self.session_type == self.SessionType.WORKSHOP:
             return self.price_per_person or 0
         setting = GroupPriceSetting.objects.order_by('-updated_at').first()
@@ -114,10 +137,16 @@ class GroupSession(models.Model):
         return self.get_price_per_person() * self.participant_count
 
     @property
-    def teacher_share(self):
+    def teacher_share_percent_effective(self):
+        """درصد سهم استاد که واقعاً اعمال می‌شود — اختصاصی این جلسه، یا تنظیمات مشترک به‌عنوان پیش‌فرض"""
+        if self.teacher_share_percent_override is not None:
+            return self.teacher_share_percent_override
         setting = GroupPriceSetting.objects.order_by('-updated_at').first()
-        percent = setting.teacher_share_percent if setting else 70
-        return int(self.total_price * percent / 100)
+        return setting.teacher_share_percent if setting else 70
+
+    @property
+    def teacher_share(self):
+        return int(self.total_price * self.teacher_share_percent_effective / 100)
 
     @property
     def school_share(self):
@@ -178,6 +207,43 @@ class GroupSessionMeeting(models.Model):
 
     def __str__(self):
         return f"جلسه {self.meeting_number} - {self.group_session}"
+
+
+class GroupSessionAttendance(models.Model):
+    """
+    حضور/غیاب و وضعیت پرداخت هر شرکت‌کننده برای هر جلسه‌ی مجزا (meeting) به‌صورت مستقل.
+    هم در پنل ادمین وب و هم در اپ استاد قابل ثبت/ویرایش است.
+    """
+
+    class Status(models.TextChoices):
+        UNMARKED = 'unmarked', 'ثبت‌نشده'
+        PRESENT = 'present', 'حاضر'
+        ABSENT = 'absent', 'غایب'
+
+    meeting = models.ForeignKey('GroupSessionMeeting', on_delete=models.CASCADE, related_name='attendances')
+    participant = models.ForeignKey('GroupSessionParticipant', on_delete=models.CASCADE, related_name='attendances')
+    status = models.CharField(max_length=10, choices=Status.choices, default=Status.UNMARKED)
+    paid = models.BooleanField(default=False)
+    updated_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        unique_together = ('meeting', 'participant')
+
+    def __str__(self):
+        return f"{self.participant.student} - جلسه {self.meeting.meeting_number} ({self.get_status_display()})"
+
+
+def ensure_attendance_rows(meeting):
+    """ردیف‌های حضور/غیاب موجود نشده برای همه‌ی شرکت‌کننده‌های فعلی جلسه رو می‌سازه (idempotent)"""
+    existing = set(meeting.attendances.values_list('participant_id', flat=True))
+    to_create = [
+        GroupSessionAttendance(meeting=meeting, participant=p)
+        for p in meeting.group_session.participants.all() if p.id not in existing
+    ]
+    if to_create:
+        GroupSessionAttendance.objects.bulk_create(to_create)
+    return meeting.attendances.select_related('participant__student').order_by('participant__joined_at')
 
 
 def ensure_meetings(group_session):
