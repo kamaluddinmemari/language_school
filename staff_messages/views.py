@@ -25,7 +25,7 @@ class TeacherNoticeListView(generics.ListAPIView):
     def get_queryset(self):
         user = self.request.user
         qs = TeacherNotice.objects.filter(is_deleted=False)
-        if user.role == 'admin':
+        if user.role in ('admin', 'office'):
             teacher_id = self.request.query_params.get('teacher_id')
             if teacher_id:
                 qs = qs.filter(teacher_id=teacher_id)
@@ -38,7 +38,7 @@ class TeacherNoticeSendView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
-        if request.user.role != 'admin':
+        if request.user.role not in ('admin', 'office'):
             return Response({'error': 'فقط مدیر می‌تواند پیام بفرستد'}, status=status.HTTP_403_FORBIDDEN)
         serializer = TeacherNoticeCreateSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -72,7 +72,7 @@ class TeacherNoticeDetailView(APIView):
             return None
 
     def patch(self, request, pk):
-        if request.user.role != 'admin':
+        if request.user.role not in ('admin', 'office'):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         notice = self._get(pk)
         if not notice:
@@ -85,7 +85,7 @@ class TeacherNoticeDetailView(APIView):
         return Response(TeacherNoticeSerializer(notice).data)
 
     def delete(self, request, pk):
-        if request.user.role != 'admin':
+        if request.user.role not in ('admin', 'office'):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         notice = self._get(pk)
         if not notice:
@@ -95,6 +95,22 @@ class TeacherNoticeDetailView(APIView):
         notice.deleted_at = timezone.now()
         notice.save()
         return Response({'message': 'پیام حذف شد'})
+
+
+class TeacherNoticeMarkAllSeenView(APIView):
+    """
+    POST: همین‌که استاد وارد صفحه‌ی «پیام‌های مدیریت» می‌شود، همه‌ی پیام‌های دیده‌نشده‌ی او
+    خودکار با تاریخ/ساعت همین لحظه سین می‌خورند — دیگر نیازی به زدن دکمه‌ی «تایید مشاهده» نیست.
+    خروجی همان لیست کامل و به‌روزشده‌ی پیام‌های اوست (مثل GET) تا فرانت با یک درخواست هم صفحه را
+    نشان دهد هم سین بخورد.
+    این endpoint فقط پیام‌های خودِ کاربر را دست می‌زند و روی نمای مدیر (که همه را می‌بیند) اثری ندارد.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        qs = TeacherNotice.objects.filter(teacher=request.user, is_deleted=False)
+        qs.filter(seen_at__isnull=True).update(seen_at=timezone.now())
+        return Response(TeacherNoticeSerializer(qs, many=True).data)
 
 
 class TeacherNoticeAcknowledgeView(APIView):
@@ -124,7 +140,7 @@ class EntryExitRequestListView(generics.ListCreateAPIView):
     def get_queryset(self):
         user = self.request.user
         qs = EntryExitPermissionRequest.objects.filter(is_deleted=False)
-        if user.role == 'admin':
+        if user.role in ('admin', 'office'):
             status_filter = self.request.query_params.get('status')
             if status_filter:
                 qs = qs.filter(status=status_filter)
@@ -164,7 +180,7 @@ class EntryExitRequestDetailView(APIView):
         if not req:
             return Response({'error': 'درخواست پیدا نشد'}, status=status.HTTP_404_NOT_FOUND)
         user = request.user
-        if user.role == 'admin':
+        if user.role in ('admin', 'office'):
             for field in ['student_name', 'class_level', 'permission_type', 'request_message', 'response_message', 'coordination_person', 'coordination_phone']:
                 if field in request.data:
                     setattr(req, field, request.data[field])
@@ -185,7 +201,7 @@ class EntryExitRequestDetailView(APIView):
         if not req:
             return Response({'error': 'درخواست پیدا نشد'}, status=status.HTTP_404_NOT_FOUND)
         user = request.user
-        if not (user.role == 'admin' or req.teacher_id == user.id):
+        if not (user.role in ('admin', 'office') or req.teacher_id == user.id):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         req.is_deleted = True
         req.deleted_by = user
@@ -199,7 +215,7 @@ class EntryExitRequestDecideView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request, pk):
-        if request.user.role != 'admin':
+        if request.user.role not in ('admin', 'office'):
             return Response({'error': 'فقط مدیر می‌تواند تصمیم بگیرد'}, status=status.HTTP_403_FORBIDDEN)
         try:
             req = EntryExitPermissionRequest.objects.get(pk=pk, is_deleted=False)

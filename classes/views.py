@@ -23,7 +23,7 @@ class ClassRequestListCreateView(generics.ListCreateAPIView):
 
     def get_serializer_class(self):
         if self.request.method == 'POST':
-            if self.request.user.role == 'admin':
+            if self.request.user.role in ('admin', 'office'):
                 return ClassRequestAdminCreateSerializer
             return ClassRequestCreateSerializer
         if self.request.user.role in ('admin', 'evaluator'):
@@ -46,7 +46,7 @@ class ClassRequestListCreateView(generics.ListCreateAPIView):
     def perform_create(self, serializer):
         if self.request.user.role == 'evaluator':
             raise PermissionDenied('مدیر آموزش نمی‌تواند درخواست کلاس بسازد — فقط گزارش‌گیری/ویرایش/حذف')
-        if self.request.user.role == 'admin':
+        if self.request.user.role in ('admin', 'office'):
             serializer.save()
         else:
             instance = serializer.save(student=self.request.user)
@@ -100,7 +100,7 @@ class AssignTeachersView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request, pk):
-        if request.user.role != 'admin':
+        if request.user.role not in ('admin', 'office'):
             return Response({'error': 'فقط مدیر می‌تونه ارجاع بده'}, status=status.HTTP_403_FORBIDDEN)
         try:
             class_request = ClassRequest.objects.get(pk=pk)
@@ -191,7 +191,7 @@ class FinalizeClassView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request, pk):
-        if request.user.role != 'admin':
+        if request.user.role not in ('admin', 'office'):
             return Response({'error': 'فقط مدیر می‌تونه تایید نهایی کنه'}, status=status.HTTP_403_FORBIDDEN)
         try:
             class_request = ClassRequest.objects.get(pk=pk, status=ClassRequest.Status.REFERRED)
@@ -242,7 +242,7 @@ class CancelClassView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request, pk):
-        if request.user.role != 'admin':
+        if request.user.role not in ('admin', 'office'):
             return Response({'error': 'فقط مدیر می‌تونه کنسل کنه'}, status=status.HTTP_403_FORBIDDEN)
         try:
             class_request = ClassRequest.objects.exclude(
@@ -273,7 +273,7 @@ class RejectClassView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request, pk):
-        if request.user.role != 'admin':
+        if request.user.role not in ('admin', 'office'):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         try:
             class_request = ClassRequest.objects.get(pk=pk, status=ClassRequest.Status.PENDING)
@@ -328,7 +328,7 @@ class ClassSessionListView(APIView):
 
     def _get_class_request(self, request, pk):
         user = request.user
-        if user.role == 'admin':
+        if user.role in ('admin', 'office'):
             qs = ClassRequest.objects.all()
         elif user.role in User.TEACHER_LIKE_ROLES:
             qs = ClassRequest.objects.filter(Q(assigned_teachers=user) | Q(teacher=user)).distinct()
@@ -358,7 +358,7 @@ class ClassSessionUpdateView(APIView):
         if user.role not in ('admin', 'teacher'):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         try:
-            if user.role == 'admin':
+            if user.role in ('admin', 'office'):
                 class_request = ClassRequest.objects.get(pk=pk)
             else:
                 class_request = ClassRequest.objects.filter(
@@ -409,7 +409,7 @@ class AdminConfirmCompleteView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request, pk):
-        if request.user.role != 'admin':
+        if request.user.role not in ('admin', 'office'):
             return Response({'error': 'فقط مدیر می‌تونه تایید کنه'}, status=status.HTTP_403_FORBIDDEN)
         try:
             class_request = ClassRequest.objects.get(pk=pk, is_completed=True)
@@ -449,7 +449,7 @@ class SatisfactionView(APIView):
                 )
             except ClassRequest.DoesNotExist:
                 return Response({'error': 'کلاس پیدا نشد'}, status=status.HTTP_404_NOT_FOUND)
-        elif request.user.role == 'admin':
+        elif request.user.role in ('admin', 'office'):
             try:
                 class_request = ClassRequest.objects.get(
                     pk=pk, status=ClassRequest.Status.COMPLETED
@@ -483,7 +483,7 @@ class ApproveSatisfactionView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request, pk):
-        if request.user.role != 'admin':
+        if request.user.role not in ('admin', 'office'):
             return Response({'error': 'فقط مدیر می‌تونه تایید کنه'}, status=status.HTTP_403_FORBIDDEN)
         try:
             class_request = ClassRequest.objects.get(pk=pk, status=ClassRequest.Status.COMPLETED)
@@ -512,7 +512,7 @@ class PayTeacherView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request, pk):
-        if request.user.role != 'admin':
+        if request.user.role not in ('admin', 'office'):
             return Response({'error': 'فقط مدیر می‌تونه پرداخت رو ثبت کنه'}, status=status.HTTP_403_FORBIDDEN)
         try:
             class_request = ClassRequest.objects.get(pk=pk)
@@ -545,7 +545,7 @@ class ClassStatsView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        if request.user.role != 'admin':
+        if request.user.role not in ('admin', 'office'):
             return Response({'error': 'فقط مدیر به این گزارش دسترسی دارد'}, status=status.HTTP_403_FORBIDDEN)
 
         queryset = ClassRequest.objects.filter(status=ClassRequest.Status.COMPLETED)

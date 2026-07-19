@@ -50,7 +50,7 @@ class GroupSessionListCreateView(APIView):
         return Response(serializer_cls(qs, many=True, context={'request': request}).data)
 
     def post(self, request):
-        if request.user.role != 'admin':
+        if request.user.role not in ('admin', 'office'):
             return Response({'error': 'فقط مدیر می‌تواند جلسه‌ی گروهی بسازد'}, status=status.HTTP_403_FORBIDDEN)
         serializer = GroupSessionCreateSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -216,7 +216,7 @@ class CloseRegistrationView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request, pk):
-        if request.user.role != 'admin':
+        if request.user.role not in ('admin', 'office'):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         try:
             group_session = GroupSession.objects.get(pk=pk, status=GroupSession.Status.OPEN)
@@ -233,7 +233,7 @@ class AssignTeachersView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request, pk):
-        if request.user.role != 'admin':
+        if request.user.role not in ('admin', 'office'):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         try:
             group_session = GroupSession.objects.get(pk=pk, status=GroupSession.Status.ASSIGNING)
@@ -298,7 +298,7 @@ class FinalizeGroupSessionView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request, pk):
-        if request.user.role != 'admin':
+        if request.user.role not in ('admin', 'office'):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         try:
             group_session = GroupSession.objects.get(pk=pk, status=GroupSession.Status.ASSIGNING)
@@ -331,7 +331,7 @@ class CancelGroupSessionView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request, pk):
-        if request.user.role != 'admin':
+        if request.user.role not in ('admin', 'office'):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         try:
             group_session = GroupSession.objects.exclude(
@@ -350,7 +350,7 @@ class GroupSessionMeetingListView(APIView):
     def get(self, request, pk):
         user = request.user
         try:
-            if user.role == 'admin':
+            if user.role in ('admin', 'office'):
                 group_session = GroupSession.objects.get(pk=pk)
             elif user.role in User.TEACHER_LIKE_ROLES:
                 group_session = GroupSession.objects.filter(Q(assigned_teachers=user) | Q(teacher=user)).distinct().get(pk=pk)
@@ -374,7 +374,7 @@ class GroupSessionMeetingUpdateView(APIView):
         if user.role not in ('admin', 'teacher'):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         try:
-            if user.role == 'admin':
+            if user.role in ('admin', 'office'):
                 group_session = GroupSession.objects.get(pk=pk)
             else:
                 group_session = GroupSession.objects.filter(Q(assigned_teachers=user) | Q(teacher=user)).distinct().get(pk=pk)
@@ -464,7 +464,7 @@ class AdminConfirmCompleteView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request, pk):
-        if request.user.role != 'admin':
+        if request.user.role not in ('admin', 'office'):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         try:
             group_session = GroupSession.objects.get(pk=pk, status=GroupSession.Status.CONFIRMED, is_completed=True)
@@ -486,7 +486,7 @@ class ParticipantSatisfactionView(APIView):
             return Response({'error': 'جلسه پیدا نشد یا هنوز مختومه نشده'}, status=status.HTTP_404_NOT_FOUND)
 
         user = request.user
-        if user.role == 'admin':
+        if user.role in ('admin', 'office'):
             participant_id = request.data.get('participant_id')
             try:
                 participant = group_session.participants.get(pk=participant_id)
@@ -555,7 +555,7 @@ class GroupPriceSettingView(APIView):
         return Response(GroupPriceSettingSerializer(setting).data)
 
     def patch(self, request):
-        if request.user.role != 'admin':
+        if request.user.role not in ('admin', 'office'):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         setting = GroupPriceSetting.objects.order_by('-updated_at').first()
         if not setting:

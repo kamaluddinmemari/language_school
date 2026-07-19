@@ -20,7 +20,7 @@ class SendNotificationView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
-        if request.user.role != 'admin':
+        if request.user.role not in ('admin', 'office'):
             return Response(
                 {'error': 'فقط مدیر می‌تونه نوتیف بفرسته'},
                 status=status.HTTP_403_FORBIDDEN

@@ -3,6 +3,7 @@ from .views import (
     TeacherNoticeListView,
     TeacherNoticeSendView,
     TeacherNoticeDetailView,
+    TeacherNoticeMarkAllSeenView,
     TeacherNoticeAcknowledgeView,
     EntryExitRequestListView,
     EntryExitRequestDetailView,
@@ -12,6 +13,7 @@ from .views import (
 urlpatterns = [
     path('teacher-notices/', TeacherNoticeListView.as_view(), name='teacher_notice_list'),
     path('teacher-notices/send/', TeacherNoticeSendView.as_view(), name='teacher_notice_send'),
+    path('teacher-notices/mark-all-seen/', TeacherNoticeMarkAllSeenView.as_view(), name='teacher_notice_mark_all_seen'),
     path('teacher-notices/<int:pk>/', TeacherNoticeDetailView.as_view(), name='teacher_notice_detail'),
     path('teacher-notices/<int:pk>/acknowledge/', TeacherNoticeAcknowledgeView.as_view(), name='teacher_notice_acknowledge'),
 

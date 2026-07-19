@@ -12,18 +12,20 @@ def _jalali(dt):
 
 MORNING_TIME_SLOTS = ['08:00-09:30', '09:45-11:15', '11:30-13:00']
 EVENING_TIME_SLOTS = ['15:45-17:15', '17:30-19:00', '19:00-20:30']
-EVENING_LATE_TIME_SLOTS = ['17:30-19:00', '19:00-20:30']  # برای کلاس‌های چرخشی — بعد از ۱۷:۳۰
+EVENING_LATE_TIME_SLOTS = ['17:30-19:00', '19:00-20:30']  # برای زبان‌آموزان چرخشی — بعد از ۱۷:۳۰
 THURSDAY_MORNING_SLOT = '08:00-13:00'
 THURSDAY_EVENING_SLOT = '13:00-17:00'
 FRIDAY_SLOT = '08:30-13:15'
 
+ALL_STANDARD_TIME_SLOTS = MORNING_TIME_SLOTS + EVENING_TIME_SLOTS + [THURSDAY_MORNING_SLOT, THURSDAY_EVENING_SLOT, FRIDAY_SLOT]
+
 
 class ClassSlot(models.Model):
     """
-    یک کلاس، که مدیر یکی‌یکی وارد می‌کند (نه لیست ثابت از پیش‌ساخته) — با روز هفتگی، وضعیت
-    اکثریت زبان‌آموزانش (چرخشی/فقط‌صبح/...)، و ظرفیت. ساعت دقیق کلاس (برای کلاس‌های سه‌روزه)
-    با دکمه‌ی «چیدمان هوشمند ساعت‌ها» بر اساس همین وضعیت خودکار محاسبه می‌شود، ولی همیشه هم
-    مستقیم توسط مدیر قابل ویرایش است. حذف هر کلاس هم در هر لحظه آزاد است.
+    یک کلاس، که مدیر یکی‌یکی وارد می‌کند — با روز/نوع برگزاری هفتگی، ساعت جاری (از لیست
+    استاندارد)، ظرفیت، و توضیحات آزاد (مثلاً محدودیت جابجایی بین کلاس‌های خاص). وضعیت
+    چرخشی/فقط‌صبح بودن دیگر خاصیت خودِ کلاس نیست — خاصیت هر «سطح» است و موقع تخصیص پرسیده
+    می‌شود (بخش «افزودن سطح» در تخصیص). حذف/ویرایش هر کلاس در هر لحظه آزاد است.
     """
 
     class DayType(models.TextChoices):
@@ -32,26 +34,17 @@ class ClassSlot(models.Model):
         THURSDAY_MORNING = 'thursday_morning', 'یک روز در هفته - پنجشنبه صبح'
         THURSDAY_EVENING = 'thursday_evening', 'یک روز در هفته - پنجشنبه عصر'
         FRIDAY = 'friday', 'یک روز در هفته - جمعه'
+        ONLINE = 'online', 'آنلاین'
+        HYBRID = 'hybrid', 'ترکیبی (آنلاین و حضوری)'
 
-    class StudentStatus(models.TextChoices):
-        ROTATING = 'rotating', 'چرخشی'
-        ONLY_MORNING = 'only_morning', 'فقط صبح'
-        ONE_DAY_PREFERENCE = 'one_day_preference', 'تمایل به کلاس یک روز در هفته'
-        HYBRID_ONLINE = 'hybrid_online', 'ترکیب حضوری/مجازی و آنلاین'
-        OTHER = 'other', 'سایر'
-
-    number = models.PositiveIntegerField(unique=True, help_text='شماره کلاس')
+    number = models.PositiveIntegerField(help_text='شماره کلاس — همان شماره می‌تواند در چند ساعت/روز مختلف تکرار شود (مثلاً کلاس ۱ هم صبح هم عصر)')
     title = models.CharField(max_length=100, blank=True)
     day_type = models.CharField(max_length=20, choices=DayType.choices)
-
-    # وضعیت اکثریت زبان‌آموزان این کلاس — پایه‌ی تصمیم‌گیری خودکار صبح/عصر
-    is_rotating_majority = models.BooleanField(default=False, help_text='آیا اکثریت این کلاس وضعیت مدرسه‌ی چرخشی دارند؟')
-    student_status = models.CharField(max_length=20, choices=StudentStatus.choices, blank=True)
-    student_status_other = models.CharField(max_length=150, blank=True, help_text='توضیح دستی وقتی «سایر» انتخاب شده')
+    time_slot = models.CharField(max_length=20, blank=True, help_text='ساعت جاری کلاس — ترجیحاً از لیست استاندارد')
+    notes = models.TextField(blank=True, help_text='توضیحات آزاد، مثلاً «این کلاس فقط بین کلاس ۱ و ۹ جابجا شود»')
 
     capacity = models.PositiveIntegerField(default=10)
     teacher_name = models.CharField(max_length=150, blank=True)
-    time_slot = models.CharField(max_length=20, blank=True, help_text='خودکار محاسبه می‌شود، ولی قابل ویرایش دستی هم هست')
 
     assigned_level = models.CharField(max_length=50, blank=True)
     current_count = models.PositiveIntegerField(default=0)
@@ -60,27 +53,25 @@ class ClassSlot(models.Model):
 
     class Meta:
         ordering = ['number']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['number', 'day_type', 'time_slot'],
+                name='unique_class_number_per_day_time',
+                violation_error_message='این شماره کلاس دقیقاً در همین روز و همین ساعت از قبل وجود دارد',
+            )
+        ]
 
     @property
     def day_type_display(self):
         return self.get_day_type_display()
 
     @property
-    def student_status_display(self):
-        if self.student_status == self.StudentStatus.OTHER and self.student_status_other:
-            return self.student_status_other
-        return self.get_student_status_display() if self.student_status else ''
-
-    @property
     def is_three_day(self):
         return self.day_type in (self.DayType.EVEN, self.DayType.ODD)
 
     @property
-    def is_effectively_rotating(self):
-        return self.is_rotating_majority or self.student_status == self.StudentStatus.ROTATING
-
-    @property
     def capacity_status(self):
+        """'empty' (سفید) | 'ok' (سبز، جا دارد) | 'full' | 'over' (قرمز، پر/بیش از ظرفیت)"""
         if self.current_count == 0:
             return 'empty'
         if self.current_count < self.capacity:
@@ -94,16 +85,36 @@ class ClassSlot(models.Model):
         return self.capacity - self.current_count
 
     @property
+    def surplus(self):
+        return max(0, self.current_count - self.capacity)
+
+    @property
     def updated_at_jalali(self):
         return _jalali(self.updated_at)
 
     def fixed_time_slot(self):
-        """ساعت ثابت برای فرمت‌های تک‌روزه (زوج/فرد نیستند) — برای این‌ها نیازی به چیدمان هوشمند نیست"""
+        """ساعت ثابت برای فرمت‌های تک‌روزه — این‌ها نیازی به انتخاب دستی ساعت ندارند"""
         return {
             self.DayType.THURSDAY_MORNING: THURSDAY_MORNING_SLOT,
             self.DayType.THURSDAY_EVENING: THURSDAY_EVENING_SLOT,
             self.DayType.FRIDAY: FRIDAY_SLOT,
         }.get(self.day_type)
+
+    def time_category(self):
+        """
+        دسته‌ی ساعتی کلاس بر اساس ساعت فعلی‌اش (نه روزش) — برای تطبیق با نیاز سطح‌ها در تخصیص.
+        فقط برای کلاس‌های زوج/فرد/آنلاین/ترکیبی معنی دارد (پنجشنبه/جمعه جدا و بر اساس day_type مدیریت می‌شوند).
+        """
+        if not self.time_slot or '-' not in self.time_slot:
+            return set()
+        start = self.time_slot.split('-')[0]
+        if start in ('17:30', '19:00'):
+            return {'evening_late', 'evening_any'}
+        if start == '15:45':
+            return {'evening_any'}
+        if start in ('08:00', '09:45', '11:30'):
+            return {'morning'}
+        return set()
 
     def save(self, *args, **kwargs):
         fixed = self.fixed_time_slot()

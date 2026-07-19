@@ -21,12 +21,12 @@ class NewLeadListView(generics.ListCreateAPIView):
     serializer_class = NewLeadSerializer
 
     def get_queryset(self):
-        if self.request.user.role != 'admin':
+        if self.request.user.role not in ('admin', 'office'):
             return NewLead.objects.none()
         return NewLead.objects.all()
 
     def create(self, request, *args, **kwargs):
-        if request.user.role != 'admin':
+        if request.user.role not in ('admin', 'office'):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -40,7 +40,7 @@ class NewLeadDetailView(generics.RetrieveUpdateDestroyAPIView):
     queryset = NewLead.objects.all()
 
     def _forbidden_if_not_admin(self, request):
-        return request.user.role != 'admin'
+        return request.user.role not in ('admin', 'office')
 
     def update(self, request, *args, **kwargs):
         if self._forbidden_if_not_admin(request):
@@ -58,7 +58,7 @@ class NewLeadActionView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request, pk, action):
-        if request.user.role != 'admin':
+        if request.user.role not in ('admin', 'office'):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         try:
             lead = NewLead.objects.get(pk=pk)
@@ -68,8 +68,10 @@ class NewLeadActionView(APIView):
         now = timezone.now()
         if action == 'followup1':
             lead.followup1_at = now
+            lead.followup1_by = request.user
         elif action == 'followup2':
             lead.followup2_at = now
+            lead.followup2_by = request.user
         elif action == 'register':
             lead.status = NewLead.Status.REGISTERED
             lead.registered_at = now
@@ -100,13 +102,13 @@ class UnregisteredStudentListView(generics.ListCreateAPIView):
     serializer_class = UnregisteredStudentSerializer
 
     def get_queryset(self):
-        if self.request.user.role != 'admin':
+        if self.request.user.role not in ('admin', 'office'):
             return UnregisteredStudent.objects.none()
         return UnregisteredStudent.objects.all()
 
     def create(self, request, *args, **kwargs):
         from accounts.models import User
-        if request.user.role not in User.TEACHER_LIKE_ROLES and request.user.role != 'admin':
+        if request.user.role not in User.TEACHER_LIKE_ROLES and request.user.role not in ('admin', 'office'):
             return Response({'error': 'فقط استاد یا مدیر می‌تواند ثبت کند'}, status=status.HTTP_403_FORBIDDEN)
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -120,12 +122,12 @@ class UnregisteredStudentDetailView(generics.RetrieveUpdateDestroyAPIView):
     queryset = UnregisteredStudent.objects.all()
 
     def update(self, request, *args, **kwargs):
-        if request.user.role != 'admin':
+        if request.user.role not in ('admin', 'office'):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         return super().update(request, *args, **kwargs)
 
     def destroy(self, request, *args, **kwargs):
-        if request.user.role != 'admin':
+        if request.user.role not in ('admin', 'office'):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         return super().destroy(request, *args, **kwargs)
 
@@ -135,7 +137,7 @@ class UnregisteredStudentFollowupView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request, pk):
-        if request.user.role != 'admin':
+        if request.user.role not in ('admin', 'office'):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         try:
             student = UnregisteredStudent.objects.get(pk=pk)
@@ -152,7 +154,7 @@ class UnregisteredStudentRegisterView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request, pk):
-        if request.user.role != 'admin':
+        if request.user.role not in ('admin', 'office'):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         try:
             student = UnregisteredStudent.objects.get(pk=pk)
@@ -168,7 +170,7 @@ class UnregisteredStudentStatsView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        if request.user.role != 'admin':
+        if request.user.role not in ('admin', 'office'):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         qs = UnregisteredStudent.objects.all()
         tracking = qs.filter(status=UnregisteredStudent.Status.TRACKING)
@@ -194,12 +196,12 @@ class DebtorListView(generics.ListCreateAPIView):
     serializer_class = DebtorSerializer
 
     def get_queryset(self):
-        if self.request.user.role != 'admin':
+        if self.request.user.role not in ('admin', 'office'):
             return Debtor.objects.none()
         return Debtor.objects.all()
 
     def create(self, request, *args, **kwargs):
-        if request.user.role != 'admin':
+        if request.user.role not in ('admin', 'office'):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -213,12 +215,12 @@ class DebtorDetailView(generics.RetrieveUpdateDestroyAPIView):
     queryset = Debtor.objects.all()
 
     def update(self, request, *args, **kwargs):
-        if request.user.role != 'admin':
+        if request.user.role not in ('admin', 'office'):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         return super().update(request, *args, **kwargs)
 
     def destroy(self, request, *args, **kwargs):
-        if request.user.role != 'admin':
+        if request.user.role not in ('admin', 'office'):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         return super().destroy(request, *args, **kwargs)
 
@@ -227,7 +229,7 @@ class DebtorFollowupView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request, pk):
-        if request.user.role != 'admin':
+        if request.user.role not in ('admin', 'office'):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         try:
             debtor = Debtor.objects.get(pk=pk)
@@ -241,7 +243,7 @@ class DebtorSettleView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request, pk):
-        if request.user.role != 'admin':
+        if request.user.role not in ('admin', 'office'):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         try:
             debtor = Debtor.objects.get(pk=pk)
@@ -257,7 +259,7 @@ class DebtorStatsView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        if request.user.role != 'admin':
+        if request.user.role not in ('admin', 'office'):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         qs = Debtor.objects.all()
         pending = qs.filter(status=Debtor.Status.PENDING)
@@ -283,12 +285,12 @@ class DiscountedPersonListView(generics.ListCreateAPIView):
     serializer_class = DiscountedPersonSerializer
 
     def get_queryset(self):
-        if self.request.user.role != 'admin':
+        if self.request.user.role not in ('admin', 'office'):
             return DiscountedPerson.objects.none()
         return DiscountedPerson.objects.all()
 
     def create(self, request, *args, **kwargs):
-        if request.user.role != 'admin':
+        if request.user.role not in ('admin', 'office'):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -302,11 +304,11 @@ class DiscountedPersonDetailView(generics.RetrieveUpdateDestroyAPIView):
     queryset = DiscountedPerson.objects.all()
 
     def update(self, request, *args, **kwargs):
-        if request.user.role != 'admin':
+        if request.user.role not in ('admin', 'office'):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         return super().update(request, *args, **kwargs)
 
     def destroy(self, request, *args, **kwargs):
-        if request.user.role != 'admin':
+        if request.user.role not in ('admin', 'office'):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         return super().destroy(request, *args, **kwargs)

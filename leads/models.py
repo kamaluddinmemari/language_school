@@ -27,7 +27,9 @@ class NewLead(models.Model):
 
     status = models.CharField(max_length=10, choices=Status.choices, default=Status.PENDING)
     followup1_at = models.DateTimeField(null=True, blank=True)
+    followup1_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
     followup2_at = models.DateTimeField(null=True, blank=True)
+    followup2_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
     registered_at = models.DateTimeField(null=True, blank=True)
     cancelled_at = models.DateTimeField(null=True, blank=True)
 

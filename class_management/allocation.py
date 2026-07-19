@@ -1,16 +1,26 @@
 """
-موتور «تخصیص کلاس» — بعد از این‌که همه‌ی کلاس‌ها با «چیدمان هوشمند ساعت‌ها» زمان‌بندی شدند،
-این بخش تصمیم می‌گیرد کدام سطح با چه تعدادی در کدام کلاس بنشیند. یک الگوریتم حریصانه (greedy)
-شفاف است، نه یک حل‌کننده‌ی کامل بهینه‌سازی — نتیجه همیشه توسط مدیر قابل ویرایش دستی است.
+موتور «تخصیص کلاس» — نسخه‌ی یکپارچه: هم تصمیم می‌گیرد هر سطح به کدام کلاس (بر اساس ساعت
+فعلی‌اش، که تغییر نمی‌کند) برود، هم تلاش می‌کند هر سطح را در یک کلاس واحد جا بدهد. اگر یک
+کلاس برای کل تقاضای یک سطح کافی نبود، به‌جای پخش خودکار و بی‌صدا بین چند کلاس، باقیمانده به‌عنوان
+«نیازمند تایید مدیر برای کلاس دوم» برگردانده می‌شود (pending_overflow) — مدیر با تایید،
+کلاس دوم را (از میان کاندیدهای پیشنهادی) فعال می‌کند.
 """
 from .models import ClassSlot
 
 
+def _level_category(entry):
+    """دسته‌ی ساعتی موردنیاز این سطح، بر اساس وضعیت مدرسه‌ی اکثریت زبان‌آموزانش"""
+    if entry.get('is_rotating_majority') or entry.get('student_status') == 'rotating':
+        return 'evening_late'
+    if entry.get('student_status') == 'only_morning':
+        return 'evening_any'
+    return 'morning'
+
+
 def allocate_classes(levels, tolerance=0, thursday_only_count=0, friday_only_count=0):
     """
-    levels: [{'level': 'B1', 'count': 12}, ...] — تقاضای هر سطح.
-    برمی‌گرداند: (warnings, summary) و مستقیماً assigned_level/current_count همه‌ی کلاس‌ها را بازنویسی می‌کند
-    (روز/ساعت/ظرفیت/استاد/وضعیت چرخشی هر کلاس دست‌نخورده می‌ماند، چون این‌ها زیرساخت ثابت‌اند).
+    levels: [{'level': 'B1', 'count': 12, 'is_rotating_majority': False, 'student_status': 'rotating', ...}, ...]
+    برمی‌گرداند: (warnings, summary, pending_overflow)
     """
     slots = list(ClassSlot.objects.all().order_by('number'))
     for s in slots:
@@ -19,12 +29,14 @@ def allocate_classes(levels, tolerance=0, thursday_only_count=0, friday_only_cou
 
     thursday_slots = [s for s in slots if s.day_type in (ClassSlot.DayType.THURSDAY_MORNING, ClassSlot.DayType.THURSDAY_EVENING)]
     friday_slots = [s for s in slots if s.day_type == ClassSlot.DayType.FRIDAY]
-    three_day_slots = [s for s in slots if s.is_three_day]
+    category_slots = [s for s in slots if s.day_type in (
+        ClassSlot.DayType.EVEN, ClassSlot.DayType.ODD, ClassSlot.DayType.ONLINE, ClassSlot.DayType.HYBRID)]
 
     demand = sorted([dict(l) for l in levels if l.get('count', 0) > 0], key=lambda x: -x['count'])
     warnings = []
+    pending_overflow = []
 
-    def fill(slot_list, level_name, needed):
+    def fill_pool(slot_list, level_name, needed):
         remaining = needed
         for slot in slot_list:
             if remaining <= 0:
@@ -50,7 +62,7 @@ def allocate_classes(levels, tolerance=0, thursday_only_count=0, friday_only_cou
             take = min(d['count'], remaining)
             if take <= 0:
                 continue
-            left = fill(slot_list, d['level'], take)
+            left = fill_pool(slot_list, d['level'], take)
             placed = take - left
             d['count'] -= placed
             remaining -= placed
@@ -60,14 +72,49 @@ def allocate_classes(levels, tolerance=0, thursday_only_count=0, friday_only_cou
     carve_out('فقط پنجشنبه', thursday_only_count, thursday_slots)
     carve_out('فقط جمعه', friday_only_count, friday_slots)
 
-    for d in demand:
-        if d['count'] <= 0:
+    for entry in demand:
+        if entry['count'] <= 0:
             continue
-        left = fill(three_day_slots, d['level'], d['count'])
-        if left > 0:
-            left = fill(thursday_slots + friday_slots, d['level'], left)
-        if left > 0:
-            warnings.append(f"سطح «{d['level']}»: {left} نفر به‌خاطر کمبود ظرفیت کلاس‌ها تخصیص داده نشدند.")
+        level_name = entry['level']
+        needed = entry['count']
+        category = _level_category(entry)
+
+        candidates = [s for s in category_slots if category in s.time_category() and (not s.assigned_level or s.assigned_level == level_name)]
+
+        # ترجیح اول: یک کلاس که کل تقاضا در آن جا شود (کوچک‌ترین ظرفیت کافی، برای جلوگیری از اسراف ظرفیت)
+        exact_fits = [s for s in candidates if (s.capacity + tolerance - s.current_count) >= needed]
+        if exact_fits:
+            best = min(exact_fits, key=lambda s: s.capacity)
+            best.assigned_level = level_name
+            best.current_count += needed
+            continue
+
+        # جا نشد در یک کلاس؛ بیشترین ظرفیت خالی ممکن را در بهترین کلاس موجود پر کن
+        remaining = needed
+        if candidates:
+            best = max(candidates, key=lambda s: (s.capacity + tolerance - s.current_count))
+            room = (best.capacity + tolerance) - best.current_count
+            if room > 0:
+                best.assigned_level = level_name
+                best.current_count += room
+                remaining = needed - room
+            placed_slot_id = best.id
+        else:
+            placed_slot_id = None
+
+        if remaining > 0:
+            second_candidates = [
+                s for s in category_slots
+                if category in s.time_category() and s.id != placed_slot_id
+                and (not s.assigned_level or s.assigned_level == level_name)
+                and (s.capacity + tolerance - s.current_count) > 0
+            ]
+            pending_overflow.append({
+                'level': level_name,
+                'remaining_count': remaining,
+                'candidate_slots': [{'id': s.id, 'number': s.number, 'time_slot': s.time_slot, 'seats_left': s.capacity + tolerance - s.current_count} for s in second_candidates],
+            })
+            warnings.append(f"سطح «{level_name}»: {remaining} نفر در یک کلاس جا نشدند — برای کلاس دوم نیاز به تایید مدیر دارد (پایین صفحه).")
 
     for s in slots:
         s.save(update_fields=['assigned_level', 'current_count', 'updated_at'])
@@ -78,4 +125,4 @@ def allocate_classes(levels, tolerance=0, thursday_only_count=0, friday_only_cou
         'empty_slots': len([s for s in slots if s.current_count == 0]),
         'over_capacity_slots': len([s for s in slots if s.current_count > s.capacity]),
     }
-    return warnings, summary
+    return warnings, summary, pending_overflow

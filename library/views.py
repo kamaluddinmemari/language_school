@@ -9,7 +9,7 @@ import jdatetime
 from .models import Book, BookSale
 from .serializers import BookSerializer, BookSaleSerializer, SellBookSerializer
 
-MANAGE_ROLES = ('admin', 'evaluator')
+MANAGE_ROLES = ('admin', 'evaluator', 'office')
 
 
 class BookListView(generics.ListCreateAPIView):

@@ -44,7 +44,7 @@ class LevelTestListCreateView(APIView):
         return Response(LevelTestSerializer(qs, many=True).data)
 
     def post(self, request):
-        if request.user.role != 'admin':
+        if request.user.role not in ('admin', 'office'):
             return Response({'error': 'فقط مدیر/کانتر می‌تواند داوطلب جدید ثبت کند'}, status=status.HTTP_403_FORBIDDEN)
         data = request.data.copy()
         if data.get('price') in (None, ''):

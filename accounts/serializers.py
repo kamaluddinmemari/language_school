@@ -50,12 +50,59 @@ class TeacherSerializer(serializers.ModelSerializer):
         model = User
         fields = [
             'id', 'username', 'password', 'first_name', 'last_name',
-            'phone', 'phone2', 'teacher_level', 'avatar', 'average_rating'
+            'phone', 'phone2', 'teacher_level', 'avatar', 'average_rating', 'role'
         ]
+        read_only_fields = ['role']
 
     def create(self, validated_data):
         password = validated_data.pop('password', None)
         validated_data['role'] = User.Role.TEACHER
+        validated_data.setdefault('username', validated_data.get('phone'))
+        validated_data.setdefault('national_code', None)
+        user = User(**validated_data)
+        if password:
+            user.set_password(password)
+        else:
+            user.set_unusable_password()
+        user.save()
+        return user
+
+    def update(self, instance, validated_data):
+        password = validated_data.pop('password', None)
+        for attr, value in validated_data.items():
+            setattr(instance, attr, value)
+        if password:
+            instance.set_password(password)
+        instance.save()
+        return instance
+
+
+class OfficeStaffSerializer(serializers.ModelSerializer):
+    """
+    ثبت/ویرایش کارمند اداری — فقط برای مدیر.
+    اطلاعات پرسنلی تکمیلی (مدرک تحصیلی، رشته، تاریخ استخدام، آدرس، تاهل، فرزندان) در
+    اپ payroll (`EmployeeProfile`) نگه‌داری می‌شود، نه اینجا — این سریالایزر فقط فیلدهای
+    سطح حساب کاربری (`User`) را می‌سازد/ویرایش می‌کند.
+    """
+
+    password = serializers.CharField(write_only=True, required=False, validators=[validate_password, password_validator])
+    birth_date_jalali = serializers.SerializerMethodField()
+
+    class Meta:
+        model = User
+        fields = ['id', 'username', 'password', 'first_name', 'last_name', 'father_name',
+                   'national_code', 'birth_date', 'birth_date_jalali', 'phone', 'phone2', 'avatar', 'role']
+        read_only_fields = ['role']
+
+    def get_birth_date_jalali(self, obj):
+        if not obj.birth_date:
+            return None
+        import jdatetime
+        return jdatetime.date.fromgregorian(date=obj.birth_date).strftime('%Y/%m/%d')
+
+    def create(self, validated_data):
+        password = validated_data.pop('password', None)
+        validated_data['role'] = User.Role.OFFICE
         validated_data.setdefault('username', validated_data.get('phone'))
         validated_data.setdefault('national_code', None)
         user = User(**validated_data)

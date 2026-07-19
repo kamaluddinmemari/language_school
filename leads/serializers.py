@@ -9,13 +9,22 @@ class NewLeadSerializer(serializers.ModelSerializer):
     followup2_at_jalali = serializers.ReadOnlyField()
     registered_at_jalali = serializers.ReadOnlyField()
     cancelled_at_jalali = serializers.ReadOnlyField()
+    followup1_by_name = serializers.SerializerMethodField()
+    followup2_by_name = serializers.SerializerMethodField()
+
+    def get_followup1_by_name(self, obj):
+        return obj.followup1_by.get_full_name() if obj.followup1_by else None
+
+    def get_followup2_by_name(self, obj):
+        return obj.followup2_by.get_full_name() if obj.followup2_by else None
 
     class Meta:
         model = NewLead
         fields = [
             'id', 'first_name', 'last_name', 'father_name', 'national_code', 'phone',
             'status', 'status_display',
-            'followup1_at', 'followup1_at_jalali', 'followup2_at', 'followup2_at_jalali',
+            'followup1_at', 'followup1_at_jalali', 'followup1_by_name',
+            'followup2_at', 'followup2_at_jalali', 'followup2_by_name',
             'registered_at', 'registered_at_jalali', 'cancelled_at', 'cancelled_at_jalali',
             'deposit_amount', 'deposit_paid_at', 'deposit_paid_at_jalali',
             'created_at', 'created_at_jalali', 'updated_at',
