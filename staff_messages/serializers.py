@@ -43,6 +43,7 @@ class EntryExitPermissionRequestSerializer(serializers.ModelSerializer):
     decided_by_info = TeacherInfoSerializer(source='decided_by', read_only=True)
     created_at_jalali = serializers.ReadOnlyField()
     decided_at_jalali = serializers.ReadOnlyField()
+    teacher_seen_at_jalali = serializers.ReadOnlyField()
     permission_type_display = serializers.CharField(source='get_permission_type_display', read_only=True)
     status_display = serializers.CharField(source='get_status_display', read_only=True)
 
@@ -54,6 +55,7 @@ class EntryExitPermissionRequestSerializer(serializers.ModelSerializer):
             'status', 'status_display', 'response_message',
             'coordination_person', 'coordination_phone',
             'decided_by', 'decided_by_info', 'decided_at', 'decided_at_jalali',
+            'teacher_seen_at', 'teacher_seen_at_jalali',
             'created_at', 'created_at_jalali', 'updated_at',
         ]
-        read_only_fields = ['teacher', 'status', 'response_message', 'coordination_person', 'coordination_phone', 'decided_by', 'decided_at', 'created_at', 'updated_at']
+        read_only_fields = ['teacher', 'status', 'response_message', 'coordination_person', 'coordination_phone', 'decided_by', 'decided_at', 'teacher_seen_at', 'created_at', 'updated_at']

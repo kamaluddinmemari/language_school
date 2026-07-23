@@ -11,6 +11,7 @@ class NewLeadSerializer(serializers.ModelSerializer):
     cancelled_at_jalali = serializers.ReadOnlyField()
     followup1_by_name = serializers.SerializerMethodField()
     followup2_by_name = serializers.SerializerMethodField()
+    birth_date_jalali = serializers.ReadOnlyField()
 
     def get_followup1_by_name(self, obj):
         return obj.followup1_by.get_full_name() if obj.followup1_by else None
@@ -21,7 +22,7 @@ class NewLeadSerializer(serializers.ModelSerializer):
     class Meta:
         model = NewLead
         fields = [
-            'id', 'first_name', 'last_name', 'father_name', 'national_code', 'phone',
+            'id', 'first_name', 'last_name', 'father_name', 'national_code', 'birth_date', 'birth_date_jalali', 'phone',
             'status', 'status_display',
             'followup1_at', 'followup1_at_jalali', 'followup1_by_name',
             'followup2_at', 'followup2_at_jalali', 'followup2_by_name',

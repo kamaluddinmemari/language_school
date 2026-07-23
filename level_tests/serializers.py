@@ -15,7 +15,7 @@ class LevelTestIntakeSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = LevelTest
-        fields = ['id', 'first_name', 'last_name', 'father_name', 'birth_date', 'national_code', 'phone', 'price', 'payment_status']
+        fields = ['id', 'first_name', 'last_name', 'father_name', 'birth_date', 'national_code', 'phone', 'student', 'price', 'payment_status']
 
     def validate(self, attrs):
         for field in ['first_name', 'last_name', 'father_name', 'birth_date', 'national_code', 'phone']:
@@ -29,14 +29,15 @@ class LevelTestSerializer(serializers.ModelSerializer):
     test_date_jalali = serializers.ReadOnlyField()
     created_at_jalali = serializers.ReadOnlyField()
     birth_date_jalali = serializers.ReadOnlyField()
+    age = serializers.ReadOnlyField()
     display_evaluator_name = serializers.ReadOnlyField()
     status_display = serializers.CharField(source='get_status_display', read_only=True)
 
     class Meta:
         model = LevelTest
         fields = [
-            'id', 'first_name', 'last_name', 'father_name', 'birth_date', 'birth_date_jalali',
-            'national_code', 'phone', 'status', 'status_display', 'price', 'payment_status',
+            'id', 'first_name', 'last_name', 'father_name', 'birth_date', 'birth_date_jalali', 'age',
+            'national_code', 'phone', 'student', 'status', 'status_display', 'price', 'payment_status',
             'age_group', 'level', 'test_date', 'test_date_jalali',
             'evaluator', 'evaluator_name', 'display_evaluator_name', 'notes', 'created_by',
             'created_at', 'created_at_jalali', 'updated_at',

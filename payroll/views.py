@@ -225,3 +225,23 @@ class LeaveRequestDecideView(APIView):
         leave.decided_by = request.user
         leave.save()
         return Response(LeaveRequestSerializer(leave).data)
+
+
+class MonthlyPayrollAcknowledgeView(APIView):
+    """
+    POST: «مشاهده و تایید فیش» — فقط خودِ کارمندِ صاحبِ فیش می‌تواند بزند (نه مدیر برای او).
+    تاریخ/ساعت شمسیِ همین لحظه ثبت می‌شود؛ اگر قبلاً تاییدشده باشد، همان تاریخ اول باقی می‌ماند.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, pk):
+        try:
+            payroll = MonthlyPayroll.objects.get(pk=pk)
+        except MonthlyPayroll.DoesNotExist:
+            return Response({'error': 'فیش پیدا نشد'}, status=status.HTTP_404_NOT_FOUND)
+        if payroll.user_id != request.user.id:
+            return Response({'error': 'فقط خودِ کارمند می‌تواند فیش خودش را تایید کند'}, status=status.HTTP_403_FORBIDDEN)
+        if not payroll.acknowledged_at:
+            payroll.acknowledged_at = timezone.now()
+            payroll.save()
+        return Response(MonthlyPayrollSerializer(payroll).data)

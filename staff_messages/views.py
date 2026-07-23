@@ -132,6 +132,20 @@ class TeacherNoticeAcknowledgeView(APIView):
 # مجوز ورود/خروج دانش‌آموز
 # ---------------------------------------------------------------------------
 
+class EntryExitRequestMarkSeenView(APIView):
+    """
+    POST: وقتی استاد وارد صفحه‌ی «مجوزهای ورود/خروج» می‌شود، همه‌ی موارد قطعی‌شده‌ی خودش
+    (چه با درخواست خودش چه با ارجاع مستقیم مدیر) که هنوز ندیده، خودکار با تاریخ/ساعت همین
+    لحظه سین می‌خورد. مشابه الگوی «mark-all-seen» پیام‌های مدیریت.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        qs = EntryExitPermissionRequest.objects.filter(teacher=request.user, is_deleted=False)
+        qs.filter(teacher_seen_at__isnull=True).exclude(status='pending').update(teacher_seen_at=timezone.now())
+        return Response(EntryExitPermissionRequestSerializer(qs, many=True).data)
+
+
 class EntryExitRequestListView(generics.ListCreateAPIView):
     """GET: مدیر همه را می‌بیند، استاد فقط درخواست‌های خودش — POST: فقط استاد"""
     permission_classes = [IsAuthenticated]
@@ -148,20 +162,52 @@ class EntryExitRequestListView(generics.ListCreateAPIView):
         return qs.filter(teacher=user)
 
     def create(self, request, *args, **kwargs):
-        if request.user.role not in User.TEACHER_LIKE_ROLES:
-            return Response({'error': 'فقط استاد می‌تواند درخواست مجوز ثبت کند'}, status=status.HTTP_403_FORBIDDEN)
+        if request.user.role not in User.TEACHER_LIKE_ROLES and request.user.role not in ('admin', 'office'):
+            return Response({'error': 'فقط استاد یا مدیر می‌تواند درخواست مجوز ثبت کند'}, status=status.HTTP_403_FORBIDDEN)
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        req = serializer.save(teacher=request.user)
 
-        admins = list(User.objects.filter(role='admin'))
-        send_notification(
-            sender=request.user,
-            recipients=admins,
-            title='درخواست مجوز ورود/خروج جدید',
-            body=f"{request.user.first_name} {request.user.last_name} برای «{req.student_name}» درخواست {req.get_permission_type_display()} ثبت کرد.",
-            notif_type='general',
-        )
+        is_admin_creator = request.user.role in ('admin', 'office')
+        assigned_teacher = request.user
+        if is_admin_creator:
+            teacher_id = request.data.get('teacher_id') or request.data.get('teacher')
+            if teacher_id:
+                try:
+                    assigned_teacher = User.objects.get(pk=teacher_id, role__in=User.TEACHER_LIKE_ROLES)
+                except User.DoesNotExist:
+                    return Response({'error': 'استاد انتخاب‌شده پیدا نشد'}, status=status.HTTP_400_BAD_REQUEST)
+
+        extra = {}
+        if is_admin_creator:
+            # وقتی خودِ مدیر ثبت می‌کند، معمولاً نتیجه‌ی نهایی همان لحظه مشخص است — می‌تواند
+            # وضعیت/توضیح/اطلاعات هماهنگی را همان اول وارد کند (نه لزوماً «در انتظار بررسی»)
+            if request.data.get('status') in (EntryExitPermissionRequest.Status.APPROVED, EntryExitPermissionRequest.Status.REJECTED):
+                extra['status'] = request.data['status']
+                extra['response_message'] = request.data.get('response_message', '')
+                extra['decided_by'] = request.user
+                extra['decided_at'] = timezone.now()
+            extra['coordination_person'] = request.data.get('coordination_person', '')
+            extra['coordination_phone'] = request.data.get('coordination_phone', '')
+
+        req = serializer.save(teacher=assigned_teacher, **extra)
+
+        if is_admin_creator:
+            # به استادی که این مورد به او ارجاع شده اطلاع بده تا در اپش ببیند
+            send_notification(
+                sender=request.user, recipients=[assigned_teacher],
+                title='یک مورد ورود/خروج برایتان ثبت شد',
+                body=f"مدیریت برای «{req.student_name}» یک {req.get_permission_type_display()} ثبت کرد — برای مشاهده وارد اپ شوید.",
+                notif_type='general',
+            )
+        else:
+            admins = list(User.objects.filter(role__in=('admin', 'office')))
+            send_notification(
+                sender=request.user,
+                recipients=admins,
+                title='درخواست مجوز ورود/خروج جدید',
+                body=f"{request.user.first_name} {request.user.last_name} برای «{req.student_name}» درخواست {req.get_permission_type_display()} ثبت کرد.",
+                notif_type='general',
+            )
         return Response(EntryExitPermissionRequestSerializer(req).data, status=status.HTTP_201_CREATED)
 
 

@@ -86,6 +86,9 @@ class EntryExitPermissionRequest(models.Model):
         User, on_delete=models.SET_NULL, null=True, blank=True, related_name='decided_entry_exit_requests'
     )
     decided_at = models.DateTimeField(null=True, blank=True)
+    # وقتی استاد (مقصدِ ارجاع) وارد صفحه‌ی مربوطه در اپ می‌شود، خودکار همین‌جا سین می‌خورد —
+    # مخصوصاً برای مواردی که خودِ مدیر ثبت/ارجاع داده (نه استاد)
+    teacher_seen_at = models.DateTimeField(null=True, blank=True)
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -106,6 +109,10 @@ class EntryExitPermissionRequest(models.Model):
     @property
     def decided_at_jalali(self):
         return _jalali(self.decided_at)
+
+    @property
+    def teacher_seen_at_jalali(self):
+        return _jalali(self.teacher_seen_at)
 
     def __str__(self):
         return f"{self.get_permission_type_display()} — {self.student_name} ({self.teacher})"

@@ -30,6 +30,11 @@ class LevelDemandSerializer(serializers.Serializer):
         required=False, default='', allow_blank=True
     )
     student_status_other = serializers.CharField(required=False, default='', allow_blank=True)
+    # روز/ساعت/استاد ترجیحی برای همین سطح — اختیاری؛ اگر داده شود، اول بین اتاق‌های
+    # موجود دقیقاً با همین روز+ساعت (و ترجیحاً همین استاد) دنبال جا می‌گردد
+    preferred_day_type = serializers.CharField(required=False, default='', allow_blank=True)
+    preferred_time_slot = serializers.CharField(required=False, default='', allow_blank=True)
+    preferred_teacher_name = serializers.CharField(required=False, default='', allow_blank=True)
 
 
 class AllocateClassesSerializer(serializers.Serializer):

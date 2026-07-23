@@ -2,7 +2,7 @@ from django.urls import path
 from .views import (
     EmployeeProfileListCreateView, EmployeeProfileDetailView,
     SalaryProfileListCreateView, SalaryProfileDetailView,
-    MonthlyPayrollListCreateView, MonthlyPayrollDetailView,
+    MonthlyPayrollListCreateView, MonthlyPayrollDetailView, MonthlyPayrollAcknowledgeView,
     LeaveBalanceListCreateView, LeaveBalanceDetailView,
     LeaveRequestListCreateView, LeaveRequestDetailView, LeaveRequestDecideView,
 )
@@ -16,6 +16,7 @@ urlpatterns = [
 
     path('monthly-payroll/', MonthlyPayrollListCreateView.as_view(), name='monthly_payroll_list'),
     path('monthly-payroll/<int:pk>/', MonthlyPayrollDetailView.as_view(), name='monthly_payroll_detail'),
+    path('monthly-payroll/<int:pk>/acknowledge/', MonthlyPayrollAcknowledgeView.as_view(), name='monthly_payroll_acknowledge'),
 
     path('leave-balances/', LeaveBalanceListCreateView.as_view(), name='leave_balance_list'),
     path('leave-balances/<int:pk>/', LeaveBalanceDetailView.as_view(), name='leave_balance_detail'),

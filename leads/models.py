@@ -23,6 +23,7 @@ class NewLead(models.Model):
     last_name = models.CharField(max_length=150)
     father_name = models.CharField(max_length=150, blank=True)
     national_code = models.CharField(max_length=20, blank=True)
+    birth_date = models.DateField(null=True, blank=True)
     phone = models.CharField(max_length=20)
 
     status = models.CharField(max_length=10, choices=Status.choices, default=Status.PENDING)
@@ -46,6 +47,12 @@ class NewLead(models.Model):
     @property
     def created_at_jalali(self):
         return _jalali(self.created_at)
+
+    @property
+    def birth_date_jalali(self):
+        if not self.birth_date:
+            return None
+        return jdatetime.date.fromgregorian(date=self.birth_date).strftime('%Y/%m/%d')
 
     @property
     def followup1_at_jalali(self):

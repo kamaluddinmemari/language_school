@@ -43,6 +43,12 @@ class LevelTest(models.Model):
     birth_date = models.DateField(null=True, blank=True)
     national_code = models.CharField(max_length=10, blank=True)
     phone = models.CharField(max_length=11, blank=True)
+    # اگر این آزمون برای یک دانش‌آموزِ از‌قبل‌ثبت‌شده (مثلاً از «ثبت‌نام مستقیم») ساخته شده،
+    # اینجا به حساب واقعی‌اش وصل می‌شود — تا نتیجه بعداً در لیست دانش‌آموزان هم قابل‌مشاهده/ویرایش باشد
+    student = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='level_tests_as_student', limit_choices_to={'role': 'student'}
+    )
     price = models.PositiveIntegerField(null=True, blank=True, help_text='قیمت این آزمون — پیش‌فرض از تنظیمات، ولی همیشه قابل ویرایش برای هر مورد')
     payment_status = models.CharField(max_length=10, choices=PaymentStatus.choices, default=PaymentStatus.UNPAID)
 
@@ -71,6 +77,17 @@ class LevelTest(models.Model):
         if not self.birth_date:
             return None
         return jdatetime.date.fromgregorian(date=self.birth_date).strftime('%Y/%m/%d')
+
+    @property
+    def age(self):
+        """سن فعلی (به سال) — محاسبه‌ی خودکار از روی تاریخ تولد، برای نمایش در اپ استاد/ارزیاب"""
+        if not self.birth_date:
+            return None
+        today = timezone.localdate()
+        years = today.year - self.birth_date.year
+        if (today.month, today.day) < (self.birth_date.month, self.birth_date.day):
+            years -= 1
+        return years
 
     @property
     def test_date_jalali(self):

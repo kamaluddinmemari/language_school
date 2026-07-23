@@ -8,6 +8,7 @@ from .views import (
     EntryExitRequestListView,
     EntryExitRequestDetailView,
     EntryExitRequestDecideView,
+    EntryExitRequestMarkSeenView,
 )
 
 urlpatterns = [
@@ -18,6 +19,7 @@ urlpatterns = [
     path('teacher-notices/<int:pk>/acknowledge/', TeacherNoticeAcknowledgeView.as_view(), name='teacher_notice_acknowledge'),
 
     path('entry-exit-requests/', EntryExitRequestListView.as_view(), name='entry_exit_request_list'),
+    path('entry-exit-requests/mark-seen/', EntryExitRequestMarkSeenView.as_view(), name='entry_exit_request_mark_seen'),
     path('entry-exit-requests/<int:pk>/', EntryExitRequestDetailView.as_view(), name='entry_exit_request_detail'),
     path('entry-exit-requests/<int:pk>/decide/', EntryExitRequestDecideView.as_view(), name='entry_exit_request_decide'),
 ]
