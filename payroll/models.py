@@ -9,6 +9,72 @@ PERSIAN_MONTHS = ['فروردین', 'اردیبهشت', 'خرداد', 'تیر', 
 STANDARD_MONTHLY_HOURS = 220
 STANDARD_DAILY_HOURS = 7.33
 OVERTIME_MULTIPLIER = 1.4  # نرخ اضافه‌کاری طبق عرف رایج (۱٫۴ برابر نرخ ساعتی عادی)
+EMPLOYEE_INSURANCE_RATE = 0.07  # سهم بیمه‌ی کارمند (۷٪ مزد مبنای بیمه)
+
+
+def days_in_jalali_month(jy, jm):
+    """تعداد روزهای واقعی یک ماه شمسی (۳۱/۳۰/۲۹ یا ۳۰ برای اسفند کبیسه) —
+    این تابع دقیقاً همون چیزیه که باعث می‌شه محاسبات حقوق خودکار ماه ۳۰ و ۳۱
+    روزه رو لحاظ کنن، به‌جای فرض ثابت ۳۰ روز."""
+    if jm <= 6:
+        return 31
+    if jm <= 11:
+        return 30
+    start_of_esfand = jdatetime.date(jy, 12, 1).togregorian()
+    start_of_next_year = jdatetime.date(jy + 1, 1, 1).togregorian()
+    return (start_of_next_year - start_of_esfand).days
+
+
+_PERSIAN_ONES = ['', 'یک', 'دو', 'سه', 'چهار', 'پنج', 'شش', 'هفت', 'هشت', 'نه']
+_PERSIAN_TENS_TEEN = ['ده', 'یازده', 'دوازده', 'سیزده', 'چهارده', 'پانزده', 'شانزده', 'هفده', 'هجده', 'نوزده']
+_PERSIAN_TENS = ['', '', 'بیست', 'سی', 'چهل', 'پنجاه', 'شصت', 'هفتاد', 'هشتاد', 'نود']
+_PERSIAN_HUNDREDS = ['', 'صد', 'دویست', 'سیصد', 'چهارصد', 'پانصد', 'ششصد', 'هفتصد', 'هشتصد', 'نهصد']
+_PERSIAN_SCALES = ['', ' هزار', ' میلیون', ' میلیارد', ' بیلیون']
+
+
+def _three_digit_to_words(n):
+    if n == 0:
+        return ''
+    parts = []
+    hundred, rem = divmod(n, 100)
+    if hundred:
+        parts.append(_PERSIAN_HUNDREDS[hundred])
+    if rem:
+        if rem < 10:
+            parts.append(_PERSIAN_ONES[rem])
+        elif rem < 20:
+            parts.append(_PERSIAN_TENS_TEEN[rem - 10])
+        else:
+            tens, ones = divmod(rem, 10)
+            if ones:
+                parts.append(_PERSIAN_TENS[tens] + ' و ' + _PERSIAN_ONES[ones])
+            else:
+                parts.append(_PERSIAN_TENS[tens])
+    return ' و '.join(parts)
+
+
+def number_to_persian_words(n):
+    """تبدیل یک عدد صحیح (مثلاً مبلغ حقوق) به حروف فارسی — بدون هیچ پکیج خارجی"""
+    n = int(round(n))
+    if n == 0:
+        return 'صفر'
+    if n < 0:
+        return 'منفی ' + number_to_persian_words(-n)
+
+    groups = []
+    temp = n
+    while temp > 0:
+        groups.append(temp % 1000)
+        temp //= 1000
+
+    parts = []
+    for i in range(len(groups) - 1, -1, -1):
+        if groups[i] == 0:
+            continue
+        words = _three_digit_to_words(groups[i])
+        parts.append(words + _PERSIAN_SCALES[i])
+    return ' و '.join(parts)
+
 
 
 class EmployeeProfile(models.Model):
@@ -23,6 +89,9 @@ class EmployeeProfile(models.Model):
     address = models.TextField(blank=True, help_text='آدرس محل سکونت')
     marital_status = models.CharField(max_length=10, choices=MaritalStatus.choices, blank=True)
     children_count = models.PositiveIntegerField(default=0, help_text='تعداد فرزندان (در صورت تاهل)')
+    sheba_number = models.CharField(max_length=26, blank=True, help_text='شماره شبا (بدون IR)')
+    bank_account_number = models.CharField(max_length=30, blank=True, help_text='شماره حساب بانکی')
+    card_number = models.CharField(max_length=16, blank=True, help_text='شماره کارت بانکی')
     updated_at = models.DateTimeField(auto_now=True)
 
     @property
@@ -49,9 +118,11 @@ class SalaryProfile(models.Model):
     marriage_allowance = models.PositiveIntegerField(default=0, help_text='حق تاهل (ماهانه)')
     child_allowance = models.PositiveIntegerField(default=0, help_text='حق اولاد (ماهانه)')
     seniority_allowance = models.PositiveIntegerField(default=0, help_text='سنوات سالانه — حق سنوات (معادل ماهانه‌اش اینجا وارد می‌شود)')
-    # حق بیمه‌ی مصوبِ همان سال برای ۳۰ روز کامل — مبنای محاسبه‌ی خودکار حق بیمه‌ی هر ماه
-    # بر اساس تعداد روزهای بیمه‌ی همان ماه (insurance_days در MonthlyPayroll)
-    insurance_rate_30_days = models.PositiveIntegerField(default=0, help_text='حق بیمه‌ی مصوبِ این سال برای ۳۰ روز کامل (تومان)')
+    housing_allowance_yearly = models.PositiveIntegerField(default=0, help_text='حق مسکن سالانه (تومان) — معادل ماهانه/روزانه/ساعتی‌اش خودکار محاسبه می‌شود')
+    # مزد مبنای بیمه (برای ۳۰ روز کامل) — طبق قانون برای متاهل و مجرد می‌تواند فرق کند
+    # (چون اجزای تشکیل‌دهنده‌ی مزد مبنای بیمه‌ی متاهل معمولاً حق تاهل/اولاد را هم شامل می‌شود)
+    insurance_base_single = models.PositiveIntegerField(default=0, help_text='مزد مبنای بیمه برای کارمند مجرد (۳۰ روز کامل، تومان)')
+    insurance_base_married = models.PositiveIntegerField(default=0, help_text='مزد مبنای بیمه برای کارمند متاهل (۳۰ روز کامل، تومان)')
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
@@ -59,8 +130,13 @@ class SalaryProfile(models.Model):
         ordering = ['-work_year']
 
     @property
+    def housing_allowance_monthly(self):
+        return round(self.housing_allowance_yearly / 12) if self.housing_allowance_yearly else 0
+
+    @property
     def gross_base_monthly(self):
-        return self.base_salary + self.food_allowance + self.marriage_allowance + self.child_allowance + self.seniority_allowance
+        return (self.base_salary + self.food_allowance + self.marriage_allowance +
+                self.child_allowance + self.seniority_allowance + self.housing_allowance_monthly)
 
     def _component_breakdown(self, monthly_amount):
         return {
@@ -78,7 +154,7 @@ class SalaryProfile(models.Model):
             'marriage_allowance': self._component_breakdown(self.marriage_allowance),
             'child_allowance': self._component_breakdown(self.child_allowance),
             'seniority_allowance': self._component_breakdown(self.seniority_allowance),
-            'insurance_rate_30_days': self._component_breakdown(self.insurance_rate_30_days),
+            'housing_allowance': self._component_breakdown(self.housing_allowance_monthly),
         }
 
     def __str__(self):
@@ -89,7 +165,12 @@ class MonthlyPayroll(models.Model):
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='payroll_records')
     jalali_year = models.PositiveIntegerField()
     jalali_month = models.PositiveIntegerField(help_text='۱ تا ۱۲')
-    worked_hours = models.DecimalField(max_digits=6, decimal_places=2, default=0, help_text='ساعات کارکرد این ماه')
+    worked_hours = models.DecimalField(
+        max_digits=6, decimal_places=2, default=0,
+        help_text='ساعات کارکرد این ماه — فعلاً دستی وارد و قابل‌ویرایش است. '
+                   'در آینده وقتی صفحه‌ی «ثبت ورود و خروج» ساخته شد، باید این مقدار '
+                   'به‌صورت خودکار از آنجا محاسبه و پر شود، ولی همچنان دستی هم قابل‌اصلاح بماند.'
+    )
 
     # کسورات
     insurance_days = models.PositiveIntegerField(default=30, help_text='تعداد روزهای بیمه‌ی این ماه')
@@ -100,6 +181,7 @@ class MonthlyPayroll(models.Model):
     # اضافات
     overtime_hours = models.DecimalField(max_digits=6, decimal_places=2, default=0, help_text='اضافه‌کاری (ساعت) — با نرخ ۱٫۴ برابر اضافه می‌شود')
     bonus_amount = models.PositiveIntegerField(default=0, help_text='پاداش (تومان) — مستقیم اضافه می‌شود')
+    extra_payment = models.PositiveIntegerField(default=0, help_text='اضافه‌پرداخت این ماه (تومان) — مستقیم به ناخالص اضافه می‌شود')
 
     notes = models.TextField(blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -123,21 +205,45 @@ class MonthlyPayroll(models.Model):
         return sp.gross_base_monthly if sp else 0
 
     @property
+    def days_in_month(self):
+        """تعداد روزهای واقعی این ماه شمسی (۲۹/۳۰/۳۱) — پایه‌ی محاسبه‌ی حقوق ساعتی/روزانه‌ی همین ماه"""
+        return days_in_jalali_month(self.jalali_year, self.jalali_month)
+
+    @property
+    def standard_monthly_hours_this_month(self):
+        """ساعت استاندارد ماهانه، متناسب با تعداد روزهای واقعی همین ماه (نه فرض ثابت ۲۲۰ ساعت) —
+        این دقیقاً همون چیزیه که باعث می‌شه ماه ۳۰ و ۳۱ روزه به‌صورت خودکار در محاسبات لحاظ بشه."""
+        return round(self.days_in_month * STANDARD_DAILY_HOURS, 2)
+
+    @property
     def hourly_wage(self):
-        return round(self.gross_base_monthly / STANDARD_MONTHLY_HOURS) if self.gross_base_monthly else 0
+        hours = self.standard_monthly_hours_this_month
+        return round(self.gross_base_monthly / hours) if self.gross_base_monthly and hours else 0
 
     @property
     def daily_wage(self):
-        return round(self.hourly_wage * STANDARD_DAILY_HOURS)
+        return round(self.gross_base_monthly / self.days_in_month) if self.gross_base_monthly else 0
+
+    @property
+    def insurance_base_30days(self):
+        """مزد مبنای بیمه‌ی ۳۰روزه، بر اساس وضعیت تاهل کارمند (از EmployeeProfile)"""
+        sp = self._salary_profile
+        if not sp:
+            return 0
+        try:
+            marital = self.user.employee_profile.marital_status
+        except Exception:
+            marital = ''
+        return sp.insurance_base_married if marital == 'married' else sp.insurance_base_single
 
     @property
     def insurance_amount(self):
-        """حق بیمه‌ی این ماه — خودکار از روی نرخ مصوب سالانه (برای ۳۰ روز) و تعداد روزهای بیمه‌ی همین ماه"""
-        sp = self._salary_profile
-        rate30 = sp.insurance_rate_30_days if sp else 0
-        if not rate30:
+        """حق بیمه‌ی سهم کارمند این ماه = ۷٪ از (مزد مبنای بیمه‌ی متناسب با تاهل/تجرد، پرورده‌شده به تعداد روزهای بیمه‌ی این ماه)"""
+        base30 = self.insurance_base_30days
+        if not base30:
             return 0
-        return round(rate30 / 30 * self.insurance_days)
+        prorated_base = base30 / 30 * self.insurance_days
+        return round(prorated_base * EMPLOYEE_INSURANCE_RATE)
 
     @property
     def overtime_pay(self):
@@ -152,10 +258,31 @@ class MonthlyPayroll(models.Model):
         return round(self.hourly_wage * float(self.undertime_hours))
 
     @property
+    def approved_leave_days_this_month(self):
+        """تعداد روزهای مرخصی روزانه‌ی تاییدشده در همین ماه شمسی — خودکار از بخش مرخصی‌ها استخراج می‌شود.
+        این روزها جزو ساعات کاری حساب می‌شوند (کسر نمی‌شوند)."""
+        total = 0
+        for r in self.user.leave_requests.filter(status='approved', leave_type='daily'):
+            jd = jdatetime.date.fromgregorian(date=r.start_date)
+            if jd.year == self.jalali_year and jd.month == self.jalali_month:
+                total += r.days_count
+        return total
+
+    @property
+    def approved_leave_hours_this_month(self):
+        """جمع مرخصی ساعتی تاییدشده در همین ماه — این هم جزو ساعات کاری حساب می‌شود."""
+        total = 0
+        for r in self.user.leave_requests.filter(status='approved', leave_type='hourly'):
+            jd = jdatetime.date.fromgregorian(date=r.start_date)
+            if jd.year == self.jalali_year and jd.month == self.jalali_month:
+                total += float(r.hours or 0)
+        return total
+
+    @property
     def gross_pay(self):
-        """حقوق ناخالص = (حقوق ساعتی × ساعت کارکرد) + اضافه‌کاری + پاداش"""
+        """حقوق ناخالص = (حقوق ساعتی × ساعت کارکرد) + اضافه‌کاری + پاداش + اضافه‌پرداخت"""
         base = round(self.hourly_wage * float(self.worked_hours))
-        return base + self.overtime_pay + self.bonus_amount
+        return base + self.overtime_pay + self.bonus_amount + self.extra_payment
 
     @property
     def total_deductions(self):
@@ -165,6 +292,11 @@ class MonthlyPayroll(models.Model):
     def net_pay(self):
         """حقوق خالص = ناخالص - (حق بیمه + کسر غیبت + کسر کم‌کاری)"""
         return max(0, self.gross_pay - self.total_deductions)
+
+    @property
+    def net_pay_words(self):
+        """حقوق خالص به حروف فارسی (برای پایین فیش حقوقی)"""
+        return number_to_persian_words(self.net_pay) + ' تومان'
 
     @property
     def jalali_label(self):

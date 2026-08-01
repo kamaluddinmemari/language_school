@@ -8,19 +8,23 @@ class EmployeeProfileSerializer(serializers.ModelSerializer):
     class Meta:
         model = EmployeeProfile
         fields = ['id', 'user', 'education_degree', 'education_field', 'hire_date', 'hire_date_jalali',
-                   'address', 'marital_status', 'children_count', 'updated_at']
+                   'address', 'marital_status', 'children_count', 'sheba_number', 'bank_account_number',
+                   'card_number', 'updated_at']
         read_only_fields = ['id', 'updated_at']
 
 
 class SalaryProfileSerializer(serializers.ModelSerializer):
     gross_base_monthly = serializers.ReadOnlyField()
+    housing_allowance_monthly = serializers.ReadOnlyField()
     components_breakdown = serializers.ReadOnlyField()
     user_full_name = serializers.SerializerMethodField()
 
     class Meta:
         model = SalaryProfile
         fields = ['id', 'user', 'user_full_name', 'work_year', 'base_salary', 'food_allowance',
-                   'marriage_allowance', 'child_allowance', 'seniority_allowance', 'insurance_rate_30_days',
+                   'marriage_allowance', 'child_allowance', 'seniority_allowance',
+                   'housing_allowance_yearly', 'housing_allowance_monthly',
+                   'insurance_base_single', 'insurance_base_married',
                    'gross_base_monthly', 'components_breakdown', 'updated_at']
         read_only_fields = ['id', 'updated_at']
 
@@ -31,6 +35,9 @@ class SalaryProfileSerializer(serializers.ModelSerializer):
 class MonthlyPayrollSerializer(serializers.ModelSerializer):
     hourly_wage = serializers.ReadOnlyField()
     daily_wage = serializers.ReadOnlyField()
+    days_in_month = serializers.ReadOnlyField()
+    standard_monthly_hours_this_month = serializers.ReadOnlyField()
+    insurance_base_30days = serializers.ReadOnlyField()
     insurance_amount = serializers.ReadOnlyField()
     overtime_pay = serializers.ReadOnlyField()
     absence_deduction = serializers.ReadOnlyField()
@@ -38,6 +45,9 @@ class MonthlyPayrollSerializer(serializers.ModelSerializer):
     total_deductions = serializers.ReadOnlyField()
     gross_pay = serializers.ReadOnlyField()
     net_pay = serializers.ReadOnlyField()
+    net_pay_words = serializers.ReadOnlyField()
+    approved_leave_days_this_month = serializers.ReadOnlyField()
+    approved_leave_hours_this_month = serializers.ReadOnlyField()
     jalali_label = serializers.ReadOnlyField()
     acknowledged_at_jalali = serializers.ReadOnlyField()
     user_full_name = serializers.SerializerMethodField()
@@ -47,9 +57,11 @@ class MonthlyPayrollSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'user', 'user_full_name', 'jalali_year', 'jalali_month', 'jalali_label',
             'worked_hours', 'insurance_days', 'absence_days', 'absence_hours', 'undertime_hours',
-            'overtime_hours', 'bonus_amount', 'notes',
-            'hourly_wage', 'daily_wage', 'insurance_amount', 'overtime_pay', 'absence_deduction',
-            'undertime_deduction', 'total_deductions', 'gross_pay', 'net_pay',
+            'overtime_hours', 'bonus_amount', 'extra_payment', 'notes',
+            'days_in_month', 'standard_monthly_hours_this_month',
+            'hourly_wage', 'daily_wage', 'insurance_base_30days', 'insurance_amount', 'overtime_pay',
+            'absence_deduction', 'undertime_deduction', 'total_deductions', 'gross_pay', 'net_pay',
+            'net_pay_words', 'approved_leave_days_this_month', 'approved_leave_hours_this_month',
             'acknowledged_at', 'acknowledged_at_jalali', 'created_at', 'updated_at',
         ]
         read_only_fields = ['id', 'acknowledged_at', 'created_at', 'updated_at']

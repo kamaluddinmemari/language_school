@@ -45,14 +45,22 @@ class TeacherSerializer(serializers.ModelSerializer):
 
     password = serializers.CharField(write_only=True, required=False, validators=[validate_password, password_validator])
     average_rating = serializers.ReadOnlyField()
+    birth_date_jalali = serializers.SerializerMethodField()
 
     class Meta:
         model = User
         fields = [
-            'id', 'username', 'password', 'first_name', 'last_name',
+            'id', 'username', 'password', 'first_name', 'last_name', 'father_name',
+            'national_code', 'birth_date', 'birth_date_jalali',
             'phone', 'phone2', 'teacher_level', 'avatar', 'average_rating', 'role'
         ]
         read_only_fields = ['role']
+
+    def get_birth_date_jalali(self, obj):
+        if not obj.birth_date:
+            return None
+        import jdatetime
+        return jdatetime.date.fromgregorian(date=obj.birth_date).strftime('%Y/%m/%d')
 
     def create(self, validated_data):
         password = validated_data.pop('password', None)
