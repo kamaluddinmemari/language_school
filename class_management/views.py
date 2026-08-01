@@ -4,10 +4,12 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 import jdatetime
-from .models import ClassSlot
+from .models import ClassSlot, ClassSlotEnrollment
+from .models import THREE_DAY_TIME_SLOTS, THURSDAY_MORNING_SLOT, THURSDAY_EVENING_SLOT, FRIDAY_SLOT
 from .serializers import (
     ClassSlotSerializer, AllocateClassesSerializer, ConfirmOverflowSerializer,
     TransferSurplusSerializer, SpinOffSurplusSerializer,
+    BulkCreatePhysicalClassesSerializer, EnrollStudentSerializer, ClassSlotEnrollmentSerializer,
 )
 from .allocation import allocate_classes
 
@@ -370,3 +372,152 @@ class ClassStatsView(APIView):
             'by_day_type': by_day_type,
             'generated_at_jalali': jdatetime.datetime.fromgregorian(datetime=now_local).strftime('%Y/%m/%d - %H:%M:%S'),
         })
+
+
+class BulkCreatePhysicalClassesView(APIView):
+    """
+    POST: دکمه‌ی «ساخت کلاس فیزیکی» — به‌جای وارد کردن یکی‌یکیِ هر کلاس، برای هر شماره‌کلاس
+    فیزیکی (مثلاً ۱ تا ۱۱) فقط یک ظرفیت پرسیده می‌شود، و به‌صورت خودکار همه‌ی بازه‌های
+    زمانیِ استاندارد براش ساخته می‌شوند: ۵ ساعت در روزهای زوج، همان ۵ ساعت در روزهای فرد،
+    یک اسلات پنجشنبه‌صبح، یک اسلات پنجشنبه‌عصر، یک اسلات جمعه — یعنی هر شماره‌کلاس مجموعاً
+    ۱۳ ردیف ClassSlot می‌سازد. اگر بعضی از این ترکیب‌ها از قبل موجود باشند (طبق قید یکتایی
+    شماره+روز+ساعت)، نادیده گرفته می‌شوند (خطا نمی‌دهد)، تا این دکمه چند بار هم که زده شود
+    مشکلی پیش نیاید.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        if request.user.role not in MANAGE_ROLES:
+            return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
+        serializer = BulkCreatePhysicalClassesSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        rooms = serializer.validated_data['rooms']
+
+        created, skipped = [], []
+        for room in rooms:
+            number = room['number']
+            capacity = room['capacity']
+
+            combos = []
+            for slot in THREE_DAY_TIME_SLOTS:
+                combos.append((ClassSlot.DayType.EVEN, slot, ClassSlot.Gender.GIRLS))
+            for slot in THREE_DAY_TIME_SLOTS:
+                combos.append((ClassSlot.DayType.ODD, slot, ClassSlot.Gender.BOYS))
+            combos.append((ClassSlot.DayType.THURSDAY_MORNING, THURSDAY_MORNING_SLOT, room['thursday_morning_gender']))
+            combos.append((ClassSlot.DayType.THURSDAY_EVENING, THURSDAY_EVENING_SLOT, room['thursday_evening_gender']))
+            combos.append((ClassSlot.DayType.FRIDAY, FRIDAY_SLOT, room['friday_gender']))
+
+            for day_type, time_slot, gender in combos:
+                obj, was_created = ClassSlot.objects.get_or_create(
+                    number=number, day_type=day_type, time_slot=time_slot,
+                    defaults={'capacity': capacity, 'gender': gender},
+                )
+                if was_created:
+                    created.append(obj.id)
+                else:
+                    skipped.append(obj.id)
+
+        slots = ClassSlot.objects.all().order_by('number')
+        return Response({
+            'created_count': len(created),
+            'skipped_count': len(skipped),
+            'slots': ClassSlotSerializer(slots, many=True).data,
+        }, status=status.HTTP_201_CREATED)
+
+
+class ClassSlotEnrollView(APIView):
+    """
+    POST: ثبت‌نام یک دانش‌آموز موجود (با کد ملی) در این کلاس فیزیکی خاص.
+    دانش‌آموز باید از قبل توی سیستم ثبت‌نام شده باشه (نقش=دانش‌آموز) و سطح زبانش
+    با سطح تخصیص‌داده‌شده‌ی این کلاس (assigned_level) یکی باشه.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, pk):
+        if request.user.role not in MANAGE_ROLES:
+            return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
+        try:
+            slot = ClassSlot.objects.get(pk=pk)
+        except ClassSlot.DoesNotExist:
+            return Response({'error': 'کلاس پیدا نشد'}, status=status.HTTP_404_NOT_FOUND)
+
+        serializer = EnrollStudentSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+
+        from django.contrib.auth import get_user_model
+        User = get_user_model()
+        try:
+            if data.get('student_id'):
+                student = User.objects.get(id=data['student_id'], role='student')
+            else:
+                student = User.objects.get(national_code=data['national_code'], role='student')
+        except User.DoesNotExist:
+            return Response({'error': 'دانش‌آموز پیدا نشد'}, status=status.HTTP_404_NOT_FOUND)
+        except User.MultipleObjectsReturned:
+            return Response({'error': 'بیش از یک دانش‌آموز با این مشخصات ثبت شده — با مدیر سیستم هماهنگ کنید'}, status=status.HTTP_400_BAD_REQUEST)
+
+        if slot.assigned_level and student.language_level and slot.assigned_level != student.language_level:
+            return Response({
+                'error': f"سطح این دانش‌آموز ({student.language_level}) با سطح این کلاس ({slot.assigned_level}) یکی نیست"
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        if slot.gender != ClassSlot.Gender.MIXED and student.gender:
+            expected_gender = 'دخترانه' if slot.gender == ClassSlot.Gender.GIRLS else 'پسرانه'
+            if (slot.gender == ClassSlot.Gender.GIRLS and student.gender != 'female') or \
+               (slot.gender == ClassSlot.Gender.BOYS and student.gender != 'male'):
+                return Response({
+                    'error': f"این کلاس {expected_gender} است و جنسیت این دانش‌آموز با آن همخوانی ندارد"
+                }, status=status.HTTP_400_BAD_REQUEST)
+
+        if ClassSlotEnrollment.objects.filter(class_slot=slot, student=student).exists():
+            return Response({'error': 'این دانش‌آموز قبلاً توی همین کلاس ثبت‌نام شده'}, status=status.HTTP_400_BAD_REQUEST)
+
+        if slot.current_count >= slot.capacity:
+            return Response({'error': 'ظرفیت این کلاس تکمیل است'}, status=status.HTTP_400_BAD_REQUEST)
+
+        enrollment = ClassSlotEnrollment.objects.create(
+            class_slot=slot, student=student,
+            payment_method=data['payment_method'],
+            tuition_amount=data['tuition_amount'],
+            pos_reference_code=data.get('pos_reference_code', ''),
+        )
+        slot.current_count += 1
+        if not slot.assigned_level and student.language_level:
+            slot.assigned_level = student.language_level
+        slot.save()
+
+        return Response({
+            'enrollment': ClassSlotEnrollmentSerializer(enrollment).data,
+            'slot': ClassSlotSerializer(slot).data,
+        }, status=status.HTTP_201_CREATED)
+
+
+class ClassSlotUnenrollView(APIView):
+    """DELETE: حذف یک دانش‌آموز از لیست این کلاس فیزیکی"""
+    permission_classes = [IsAuthenticated]
+
+    def delete(self, request, pk, student_id):
+        if request.user.role not in MANAGE_ROLES:
+            return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
+        try:
+            slot = ClassSlot.objects.get(pk=pk)
+            enrollment = ClassSlotEnrollment.objects.get(class_slot=slot, student_id=student_id)
+        except (ClassSlot.DoesNotExist, ClassSlotEnrollment.DoesNotExist):
+            return Response({'error': 'ثبت‌نام پیدا نشد'}, status=status.HTTP_404_NOT_FOUND)
+
+        enrollment.delete()
+        slot.current_count = max(0, slot.current_count - 1)
+        slot.save()
+        return Response({'message': 'دانش‌آموز از این کلاس حذف شد', 'slot': ClassSlotSerializer(slot).data})
+
+
+class ClassSlotRosterView(generics.ListAPIView):
+    """GET: لیست دانش‌آموزان ثبت‌نام‌شده‌ی یک کلاس فیزیکی خاص — مبنای خروجی اکسل/چاپ حضور و غیاب"""
+    permission_classes = [IsAuthenticated]
+    serializer_class = ClassSlotEnrollmentSerializer
+
+    def get_queryset(self):
+        if self.request.user.role not in MANAGE_ROLES:
+            return ClassSlotEnrollment.objects.none()
+        return ClassSlotEnrollment.objects.filter(class_slot_id=self.kwargs['pk']).select_related('student')

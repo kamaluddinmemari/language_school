@@ -13,6 +13,7 @@ from .views import (
     StudentDetailView,
     UserRoleView,
     PeopleSearchView,
+    StudentQuickSearchView,
 )
 
 urlpatterns = [
@@ -28,5 +29,6 @@ urlpatterns = [
     path('students/', StudentListView.as_view(), name='student_list'),
     path('students/<int:pk>/', StudentDetailView.as_view(), name='student_detail'),
     path('people-search/', PeopleSearchView.as_view(), name='people_search'),
+    path('student-quick-search/', StudentQuickSearchView.as_view(), name='student_quick_search'),
     path('users/<int:pk>/role/', UserRoleView.as_view(), name='user_role'),
 ]

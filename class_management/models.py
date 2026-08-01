@@ -1,4 +1,5 @@
 from django.db import models
+from django.conf import settings
 from django.utils import timezone
 import jdatetime
 
@@ -13,8 +14,10 @@ def _jalali(dt):
 MORNING_TIME_SLOTS = ['08:00-09:30', '09:45-11:15', '11:30-13:00']
 EVENING_TIME_SLOTS = ['15:45-17:15', '17:30-19:00', '19:00-20:30']
 EVENING_LATE_TIME_SLOTS = ['17:30-19:00', '19:00-20:30']  # برای زبان‌آموزان چرخشی — بعد از ۱۷:۳۰
+# ساعت‌های واقعی روزهای زوج/فرد (سه روز در هفته) — بدون ۰۸:۰۰-۰۹:۳۰ که فقط برای پنجشنبه‌صبح است
+THREE_DAY_TIME_SLOTS = ['09:45-11:15', '11:30-13:00', '15:45-17:15', '17:30-19:00', '19:00-20:30']
 THURSDAY_MORNING_SLOT = '08:00-13:00'
-THURSDAY_EVENING_SLOT = '13:00-17:00'
+THURSDAY_EVENING_SLOT = '13:00-17:15'
 FRIDAY_SLOT = '08:30-13:15'
 
 ALL_STANDARD_TIME_SLOTS = MORNING_TIME_SLOTS + EVENING_TIME_SLOTS + [THURSDAY_MORNING_SLOT, THURSDAY_EVENING_SLOT, FRIDAY_SLOT]
@@ -37,10 +40,16 @@ class ClassSlot(models.Model):
         ONLINE = 'online', 'آنلاین'
         HYBRID = 'hybrid', 'ترکیبی (آنلاین و حضوری)'
 
+    class Gender(models.TextChoices):
+        GIRLS = 'girls', 'دخترانه'
+        BOYS = 'boys', 'پسرانه'
+        MIXED = 'mixed', 'مختلط'
+
     number = models.PositiveIntegerField(help_text='شماره کلاس — همان شماره می‌تواند در چند ساعت/روز مختلف تکرار شود (مثلاً کلاس ۱ هم صبح هم عصر)')
     title = models.CharField(max_length=100, blank=True)
     day_type = models.CharField(max_length=20, choices=DayType.choices)
     time_slot = models.CharField(max_length=20, blank=True, help_text='ساعت جاری کلاس — ترجیحاً از لیست استاندارد')
+    gender = models.CharField(max_length=10, choices=Gender.choices, default=Gender.MIXED, help_text='دخترانه/پسرانه/مختلط — برای جایگذاری صحیح دانش‌آموزان')
     notes = models.TextField(blank=True, help_text='توضیحات آزاد، مثلاً «این کلاس فقط بین کلاس ۱ و ۹ جابجا شود»')
 
     capacity = models.PositiveIntegerField(default=10)
@@ -124,3 +133,37 @@ class ClassSlot(models.Model):
 
     def __str__(self):
         return f"کلاس {self.number} — {self.get_day_type_display()} ({self.time_slot or 'ساعت نامشخص'})"
+
+
+class ClassSlotEnrollment(models.Model):
+    """
+    ثبت‌نام واقعیِ یک دانش‌آموز مشخص (با کد ملی) توی یک کلاس فیزیکی خاص — برخلاف
+    current_count روی خودِ ClassSlot (که فقط یه عدد خامه، برای تخصیص انتزاعیِ سطح‌ها)،
+    این مدل واقعاً کدام دانش‌آموز کجاست را نگه می‌دارد تا بشود لیست حضور و غیاب ساخت.
+    """
+    class PaymentMethod(models.TextChoices):
+        POS = 'pos', 'دستگاه کارت‌خوان (پوز)'
+        CASH = 'cash', 'نقدی'
+        GATEWAY = 'gateway', 'درگاه پرداخت آنلاین'
+        CARD_TO_CARD = 'card_to_card', 'کارت به کارت'
+        WALLET = 'wallet', 'کیف پول'
+
+    class_slot = models.ForeignKey(ClassSlot, on_delete=models.CASCADE, related_name='enrollments')
+    student = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='class_slot_enrollments')
+    payment_method = models.CharField(max_length=20, choices=PaymentMethod.choices)
+    tuition_amount = models.PositiveIntegerField(default=0, help_text='مبلغ شهریه‌ی پرداختی (تومان)')
+    pos_reference_code = models.CharField(max_length=50, blank=True, help_text='کد ساعت/شماره پیگیری دستگاه پوز — فقط وقتی پرداخت از طریق پوز باشد')
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['created_at']
+        constraints = [
+            models.UniqueConstraint(fields=['class_slot', 'student'], name='unique_student_per_class_slot')
+        ]
+
+    @property
+    def created_at_jalali(self):
+        return _jalali(self.created_at)
+
+    def __str__(self):
+        return f"{self.student.get_full_name()} — کلاس {self.class_slot.number}"

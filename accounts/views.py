@@ -314,3 +314,34 @@ class PeopleSearchView(APIView):
             pass
 
         return Response(results[:10])
+
+
+class StudentQuickSearchView(APIView):
+    """
+    جستجوی مخصوص «ثبت دانش‌آموز در کلاس فیزیکی» — فقط بین دانش‌آموزهای واقعاً
+    ثبت‌نام‌شده (نه لیست انتظار/بدهکار و...)، و برخلاف PeopleSearchView، اینجا
+    آیدی واقعی کاربر (student.id) هم برمی‌گرده چون لازمه مستقیم برای enroll استفاده بشه.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        if request.user.role not in ('admin', 'evaluator', 'office'):
+            return Response([])
+        q = request.query_params.get('q', '').strip()
+        if len(q) < 2:
+            return Response([])
+
+        from django.db.models import Q
+        students = User.objects.filter(role='student').filter(
+            Q(national_code__icontains=q) | Q(last_name__icontains=q) | Q(first_name__icontains=q)
+        )[:10]
+        return Response([{
+            'id': s.id,
+            'first_name': s.first_name,
+            'last_name': s.last_name,
+            'father_name': s.father_name or '',
+            'national_code': s.national_code or '',
+            'phone': s.phone or '',
+            'gender': s.gender or '',
+            'language_level': s.language_level or '',
+        } for s in students])

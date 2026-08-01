@@ -20,6 +20,10 @@ class User(AbstractUser):
         EVALUATOR = 'evaluator', 'مدیر آموزش'
         OFFICE = 'office', 'اداری'
 
+    class Gender(models.TextChoices):
+        FEMALE = 'female', 'خانم'
+        MALE = 'male', 'آقا'
+
     # نقش‌هایی که باید مثل استاد در لیست اساتید دیده بشن و بتونن کلاس بگیرن/تدریس کنن.
     # مدیر آموزش هم استاد محسوب می‌شه (اشتراکی، یک‌طرفه) — عکسش صادق نیست، یک استاد ساده مدیر آموزش نیست.
     TEACHER_LIKE_ROLES = ['teacher', 'evaluator']
@@ -41,6 +45,7 @@ class User(AbstractUser):
     phone2 = models.CharField(max_length=11, blank=True)
     national_code = models.CharField(max_length=10, unique=True, null=True, blank=True)
     birth_date = models.DateField(null=True, blank=True)
+    gender = models.CharField(max_length=10, choices=Gender.choices, blank=True, help_text='برای دانش‌آموزان، مبنای تخصیص کلاس دخترانه/پسرانه/مختلط')
     language_level = models.CharField(max_length=50, blank=True)
     teacher_level = models.CharField(max_length=50, blank=True)
     avatar = models.ImageField(upload_to='avatars/', null=True, blank=True)

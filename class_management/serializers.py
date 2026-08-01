@@ -1,9 +1,10 @@
 from rest_framework import serializers
-from .models import ClassSlot
+from .models import ClassSlot, ClassSlotEnrollment
 
 
 class ClassSlotSerializer(serializers.ModelSerializer):
     day_type_display = serializers.ReadOnlyField()
+    gender_display = serializers.CharField(source='get_gender_display', read_only=True)
     is_three_day = serializers.ReadOnlyField()
     capacity_status = serializers.ReadOnlyField()
     seats_left = serializers.ReadOnlyField()
@@ -13,7 +14,7 @@ class ClassSlotSerializer(serializers.ModelSerializer):
     class Meta:
         model = ClassSlot
         fields = [
-            'id', 'number', 'title', 'day_type', 'day_type_display',
+            'id', 'number', 'title', 'day_type', 'day_type_display', 'gender', 'gender_display',
             'capacity', 'teacher_name', 'time_slot', 'notes', 'is_three_day',
             'assigned_level', 'current_count', 'capacity_status', 'seats_left', 'surplus',
             'updated_at', 'updated_at_jalali',
@@ -65,3 +66,56 @@ class SpinOffSurplusSerializer(serializers.Serializer):
     day_type = serializers.CharField(required=False, allow_blank=True, default='')
     time_slot = serializers.CharField(required=False, allow_blank=True, default='')
     capacity = serializers.IntegerField(required=False, min_value=1)
+
+
+class RoomCapacitySerializer(serializers.Serializer):
+    """ظرفیت یک «کلاس فیزیکی» (شماره اتاق) — همین یک عدد برای همه‌ی ساعت‌های همون اتاق استفاده می‌شود.
+    زوج به‌صورت پیش‌فرض دخترانه، فرد به‌صورت پیش‌فرض پسرانه در نظر گرفته می‌شود؛ ولی برای
+    سه گروهِ «یک‌روز‌در‌هفته» (پنجشنبه‌صبح/پنجشنبه‌عصر/جمعه)، جنسیت هرکدام جدا و دلخواه انتخاب می‌شود
+    (چون ممکنه هرکدوم از این ۱۱ کلاس فیزیکی دخترانه، پسرانه، یا مختلط باشه)."""
+    number = serializers.IntegerField(min_value=1)
+    capacity = serializers.IntegerField(min_value=1)
+    thursday_morning_gender = serializers.ChoiceField(choices=ClassSlot.Gender.choices)
+    thursday_evening_gender = serializers.ChoiceField(choices=ClassSlot.Gender.choices)
+    friday_gender = serializers.ChoiceField(choices=ClassSlot.Gender.choices)
+
+
+class BulkCreatePhysicalClassesSerializer(serializers.Serializer):
+    """ورودی دکمه‌ی «ساخت کلاس فیزیکی» — لیست شماره‌کلاس‌ها + ظرفیت هرکدام"""
+    rooms = RoomCapacitySerializer(many=True)
+
+
+class EnrollStudentSerializer(serializers.Serializer):
+    student_id = serializers.IntegerField(required=False)
+    national_code = serializers.CharField(max_length=20, required=False, allow_blank=True)
+    payment_method = serializers.ChoiceField(choices=ClassSlotEnrollment.PaymentMethod.choices)
+    tuition_amount = serializers.IntegerField(min_value=0)
+    pos_reference_code = serializers.CharField(max_length=50, required=False, allow_blank=True)
+
+    def validate(self, data):
+        if not data.get('student_id') and not data.get('national_code'):
+            raise serializers.ValidationError('باید دانش‌آموز را از لیست پیشنهادی انتخاب کنید یا کد ملی را وارد کنید')
+        if data['payment_method'] == ClassSlotEnrollment.PaymentMethod.POS and not data.get('pos_reference_code'):
+            raise serializers.ValidationError({'pos_reference_code': 'کد پیگیری/ساعت دستگاه پوز الزامی است'})
+        return data
+
+
+class ClassSlotEnrollmentSerializer(serializers.ModelSerializer):
+    student_first_name = serializers.CharField(source='student.first_name', read_only=True)
+    student_last_name = serializers.CharField(source='student.last_name', read_only=True)
+    student_father_name = serializers.CharField(source='student.father_name', read_only=True)
+    student_national_code = serializers.CharField(source='student.national_code', read_only=True)
+    student_phone = serializers.CharField(source='student.phone', read_only=True)
+    student_birth_date = serializers.DateField(source='student.birth_date', read_only=True)
+    payment_method_display = serializers.CharField(source='get_payment_method_display', read_only=True)
+    created_at_jalali = serializers.ReadOnlyField()
+
+    class Meta:
+        model = ClassSlotEnrollment
+        fields = [
+            'id', 'class_slot', 'student', 'student_first_name', 'student_last_name',
+            'student_father_name', 'student_national_code', 'student_phone',
+            'student_birth_date', 'payment_method', 'payment_method_display',
+            'tuition_amount', 'pos_reference_code', 'created_at', 'created_at_jalali',
+        ]
+        read_only_fields = ['id', 'created_at']

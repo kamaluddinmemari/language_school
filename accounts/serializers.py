@@ -23,7 +23,7 @@ class RegisterSerializer(serializers.ModelSerializer):
         fields = [
             'username', 'password', 'password2',
             'first_name', 'last_name', 'phone',
-            'national_code'
+            'national_code', 'gender'
         ]
 
     def validate(self, attrs):
@@ -193,7 +193,7 @@ class StudentSerializer(serializers.ModelSerializer):
         model = User
         fields = [
             'id', 'first_name', 'last_name', 'father_name', 'phone', 'phone2',
-            'national_code', 'birth_date', 'language_level',
+            'national_code', 'birth_date', 'gender', 'language_level',
             'username', 'password', 'has_app_account',
         ]
 
