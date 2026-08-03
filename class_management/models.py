@@ -2,6 +2,31 @@ from django.db import models
 from django.conf import settings
 from django.utils import timezone
 import jdatetime
+from level_tests.levels import ALL_LEVEL_CHOICES
+from level_tests.models import LevelTest
+
+
+import re
+
+
+# تشخیص خودکار گروه سنی از روی خودِ کد سطح — چون هر سطح فقط متعلق به یک گروه سنی است:
+# کودک: e1..e5 / i1..i5   |   نوجوان: preteen, teen1..teen15   |   بزرگسال: کدهای عددی ۱۰۱ تا ۶۰۶
+# قبلاً گروه سنی از روی آخرین آزمون تعیین‌سطح دانش‌آموز حدس زده می‌شد که باعث خطای
+# «شهریه‌ای تعریف نشده» می‌شد (چون ممکن بود آزمونی برای دانش‌آموز ثبت نشده باشد).
+def infer_age_group_from_level(level):
+    if not level:
+        return ''
+    lvl = str(level).strip().lower()
+    # سطوح کودک: e1..e5, s1..s5, g1..g5, u1..u5, m1..m5, h1..h5, i1..i5
+    if re.match(r'^[esguhmi]\d+$', lvl):
+        return 'kids'
+    # سطوح نوجوان: pre teen, teen1..teen15
+    if 'teen' in lvl:
+        return 'teen'
+    # سطوح بزرگسال: کدهای عددی خالص، مثلاً ۱۰۱ تا ۶۰۶
+    if re.match(r'^\d+$', lvl):
+        return 'adult'
+    return ''
 
 
 def _jalali(dt):
@@ -98,6 +123,35 @@ class ClassSlot(models.Model):
         return max(0, self.current_count - self.capacity)
 
     @property
+    def real_enrolled_count(self):
+        """
+        تعداد واقعیِ دانش‌آموزهای تک‌به‌تک ثبت‌نام‌شده (از روی خودِ ردیف‌های ClassSlotEnrollment)
+        — برخلاف current_count که فقط عدد انتزاعیِ «تخصیص خودکار» است و با ثبت‌نام واقعی
+        نباید قاطی شود (این دقیقاً همان باگی بود که باعث می‌شد ظرفیت زودتر از موعد «پر»/«مازاد» نشان داده شود)
+        """
+        return self.enrollments.count()
+
+    @property
+    def real_capacity_status(self):
+        """'empty' | 'ok' (سبز) | 'full' | 'over' (قرمز) — بر اساس ثبت‌نام واقعی، نه عدد تخصیص"""
+        n = self.real_enrolled_count
+        if n == 0:
+            return 'empty'
+        if n < self.capacity:
+            return 'ok'
+        if n == self.capacity:
+            return 'full'
+        return 'over'
+
+    @property
+    def real_seats_left(self):
+        return self.capacity - self.real_enrolled_count
+
+    @property
+    def real_surplus(self):
+        return max(0, self.real_enrolled_count - self.capacity)
+
+    @property
     def updated_at_jalali(self):
         return _jalali(self.updated_at)
 
@@ -152,7 +206,11 @@ class ClassSlotEnrollment(models.Model):
     student = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='class_slot_enrollments')
     payment_method = models.CharField(max_length=20, choices=PaymentMethod.choices)
     tuition_amount = models.PositiveIntegerField(default=0, help_text='مبلغ شهریه‌ی پرداختی (تومان)')
+    discount_percent = models.PositiveIntegerField(default=0, help_text='درصد تخفیفی که موقع این ثبت‌نام اعمال شد (اگر داشته باشد)')
     pos_reference_code = models.CharField(max_length=50, blank=True, help_text='کد ساعت/شماره پیگیری دستگاه پوز — فقط وقتی پرداخت از طریق پوز باشد')
+    receipt_image = models.ImageField(upload_to='enrollment_receipts/', null=True, blank=True, help_text='تصویر رسید کارت‌به‌کارت — فقط برای ثبت‌نامِ خودِ دانش‌آموز از طریق اپ')
+    self_enrolled = models.BooleanField(default=False, help_text='True یعنی خودِ دانش‌آموز از طریق اپ ثبت‌نام کرده، نه مدیر')
+    payment_verified = models.BooleanField(default=True, help_text='ثبت‌نام‌های دستیِ مدیر همیشه تاییدشده‌اند؛ ثبت‌نام خودِ دانش‌آموز (کارت‌به‌کارت) تا بررسی رسید توسط مدیر، False می‌ماند')
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -167,3 +225,105 @@ class ClassSlotEnrollment(models.Model):
 
     def __str__(self):
         return f"{self.student.get_full_name()} — کلاس {self.class_slot.number}"
+
+
+class TuitionSetting(models.Model):
+    """
+    شهریه‌ی مصوب هر سطح به تفکیک گروه سنی (کودک/نوجوان/بزرگسال) — همان گروه‌بندی سنی‌ای که در
+    اپ level_tests استفاده می‌شود. موقع ثبت‌نام، با توجه به سطحِ کلاس و گروه سنی دانش‌آموز
+    (از روی آخرین آزمون تعیین‌سطحِ تکمیل‌شده‌اش)، این مبلغ به‌عنوان پیش‌فرض پیشنهاد می‌شود.
+    """
+    level = models.CharField(max_length=10, choices=ALL_LEVEL_CHOICES)
+    age_group = models.CharField(max_length=10, choices=LevelTest.AgeGroup.choices)
+    amount = models.PositiveIntegerField(default=0, help_text='شهریه‌ی مصوب (تومان)')
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['level', 'age_group']
+        constraints = [
+            models.UniqueConstraint(fields=['level', 'age_group'], name='unique_tuition_per_level_age_group')
+        ]
+
+    @property
+    def level_display(self):
+        return dict(ALL_LEVEL_CHOICES).get(self.level, self.level)
+
+    @property
+    def age_group_display(self):
+        return self.get_age_group_display()
+
+    @property
+    def updated_at_jalali(self):
+        return _jalali(self.updated_at)
+
+    def __str__(self):
+        return f"{self.level} / {self.get_age_group_display()}: {self.amount}"
+
+
+class DiscountedPerson(models.Model):
+    """
+    لیست «افراد دارای تخفیف» — با هر ثبت‌نامی که درصد تخفیف صفر نباشد، خودکار ساخته یا (اگر از
+    قبل برای همان دانش‌آموز وجود داشت) به‌روزرسانی می‌شود.
+    """
+    student = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='discount_records')
+    discount_percent = models.PositiveIntegerField(default=0)
+    class_slot = models.ForeignKey(ClassSlot, on_delete=models.SET_NULL, null=True, blank=True, related_name='discount_records')
+    approved_tuition = models.PositiveIntegerField(default=0, help_text='مبلغ نهایی شهریه بعد از تخفیف، در آخرین ثبت‌نامِ دارای تخفیف')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-updated_at']
+
+    @property
+    def updated_at_jalali(self):
+        return _jalali(self.updated_at)
+
+    def __str__(self):
+        return f"{self.student.get_full_name()} — {self.discount_percent}%"
+
+
+class EnrollmentRefund(models.Model):
+    """رکورد استرداد شهریه — با زدن دکمه‌ی «استرداد» روی یک دانش‌آموزِ ثبت‌نام‌شده ساخته می‌شود"""
+    student = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='refunds')
+    class_slot = models.ForeignKey(ClassSlot, on_delete=models.SET_NULL, null=True, blank=True, related_name='refunds')
+    amount = models.PositiveIntegerField(default=0)
+    card_number = models.CharField(max_length=30)
+    receiver_name = models.CharField(max_length=150)
+    refunded_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name='refunds_processed')
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-created_at']
+
+    @property
+    def created_at_jalali(self):
+        return _jalali(self.created_at)
+
+    def __str__(self):
+        return f"استرداد {self.amount} — {self.student.get_full_name()}"
+
+
+class WalletTransaction(models.Model):
+    """تاریخچه‌ی واریز/برداشت کیف پول دانش‌آموز — برای پیگیری و شفافیت مالی"""
+
+    class Kind(models.TextChoices):
+        CREDIT = 'credit', 'واریز به کیف پول'
+        DEBIT = 'debit', 'برداشت از کیف پول'
+
+    student = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='wallet_transactions')
+    kind = models.CharField(max_length=10, choices=Kind.choices)
+    amount = models.PositiveIntegerField()
+    reason = models.CharField(max_length=255, blank=True)
+    class_slot = models.ForeignKey(ClassSlot, on_delete=models.SET_NULL, null=True, blank=True, related_name='wallet_transactions')
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-created_at']
+
+    @property
+    def created_at_jalali(self):
+        return _jalali(self.created_at)
+
+    def __str__(self):
+        return f"{self.get_kind_display()} {self.amount} — {self.student.get_full_name()}"

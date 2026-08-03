@@ -49,6 +49,7 @@ class User(AbstractUser):
     language_level = models.CharField(max_length=50, blank=True)
     teacher_level = models.CharField(max_length=50, blank=True)
     avatar = models.ImageField(upload_to='avatars/', null=True, blank=True)
+    wallet_balance = models.PositiveIntegerField(default=0, help_text='موجودی کیف پول دانش‌آموز (تومان) — از طریق «انتقال به کیف پول» یا واریز دستی مدیر شارژ می‌شود')
 
     def __str__(self):
         return f"{self.get_full_name()} ({self.role})"

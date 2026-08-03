@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from .models import ClassSlot, ClassSlotEnrollment
+from .models import ClassSlot, ClassSlotEnrollment, TuitionSetting, DiscountedPerson
 
 
 class ClassSlotSerializer(serializers.ModelSerializer):
@@ -9,6 +9,10 @@ class ClassSlotSerializer(serializers.ModelSerializer):
     capacity_status = serializers.ReadOnlyField()
     seats_left = serializers.ReadOnlyField()
     surplus = serializers.ReadOnlyField()
+    real_enrolled_count = serializers.ReadOnlyField()
+    real_capacity_status = serializers.ReadOnlyField()
+    real_seats_left = serializers.ReadOnlyField()
+    real_surplus = serializers.ReadOnlyField()
     updated_at_jalali = serializers.ReadOnlyField()
 
     class Meta:
@@ -17,6 +21,7 @@ class ClassSlotSerializer(serializers.ModelSerializer):
             'id', 'number', 'title', 'day_type', 'day_type_display', 'gender', 'gender_display',
             'capacity', 'teacher_name', 'time_slot', 'notes', 'is_three_day',
             'assigned_level', 'current_count', 'capacity_status', 'seats_left', 'surplus',
+            'real_enrolled_count', 'real_capacity_status', 'real_seats_left', 'real_surplus',
             'updated_at', 'updated_at_jalali',
         ]
         read_only_fields = ['updated_at']
@@ -90,6 +95,7 @@ class EnrollStudentSerializer(serializers.Serializer):
     national_code = serializers.CharField(max_length=20, required=False, allow_blank=True)
     payment_method = serializers.ChoiceField(choices=ClassSlotEnrollment.PaymentMethod.choices)
     tuition_amount = serializers.IntegerField(min_value=0)
+    discount_percent = serializers.IntegerField(min_value=0, max_value=100, required=False, default=0)
     pos_reference_code = serializers.CharField(max_length=50, required=False, allow_blank=True)
 
     def validate(self, data):
@@ -107,6 +113,7 @@ class ClassSlotEnrollmentSerializer(serializers.ModelSerializer):
     student_national_code = serializers.CharField(source='student.national_code', read_only=True)
     student_phone = serializers.CharField(source='student.phone', read_only=True)
     student_birth_date = serializers.DateField(source='student.birth_date', read_only=True)
+    student_gender = serializers.CharField(source='student.gender', read_only=True)
     payment_method_display = serializers.CharField(source='get_payment_method_display', read_only=True)
     created_at_jalali = serializers.ReadOnlyField()
 
@@ -115,7 +122,56 @@ class ClassSlotEnrollmentSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'class_slot', 'student', 'student_first_name', 'student_last_name',
             'student_father_name', 'student_national_code', 'student_phone',
-            'student_birth_date', 'payment_method', 'payment_method_display',
-            'tuition_amount', 'pos_reference_code', 'created_at', 'created_at_jalali',
+            'student_birth_date', 'student_gender', 'payment_method', 'payment_method_display',
+            'tuition_amount', 'discount_percent', 'pos_reference_code', 'receipt_image',
+            'self_enrolled', 'payment_verified', 'created_at', 'created_at_jalali',
         ]
         read_only_fields = ['id', 'created_at']
+
+
+class TuitionSettingSerializer(serializers.ModelSerializer):
+    level_display = serializers.ReadOnlyField()
+    age_group_display = serializers.ReadOnlyField()
+    updated_at_jalali = serializers.ReadOnlyField()
+
+    class Meta:
+        model = TuitionSetting
+        fields = ['id', 'level', 'level_display', 'age_group', 'age_group_display', 'amount', 'updated_at', 'updated_at_jalali']
+        read_only_fields = ['updated_at']
+
+
+class DiscountedPersonSerializer(serializers.ModelSerializer):
+    student_first_name = serializers.CharField(source='student.first_name', read_only=True)
+    student_last_name = serializers.CharField(source='student.last_name', read_only=True)
+    student_national_code = serializers.CharField(source='student.national_code', read_only=True)
+    student_phone = serializers.CharField(source='student.phone', read_only=True)
+    class_slot_number = serializers.IntegerField(source='class_slot.number', read_only=True)
+    updated_at_jalali = serializers.ReadOnlyField()
+
+    class Meta:
+        model = DiscountedPerson
+        fields = [
+            'id', 'student', 'student_first_name', 'student_last_name', 'student_national_code',
+            'student_phone', 'discount_percent', 'class_slot', 'class_slot_number', 'approved_tuition',
+            'created_at', 'updated_at', 'updated_at_jalali',
+        ]
+        read_only_fields = ['id', 'created_at', 'updated_at']
+
+
+class RefundEnrollmentSerializer(serializers.Serializer):
+    card_number = serializers.CharField(max_length=30)
+    receiver_name = serializers.CharField(max_length=150)
+
+
+class TransferEnrollmentSerializer(serializers.Serializer):
+    target_slot_id = serializers.IntegerField()
+
+
+class SplitClassSerializer(serializers.Serializer):
+    student_ids = serializers.ListField(child=serializers.IntegerField(), required=False)
+    random_count = serializers.IntegerField(required=False, min_value=1)
+
+    def validate(self, data):
+        if not data.get('student_ids') and not data.get('random_count'):
+            raise serializers.ValidationError('باید یا لیست دانش‌آموزان مشخص یا تعداد تصادفی وارد شود')
+        return data

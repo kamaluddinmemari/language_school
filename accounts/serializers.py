@@ -194,8 +194,9 @@ class StudentSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'first_name', 'last_name', 'father_name', 'phone', 'phone2',
             'national_code', 'birth_date', 'gender', 'language_level',
-            'username', 'password', 'has_app_account',
+            'username', 'password', 'has_app_account', 'wallet_balance',
         ]
+        read_only_fields = ['wallet_balance']
 
     def get_has_app_account(self, obj):
         return obj.has_usable_password()

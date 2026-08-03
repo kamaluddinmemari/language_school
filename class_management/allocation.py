@@ -117,19 +117,24 @@ def allocate_classes(levels, tolerance=0, thursday_only_count=0, friday_only_cou
             category = _level_category(entry)
             candidates = [s for s in category_slots if category in s.time_category() and (not s.assigned_level or s.assigned_level == level_name)]
 
-        # ترجیح اول: یک کلاس که کل تقاضا در آن جا شود (کوچک‌ترین ظرفیت کافی، برای جلوگیری از اسراف ظرفیت)
+        # خواسته‌ی ۵: اولویت همیشه با کلاس‌های بزرگ‌تر (ظرفیت بیشتر) و شماره‌ی پایین‌تر است —
+        # نه «کوچک‌ترین کلاسی که جا می‌شود». یعنی ابتدا کلاس‌های بزرگ و کم‌شماره‌تر امتحان می‌شوند.
+        candidates = sorted(candidates, key=lambda s: (-s.capacity, s.number))
+
+        # ترجیح اول: یک کلاس (از میان بزرگ‌ترها) که کل تقاضا در آن جا شود
         exact_fits = [s for s in candidates if (s.capacity + tolerance - s.current_count) >= needed]
         if exact_fits:
-            best = min(exact_fits, key=lambda s: s.capacity)
+            best = exact_fits[0]
             best.assigned_level = level_name
             best.current_count += needed
             assign_teacher_if_needed(best, pref_teacher)
             continue
 
-        # جا نشد در یک کلاس؛ بیشترین ظرفیت خالی ممکن را در بهترین کلاس موجود پر کن
+        # جا نشد در یک کلاس؛ باز هم از بزرگ‌ترین/کم‌شماره‌ترینِ موجود شروع کن و پرش کن
         remaining = needed
-        if candidates:
-            best = max(candidates, key=lambda s: (s.capacity + tolerance - s.current_count))
+        fillable = [s for s in candidates if (s.capacity + tolerance - s.current_count) > 0]
+        if fillable:
+            best = fillable[0]
             room = (best.capacity + tolerance) - best.current_count
             if room > 0:
                 best.assigned_level = level_name
