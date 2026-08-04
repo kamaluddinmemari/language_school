@@ -43,6 +43,7 @@ class LevelTest(models.Model):
     birth_date = models.DateField(null=True, blank=True)
     national_code = models.CharField(max_length=10, blank=True)
     phone = models.CharField(max_length=11, blank=True)
+    gender = models.CharField(max_length=10, choices=User.Gender.choices, blank=True, help_text='برای ساخت خودکار حساب دانش‌آموز وقتی تعیین‌سطح تکمیل می‌شود لازم است')
     # اگر این آزمون برای یک دانش‌آموزِ از‌قبل‌ثبت‌شده (مثلاً از «ثبت‌نام مستقیم») ساخته شده،
     # اینجا به حساب واقعی‌اش وصل می‌شود — تا نتیجه بعداً در لیست دانش‌آموزان هم قابل‌مشاهده/ویرایش باشد
     student = models.ForeignKey(

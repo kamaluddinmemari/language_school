@@ -8,14 +8,14 @@ from rest_framework.response import Response
 from rest_framework.parsers import MultiPartParser, FormParser
 from rest_framework.permissions import IsAuthenticated
 import jdatetime
-from .models import ClassSlot, ClassSlotEnrollment, TuitionSetting, DiscountedPerson, EnrollmentRefund, WalletTransaction, infer_age_group_from_level, _jalali
+from .models import ClassSlot, ClassSlotEnrollment, TuitionSetting, DiscountedPerson, EnrollmentRefund, WalletTransaction, infer_age_group_from_level, _jalali, LevelRenewalApproval
 from .models import THREE_DAY_TIME_SLOTS, THURSDAY_MORNING_SLOT, THURSDAY_EVENING_SLOT, FRIDAY_SLOT
 from .serializers import (
     ClassSlotSerializer, AllocateClassesSerializer, ConfirmOverflowSerializer,
     TransferSurplusSerializer, SpinOffSurplusSerializer,
     BulkCreatePhysicalClassesSerializer, EnrollStudentSerializer, ClassSlotEnrollmentSerializer,
     TuitionSettingSerializer, DiscountedPersonSerializer, RefundEnrollmentSerializer, TransferEnrollmentSerializer,
-    SplitClassSerializer,
+    SplitClassSerializer, LevelRenewalApprovalSerializer,
 )
 from level_tests.models import LevelTest
 from .allocation import allocate_classes
@@ -480,6 +480,14 @@ class ClassSlotEnrollView(APIView):
         if ClassSlotEnrollment.objects.filter(class_slot=slot, student=student).exists():
             return Response({'error': 'این دانش‌آموز قبلاً توی همین کلاس ثبت‌نام شده'}, status=status.HTTP_400_BAD_REQUEST)
 
+        # خواسته‌ی ۲: کد ملی یکتاست — اگه همین الان توی یه کلاس دیگه ثبت‌نام فعال داره، اجازه‌ی
+        # ثبت‌نام دوم نمی‌دیم (اول باید با «انتقال کلاس» یا حذف/استرداد از کلاس قبلی خارجش کنن)
+        other_enrollment = ClassSlotEnrollment.objects.filter(student=student).exclude(class_slot=slot).select_related('class_slot').first()
+        if other_enrollment:
+            return Response({
+                'error': f"این دانش‌آموز از قبل توی کلاس {other_enrollment.class_slot.number} (سطح {other_enrollment.class_slot.assigned_level or '—'}) ثبت‌نام فعال دارد — برای جابه‌جایی از «انتقال کلاس» استفاده کنید"
+            }, status=status.HTTP_400_BAD_REQUEST)
+
         # خواسته‌ی ۵: ثبت‌نام هرگز به‌خاطر پر بودن ظرفیت مسدود نمی‌شود — چون current_count
         # ممکن است از روی «تخصیص خودکار» (پیش‌بینی تقاضا) از قبل با ظرفیت برابر شده باشد،
         # نه لزوماً تعداد واقعیِ ثبت‌نام‌شده‌ها. اگر مدیر واقعاً بخواهد سقف بگذارد، خودش دستی
@@ -553,14 +561,59 @@ class ClassSlotUnenrollView(APIView):
 
 
 class ClassSlotRosterView(generics.ListAPIView):
-    """GET: لیست دانش‌آموزان ثبت‌نام‌شده‌ی یک کلاس فیزیکی خاص — مبنای خروجی اکسل/چاپ حضور و غیاب"""
+    """
+    GET: لیست دانش‌آموزان *تاییدشده*ی یک کلاس فیزیکی خاص — مبنای خروجی اکسل/چاپ حضور و غیاب.
+    ثبت‌نام‌های خودِ دانش‌آموز از اپ که هنوز تایید نشده‌اند اینجا نمی‌آیند (خواسته‌ی ۱) —
+    آن‌ها فقط توی پنجره‌ی «ثبت‌نام‌های در انتظار تایید» دیده می‌شوند.
+    """
     permission_classes = [IsAuthenticated]
     serializer_class = ClassSlotEnrollmentSerializer
 
     def get_queryset(self):
         if self.request.user.role not in MANAGE_ROLES:
             return ClassSlotEnrollment.objects.none()
-        return ClassSlotEnrollment.objects.filter(class_slot_id=self.kwargs['pk']).select_related('student')
+        return ClassSlotEnrollment.objects.filter(class_slot_id=self.kwargs['pk'], payment_verified=True).select_related('student')
+
+
+class StudentEducationHistoryView(APIView):
+    """
+    GET: سوابق آموزشیِ دانش‌آموز — سطح فعلی (همیشه به‌روز، از همون منطق تخصیص خودکار سطح)
+    + تاریخچه‌ی کامل ثبت‌نام‌های ترمیک (سطح، روش ثبت‌نام، تاریخ شمسی).
+    ⚠️ سوابق کلاس‌های خصوصی/گروهی/ورکشاپ اینجا نیست — آن‌ها توی اپ‌های دیگری (classes,
+    group_classes) هستند که این بخش بهشون دسترسی نداره.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, student_id):
+        if request.user.role not in MANAGE_ROLES:
+            return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
+        from django.contrib.auth import get_user_model
+        User = get_user_model()
+        try:
+            student = User.objects.get(pk=student_id, role='student')
+        except User.DoesNotExist:
+            return Response({'error': 'دانش‌آموز پیدا نشد'}, status=status.HTTP_404_NOT_FOUND)
+
+        info = _compute_level_suggestion(student)
+        history = ClassSlotEnrollment.objects.filter(student=student).select_related('class_slot').order_by('-created_at')
+
+        return Response({
+            'current_level': info['level'],
+            'current_age_group': info['age_group'],
+            'current_age_group_display': dict(LevelTest.AgeGroup.choices).get(info['age_group'], ''),
+            'current_level_source': info['source'],
+            'needs_retest': info['needs_retest'],
+            'retest_reason': info['retest_reason'],
+            'term_enrollments': [{
+                'id': e.id,
+                'level': e.class_slot.assigned_level,
+                'class_number': e.class_slot.number,
+                'method': 'خودِ دانش‌آموز از اپ' if e.self_enrolled else 'ثبت‌نام توسط مدیریت',
+                'payment_method_display': e.get_payment_method_display(),
+                'payment_verified': e.payment_verified,
+                'created_at_jalali': e.created_at_jalali,
+            } for e in history],
+        })
 
 
 class StudentFinancialHistoryView(APIView):
@@ -670,13 +723,114 @@ class EnrollmentReportView(APIView):
         })
 
 
+class MyEnrollmentsView(APIView):
+    """
+    GET: لیست همه‌ی دوره‌های ترمیکی که خودِ دانش‌آموز (چه با ثبت‌نام مستقیم مدیر، چه با
+    ثبت‌نام خودش از اپ) توشون ثبت‌نام شده — سطح، شماره‌ی کلاس، استاد، روز/ساعت، شهریه،
+    وضعیت تخفیف و وضعیت تایید پرداخت. برای بخش «دوره‌های ترمیک من» توی صفحه‌ی اصلی اپ.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        student = request.user
+        if student.role != 'student':
+            return Response({'error': 'این بخش فقط برای دانش‌آموزان است'}, status=status.HTTP_403_FORBIDDEN)
+
+        enrollments = ClassSlotEnrollment.objects.filter(student=student).select_related('class_slot').order_by('-created_at')
+        return Response([{
+            'id': e.id,
+            'class_number': e.class_slot.number,
+            'level': e.class_slot.assigned_level,
+            'teacher_name': e.class_slot.teacher_name,
+            'day_type_display': e.class_slot.day_type_display,
+            'time_slot': e.class_slot.time_slot,
+            'gender_display': e.class_slot.get_gender_display(),
+            'tuition_amount': e.tuition_amount,
+            'discount_percent': e.discount_percent,
+            'payment_method_display': e.get_payment_method_display(),
+            'self_enrolled': e.self_enrolled,
+            'payment_verified': e.payment_verified,
+            'created_at_jalali': e.created_at_jalali,
+        } for e in enrollments])
+
+
+MAX_LEVELS_NEEDING_RETEST = {'i5', 'teen15', 'teen 15'}  # آخرین سطح کودکان/نوجوانان — عبور از این‌ها همیشه به تعیین‌سطح تازه نیاز دارد
+
+
+def _compute_level_suggestion(student):
+    """
+    منطق مشترکِ حدس سطح دانش‌آموز برای «ثبت‌نام مستقیم» (هم پنل ادمین هم اپ):
+    - سطح از نزدیک‌ترین منبع (آخرین ثبت‌نام واقعی یا آخرین تعیین‌سطحِ تکمیل‌شده) گرفته می‌شود
+    - اگر بیش از ۶۰ روز از آن منبع گذشته باشد: هشدار اعتبار (قابل دور زدن با تایید مدیر آموزش)
+    - اگر آخرین سطح، آخرین سطح گروه سنی‌اش باشد (i5 یا teen15): هشدار سطح پایانی (تعیین‌سطح الزامی، بدون امکان تایید مدیر آموزش)
+    """
+    last_enrollment = ClassSlotEnrollment.objects.filter(student=student).select_related('class_slot').order_by('-created_at').first()
+    last_test = LevelTest.objects.filter(student=student, status=LevelTest.Status.COMPLETED).order_by('-updated_at').first()
+
+    level, source, source_date = '', '', None
+    if last_enrollment and last_test:
+        if last_enrollment.created_at >= last_test.updated_at:
+            level, source, source_date = last_enrollment.class_slot.assigned_level, 'pastEnrollment', last_enrollment.created_at
+        else:
+            level, source, source_date = last_test.level, 'levelTest', last_test.updated_at
+    elif last_enrollment:
+        level, source, source_date = last_enrollment.class_slot.assigned_level, 'pastEnrollment', last_enrollment.created_at
+    elif last_test:
+        level, source, source_date = last_test.level, 'levelTest', last_test.updated_at
+
+    days_since_source = (timezone.now() - source_date).days if source_date else None
+    expired = days_since_source is not None and days_since_source > 60
+    max_level_reached = str(level).strip().lower() in MAX_LEVELS_NEEDING_RETEST
+
+    renewal = None
+    if expired and level:
+        renewal = LevelRenewalApproval.objects.filter(student=student, level=level).order_by('-created_at').first()
+    renewal_status = renewal.status if renewal else None
+    # اگر مدیر آموزش قبلاً همین سطح را تایید کرده، دیگر هشدار انقضا نشان داده نمی‌شود
+    if renewal_status == LevelRenewalApproval.Status.APPROVED:
+        expired = False
+
+    needs_retest = expired or max_level_reached
+    if max_level_reached:
+        retest_reason = 'max_level_reached'
+    elif expired:
+        retest_reason = 'expired'
+    else:
+        retest_reason = ''
+
+    eligible = []
+    if level:
+        candidates = ClassSlot.objects.filter(assigned_level=level)
+        if student.gender:
+            candidates = candidates.filter(Q(gender=student.gender) | Q(gender=ClassSlot.Gender.MIXED))
+        eligible = [c for c in candidates if c.real_seats_left > 0]
+
+    age_group = infer_age_group_from_level(level)
+    base_tuition = None
+    if level and age_group:
+        setting = TuitionSetting.objects.filter(level=level, age_group=age_group).first()
+        if setting:
+            base_tuition = setting.amount
+
+    existing_discount = DiscountedPerson.objects.filter(student=student).order_by('-updated_at').first()
+    discount_percent = existing_discount.discount_percent if existing_discount else 0
+
+    return {
+        'level': level, 'source': source, 'source_date': source_date,
+        'days_since_source': days_since_source, 'needs_retest': needs_retest, 'retest_reason': retest_reason,
+        'renewal_status': renewal_status, 'eligible': eligible, 'age_group': age_group,
+        'base_tuition': base_tuition, 'discount_percent': discount_percent,
+    }
+
+
 class DirectEnrollSuggestionsView(APIView):
     """
     GET: برای بخش تازه‌ی «ثبت‌نام مستقیم دانش‌آموز» — بدون اینکه از قبل کلاس مشخصی باز باشد،
     فقط با گرفتن یک دانش‌آموز، سطح مناسبش را از نزدیک‌ترین منبع حدس می‌زند: یا آخرین کلاسی که
     واقعاً توش ثبت‌نام بوده (ترم قبل)، یا آخرین آزمون تعیین‌سطح تکمیل‌شده — هرکدام تاریخش
     جدیدتر بود. بعد کلاس‌های مجاز (هم‌سطح، هم‌جنسیت یا مختلط، با جای خالی واقعی) را به همراه
-    شهریه‌ی پیشنهادی/تخفیف قبلی/موجودی کیف‌پول برمی‌گرداند.
+    شهریه‌ی پیشنهادی/تخفیف قبلی/موجودی کیف‌پول برمی‌گرداند. اگر سطح پیشنهادی منقضی یا
+    پایانیِ گروه سنی‌اش باشد، هشدار مربوطه هم برمی‌گردد.
     """
     permission_classes = [IsAuthenticated]
 
@@ -684,6 +838,7 @@ class DirectEnrollSuggestionsView(APIView):
         if request.user.role not in MANAGE_ROLES:
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         student_id = request.query_params.get('student_id')
+        manual_level = request.query_params.get('level', '').strip()
         if not student_id:
             return Response({'error': 'student_id الزامی است'}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -694,56 +849,48 @@ class DirectEnrollSuggestionsView(APIView):
         except User.DoesNotExist:
             return Response({'error': 'دانش‌آموز پیدا نشد'}, status=status.HTTP_404_NOT_FOUND)
 
-        last_enrollment = ClassSlotEnrollment.objects.filter(student=student).select_related('class_slot').order_by('-created_at').first()
-        last_test = LevelTest.objects.filter(student=student, status=LevelTest.Status.COMPLETED).order_by('-updated_at').first()
+        info = _compute_level_suggestion(student)
 
-        level, source, source_date = '', '', None
-        if last_enrollment and last_test:
-            if last_enrollment.created_at >= last_test.updated_at:
-                level, source, source_date = last_enrollment.class_slot.assigned_level, 'pastEnrollment', last_enrollment.created_at
-            else:
-                level, source, source_date = last_test.level, 'levelTest', last_test.updated_at
-        elif last_enrollment:
-            level, source, source_date = last_enrollment.class_slot.assigned_level, 'pastEnrollment', last_enrollment.created_at
-        elif last_test:
-            level, source, source_date = last_test.level, 'levelTest', last_test.updated_at
-
-        eligible = []
-        if level:
-            candidates = ClassSlot.objects.filter(assigned_level=level)
+        # خواسته‌ی ۲: اگه سطح پیشنهادی درست نبود، مدیر می‌تونه دستی سطح رو بزنه — کلاس‌های
+        # همون سطح (در همه‌ی ساعت‌ها، هم‌جنسیت) دوباره لیست می‌شن، بدون چک انقضا/سطح‌پایانی
+        if manual_level:
+            candidates = ClassSlot.objects.filter(assigned_level=manual_level)
             if student.gender:
                 candidates = candidates.filter(Q(gender=student.gender) | Q(gender=ClassSlot.Gender.MIXED))
-            eligible = [c for c in candidates if c.real_seats_left > 0]
-
-        age_group = infer_age_group_from_level(level)
-        base_tuition = None
-        if level and age_group:
-            setting = TuitionSetting.objects.filter(level=level, age_group=age_group).first()
-            if setting:
-                base_tuition = setting.amount
-
-        existing_discount = DiscountedPerson.objects.filter(student=student).order_by('-updated_at').first()
+            info['eligible'] = [c for c in candidates if c.real_seats_left > 0]
+            info['level'] = manual_level
+            info['age_group'] = infer_age_group_from_level(manual_level)
+            setting = TuitionSetting.objects.filter(level=manual_level, age_group=info['age_group']).first()
+            info['base_tuition'] = setting.amount if setting else None
+            info['needs_retest'] = False
+            info['retest_reason'] = ''
+            info['source'] = 'manual'
 
         return Response({
             'student_id': student.id,
             'student_name': f"{student.first_name} {student.last_name}",
             'student_gender': student.gender,
-            'suggested_level': level,
-            'age_group': age_group,
-            'age_group_display': dict(LevelTest.AgeGroup.choices).get(age_group, ''),
-            'source': source,
-            'source_date_jalali': _jalali(source_date) if source_date else None,
-            'eligible_classes': ClassSlotSerializer(eligible, many=True).data,
-            'base_tuition': base_tuition,
+            'suggested_level': info['level'],
+            'age_group': info['age_group'],
+            'age_group_display': dict(LevelTest.AgeGroup.choices).get(info['age_group'], ''),
+            'source': info['source'],
+            'source_date_jalali': _jalali(info['source_date']) if info.get('source_date') else None,
+            'days_since_source': info['days_since_source'],
+            'needs_retest': info['needs_retest'],
+            'retest_reason': info['retest_reason'],
+            'renewal_status': info['renewal_status'],
+            'eligible_classes': ClassSlotSerializer(info['eligible'], many=True).data,
+            'base_tuition': info['base_tuition'],
             'wallet_balance': student.wallet_balance,
-            'previous_discount_percent': existing_discount.discount_percent if existing_discount else 0,
+            'previous_discount_percent': info['discount_percent'],
         })
 
 
 class MyDirectEnrollSuggestionsView(APIView):
     """
     GET: نسخه‌ی خودِ دانش‌آموز از DirectEnrollSuggestionsView — برای بخش «ثبت‌نام دوره
-    ترمیک» توی اپ. هیچ student_id نمی‌گیرد؛ همیشه خودِ کاربر لاگین‌کرده است.
+    ترمیک» توی اپ. هیچ student_id نمی‌گیرد؛ همیشه خودِ کاربر لاگین‌کرده است. بدون امکان
+    وارد کردن دستی سطح (فقط ادمین این اجازه را دارد).
     """
     permission_classes = [IsAuthenticated]
 
@@ -752,47 +899,22 @@ class MyDirectEnrollSuggestionsView(APIView):
         if student.role != 'student':
             return Response({'error': 'این بخش فقط برای دانش‌آموزان است'}, status=status.HTTP_403_FORBIDDEN)
 
-        last_enrollment = ClassSlotEnrollment.objects.filter(student=student).select_related('class_slot').order_by('-created_at').first()
-        last_test = LevelTest.objects.filter(student=student, status=LevelTest.Status.COMPLETED).order_by('-updated_at').first()
-
-        level, source, source_date = '', '', None
-        if last_enrollment and last_test:
-            if last_enrollment.created_at >= last_test.updated_at:
-                level, source, source_date = last_enrollment.class_slot.assigned_level, 'pastEnrollment', last_enrollment.created_at
-            else:
-                level, source, source_date = last_test.level, 'levelTest', last_test.updated_at
-        elif last_enrollment:
-            level, source, source_date = last_enrollment.class_slot.assigned_level, 'pastEnrollment', last_enrollment.created_at
-        elif last_test:
-            level, source, source_date = last_test.level, 'levelTest', last_test.updated_at
-
-        eligible = []
-        if level:
-            candidates = ClassSlot.objects.filter(assigned_level=level)
-            if student.gender:
-                candidates = candidates.filter(Q(gender=student.gender) | Q(gender=ClassSlot.Gender.MIXED))
-            eligible = [c for c in candidates if c.real_seats_left > 0]
-
-        age_group = infer_age_group_from_level(level)
-        base_tuition = None
-        if level and age_group:
-            setting = TuitionSetting.objects.filter(level=level, age_group=age_group).first()
-            if setting:
-                base_tuition = setting.amount
-
-        existing_discount = DiscountedPerson.objects.filter(student=student).order_by('-updated_at').first()
-        discount_percent = existing_discount.discount_percent if existing_discount else 0
-        final_tuition = None
-        if base_tuition is not None:
-            final_tuition = round(base_tuition * (100 - discount_percent) / 100)
+        info = _compute_level_suggestion(student)
+        base_tuition = info['base_tuition']
+        discount_percent = info['discount_percent']
+        final_tuition = round(base_tuition * (100 - discount_percent) / 100) if base_tuition is not None else None
 
         return Response({
-            'suggested_level': level,
-            'age_group': age_group,
-            'age_group_display': dict(LevelTest.AgeGroup.choices).get(age_group, ''),
-            'source': source,
-            'source_date_jalali': _jalali(source_date) if source_date else None,
-            'eligible_classes': ClassSlotSerializer(eligible, many=True).data,
+            'suggested_level': info['level'],
+            'age_group': info['age_group'],
+            'age_group_display': dict(LevelTest.AgeGroup.choices).get(info['age_group'], ''),
+            'source': info['source'],
+            'source_date_jalali': _jalali(info['source_date']) if info.get('source_date') else None,
+            'days_since_source': info['days_since_source'],
+            'needs_retest': info['needs_retest'],
+            'retest_reason': info['retest_reason'],
+            'renewal_status': info['renewal_status'],
+            'eligible_classes': ClassSlotSerializer(info['eligible'], many=True).data,
             'base_tuition': base_tuition,
             'discount_percent': discount_percent,
             'final_tuition': final_tuition,
@@ -833,6 +955,18 @@ class SelfEnrollView(APIView):
         if ClassSlotEnrollment.objects.filter(class_slot=slot, student=student).exists():
             return Response({'error': 'شما قبلاً توی همین کلاس ثبت‌نام کرده‌اید'}, status=status.HTTP_400_BAD_REQUEST)
 
+        other_enrollment = ClassSlotEnrollment.objects.filter(student=student).exclude(class_slot=slot).first()
+        if other_enrollment:
+            return Response({'error': 'شما از قبل یک ثبت‌نام فعال دیگر دارید — برای تغییر کلاس با مدرسه تماس بگیرید'}, status=status.HTTP_400_BAD_REQUEST)
+
+        # اگه سطح دانش‌آموز نیاز به تعیین‌سطح مجدد داره (منقضی یا آخرین سطح گروه سنی‌اش)،
+        # اجازه‌ی ثبت‌نام خودکار نمی‌دیم — باید یا تعیین‌سطح بده یا مدیر آموزش تاییدش کنه
+        info = _compute_level_suggestion(student)
+        if info['needs_retest'] and info['level'] == slot.assigned_level:
+            if info['retest_reason'] == 'max_level_reached':
+                return Response({'error': 'برای ادامه به این سطح، باید ابتدا تعیین‌سطح جدید انجام دهید'}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({'error': 'اعتبار سطح شما (بیش از ۶۰ روز) منقضی شده — باید تعیین‌سطح مجدد بدهید یا منتظر تایید مدیر آموزش بمانید'}, status=status.HTTP_400_BAD_REQUEST)
+
         age_group = infer_age_group_from_level(slot.assigned_level)
         setting = TuitionSetting.objects.filter(level=slot.assigned_level, age_group=age_group).first() if slot.assigned_level else None
         base_tuition = setting.amount if setting else 0
@@ -852,6 +986,35 @@ class SelfEnrollView(APIView):
         }, status=status.HTTP_201_CREATED)
 
 
+class PendingSelfEnrollmentsView(generics.ListAPIView):
+    """
+    GET: لیست *همه‌ی* ثبت‌نام‌هایی که خودِ دانش‌آموز از اپ انجام داده و هنوز رسیدش تایید نشده —
+    از همه‌ی کلاس‌ها، یک‌جا. مبنای پنجره‌ی هشدار وسط صفحه‌ی مدیریت کلاس‌ها (خواسته‌ی ۱).
+    """
+    permission_classes = [IsAuthenticated]
+    serializer_class = ClassSlotEnrollmentSerializer
+
+    def get_queryset(self):
+        if self.request.user.role not in MANAGE_ROLES:
+            return ClassSlotEnrollment.objects.none()
+        return ClassSlotEnrollment.objects.filter(self_enrolled=True, payment_verified=False).select_related('student', 'class_slot').order_by('created_at')
+
+
+class RejectPendingEnrollmentView(APIView):
+    """POST: مدیر رسید کارت‌به‌کارتِ یک ثبت‌نامِ در-انتظار را نامعتبر تشخیص می‌دهد و ثبت‌نام حذف می‌شود"""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, pk, student_id):
+        if request.user.role not in MANAGE_ROLES:
+            return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
+        try:
+            enrollment = ClassSlotEnrollment.objects.get(class_slot_id=pk, student_id=student_id, self_enrolled=True, payment_verified=False)
+        except ClassSlotEnrollment.DoesNotExist:
+            return Response({'error': 'ثبت‌نام در انتظاری پیدا نشد'}, status=status.HTTP_404_NOT_FOUND)
+        enrollment.delete()
+        return Response({'message': 'ثبت‌نام رد شد و حذف گردید'})
+
+
 class VerifyEnrollmentPaymentView(APIView):
     """POST: مدیر بعد از بررسی تصویر رسید کارت‌به‌کارتِ ثبت‌نامِ خودِ دانش‌آموز، پرداخت را تایید می‌کند"""
     permission_classes = [IsAuthenticated]
@@ -866,6 +1029,61 @@ class VerifyEnrollmentPaymentView(APIView):
         enrollment.payment_verified = True
         enrollment.save(update_fields=['payment_verified'])
         return Response({'message': 'پرداخت تایید شد', 'enrollment': ClassSlotEnrollmentSerializer(enrollment).data})
+
+
+class LevelRenewalApprovalListView(generics.ListCreateAPIView):
+    """
+    GET: لیست درخواست‌های تایید تمدید سطح (پیش‌فرض همه؛ با ?status=pending فقط در انتظار)
+    POST: مدیر/آفیس یک درخواست تازه برای یک دانش‌آموز+سطح ثبت می‌کند (وقتی هشدار انقضای
+    ۶۰روزه دیده و می‌خواهد از مدیر آموزش تاییدیه بگیرد، به‌جای تعیین‌سطح مجدد)
+    """
+    permission_classes = [IsAuthenticated]
+    serializer_class = LevelRenewalApprovalSerializer
+
+    def get_queryset(self):
+        if self.request.user.role not in MANAGE_ROLES:
+            return LevelRenewalApproval.objects.none()
+        qs = LevelRenewalApproval.objects.select_related('student', 'requested_by', 'reviewed_by').all()
+        status_filter = self.request.query_params.get('status')
+        if status_filter:
+            qs = qs.filter(status=status_filter)
+        return qs
+
+    def create(self, request, *args, **kwargs):
+        if request.user.role not in MANAGE_ROLES:
+            return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
+        student_id = request.data.get('student')
+        level = request.data.get('level')
+        if not student_id or not level:
+            return Response({'error': 'دانش‌آموز و سطح الزامی است'}, status=status.HTTP_400_BAD_REQUEST)
+        existing = LevelRenewalApproval.objects.filter(student_id=student_id, level=level, status=LevelRenewalApproval.Status.PENDING).first()
+        if existing:
+            return Response(LevelRenewalApprovalSerializer(existing).data, status=status.HTTP_200_OK)
+        approval = LevelRenewalApproval.objects.create(
+            student_id=student_id, level=level, requested_by=request.user, note=request.data.get('note', ''),
+        )
+        return Response(LevelRenewalApprovalSerializer(approval).data, status=status.HTTP_201_CREATED)
+
+
+class LevelRenewalApprovalDecideView(APIView):
+    """POST: مدیر آموزش درخواست تمدید سطح را تایید یا رد می‌کند. بدنه: {decision: 'approve' | 'reject'}"""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, pk):
+        if request.user.role not in MANAGE_ROLES:
+            return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
+        try:
+            approval = LevelRenewalApproval.objects.get(pk=pk)
+        except LevelRenewalApproval.DoesNotExist:
+            return Response({'error': 'درخواست پیدا نشد'}, status=status.HTTP_404_NOT_FOUND)
+        decision = request.data.get('decision')
+        if decision not in ('approve', 'reject'):
+            return Response({'error': 'decision باید approve یا reject باشد'}, status=status.HTTP_400_BAD_REQUEST)
+        approval.status = LevelRenewalApproval.Status.APPROVED if decision == 'approve' else LevelRenewalApproval.Status.REJECTED
+        approval.reviewed_by = request.user
+        approval.reviewed_at = timezone.now()
+        approval.save()
+        return Response(LevelRenewalApprovalSerializer(approval).data)
 
 
 class TuitionSuggestionView(APIView):
@@ -934,11 +1152,11 @@ class TuitionSettingListView(generics.ListCreateAPIView):
         if request.user.role not in MANAGE_ROLES:
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         level = request.data.get('level')
-        # گروه سنی همیشه از روی خودِ سطح محاسبه می‌شود، نه چیزی که کلاینت فرستاده —
-        # چون هر سطح فقط می‌تواند متعلق به یک گروه سنی باشد (رفع باگ خواسته‌ی ۱)
-        age_group = infer_age_group_from_level(level)
+        # گروه سنی معمولاً از روی خودِ سطح محاسبه می‌شود؛ ولی برای سطوح سفارشی/غیراستاندارد
+        # (خواسته‌ی ۹) که این تشخیص خودکار جواب نمی‌ده، گروه سنیِ دستیِ ارسالی از کلاینت رو قبول می‌کنیم
+        age_group = infer_age_group_from_level(level) or request.data.get('age_group', '')
         if not age_group:
-            return Response({'error': f'گروه سنی سطح «{level}» قابل تشخیص نیست'}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({'error': f'گروه سنی سطح «{level}» قابل تشخیص نیست — برای سطح سفارشی، گروه سنی را دستی انتخاب کنید'}, status=status.HTTP_400_BAD_REQUEST)
         payload = {**request.data, 'age_group': age_group}
         existing = TuitionSetting.objects.filter(level=level, age_group=age_group).first()
         if existing:

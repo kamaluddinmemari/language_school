@@ -7,6 +7,8 @@ from django.db.models import Q
 from .models import LevelTest, LevelTestPriceSetting
 from .serializers import LevelTestIntakeSerializer, LevelTestSerializer, LevelTestPriceSettingSerializer
 from .levels import LEVELS_BY_AGE_GROUP, AGE_GROUP_LABELS
+from accounts.models import User
+from accounts.serializers import StudentSerializer
 
 
 class LevelChoicesView(APIView):
@@ -129,6 +131,32 @@ class LevelTestDetailView(APIView):
         if updated.age_group and updated.level and updated.status != LevelTest.Status.COMPLETED:
             updated.status = LevelTest.Status.COMPLETED
             updated.save()
+
+        # وقتی تعیین‌سطح تکمیل می‌شود و هنوز به حساب دانش‌آموزی وصل نیست، خودکار وصلش می‌کنیم:
+        # اول دنبال حسابی با همین کد ملی می‌گردیم؛ اگه نبود، با همون مشخصات اولیه یکی می‌سازیم
+        # (خواسته‌ی «افرادی که برای تعیین‌سطح ثبت می‌شن خودکار وارد لیست دانش‌آموزان بشن»)
+        if updated.status == LevelTest.Status.COMPLETED and not updated.student:
+            existing = None
+            if updated.national_code:
+                existing = User.objects.filter(role='student', national_code=updated.national_code).first()
+            if existing:
+                updated.student = existing
+                updated.save(update_fields=['student'])
+            elif updated.first_name and updated.last_name and updated.national_code and updated.gender:
+                student_serializer = StudentSerializer(data={
+                    'first_name': updated.first_name, 'last_name': updated.last_name,
+                    'father_name': updated.father_name, 'phone': updated.phone,
+                    'national_code': updated.national_code,
+                    'birth_date': updated.birth_date.isoformat() if updated.birth_date else None,
+                    'gender': updated.gender,
+                })
+                if student_serializer.is_valid():
+                    new_student = student_serializer.save()
+                    updated.student = new_student
+                    updated.save(update_fields=['student'])
+                # اگه به هر دلیلی نامعتبر بود (مثلاً کد ملی تکراری با نقش غیردانش‌آموز)، بی‌صدا رد می‌شویم —
+                # مدیر می‌تواند بعداً دستی از پنل مدیریت دانش‌آموزان وصلش کند، بدون اینکه ثبت نتیجه‌ی
+                # تعیین‌سطح به‌خاطر این خطا مسدود شود
 
         return Response(LevelTestSerializer(updated).data)
 

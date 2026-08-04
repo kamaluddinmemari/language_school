@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from .models import ClassSlot, ClassSlotEnrollment, TuitionSetting, DiscountedPerson
+from .models import ClassSlot, ClassSlotEnrollment, TuitionSetting, DiscountedPerson, LevelRenewalApproval
 
 
 class ClassSlotSerializer(serializers.ModelSerializer):
@@ -161,6 +161,32 @@ class DiscountedPersonSerializer(serializers.ModelSerializer):
 class RefundEnrollmentSerializer(serializers.Serializer):
     card_number = serializers.CharField(max_length=30)
     receiver_name = serializers.CharField(max_length=150)
+
+
+class LevelRenewalApprovalSerializer(serializers.ModelSerializer):
+    student_first_name = serializers.CharField(source='student.first_name', read_only=True)
+    student_last_name = serializers.CharField(source='student.last_name', read_only=True)
+    student_national_code = serializers.CharField(source='student.national_code', read_only=True)
+    requested_by_name = serializers.SerializerMethodField()
+    reviewed_by_name = serializers.SerializerMethodField()
+    status_display = serializers.CharField(source='get_status_display', read_only=True)
+    created_at_jalali = serializers.ReadOnlyField()
+    reviewed_at_jalali = serializers.ReadOnlyField()
+
+    class Meta:
+        model = LevelRenewalApproval
+        fields = [
+            'id', 'student', 'student_first_name', 'student_last_name', 'student_national_code',
+            'level', 'status', 'status_display', 'note', 'requested_by_name', 'reviewed_by_name',
+            'created_at', 'created_at_jalali', 'reviewed_at', 'reviewed_at_jalali',
+        ]
+        read_only_fields = ['id', 'status', 'created_at', 'reviewed_at']
+
+    def get_requested_by_name(self, obj):
+        return f"{obj.requested_by.first_name} {obj.requested_by.last_name}" if obj.requested_by else '—'
+
+    def get_reviewed_by_name(self, obj):
+        return f"{obj.reviewed_by.first_name} {obj.reviewed_by.last_name}" if obj.reviewed_by else '—'
 
 
 class TransferEnrollmentSerializer(serializers.Serializer):

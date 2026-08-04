@@ -126,10 +126,11 @@ class ClassSlot(models.Model):
     def real_enrolled_count(self):
         """
         تعداد واقعیِ دانش‌آموزهای تک‌به‌تک ثبت‌نام‌شده (از روی خودِ ردیف‌های ClassSlotEnrollment)
-        — برخلاف current_count که فقط عدد انتزاعیِ «تخصیص خودکار» است و با ثبت‌نام واقعی
-        نباید قاطی شود (این دقیقاً همان باگی بود که باعث می‌شد ظرفیت زودتر از موعد «پر»/«مازاد» نشان داده شود)
+        — برخلاف current_count که فقط عدد انتزاعیِ «تخصیص خودکار» است. ثبت‌نام‌های خودِ دانش‌آموز
+        از اپ که هنوز رسیدشان توسط مدیر تایید نشده (payment_verified=False) جزو این عدد حساب
+        نمی‌شوند — یعنی تا تایید نشوند، اصلاً «توی کلاس» به‌حساب نمی‌آیند (خواسته‌ی ۱)
         """
-        return self.enrollments.count()
+        return self.enrollments.filter(payment_verified=True).count()
 
     @property
     def real_capacity_status(self):
@@ -324,6 +325,41 @@ class WalletTransaction(models.Model):
     @property
     def created_at_jalali(self):
         return _jalali(self.created_at)
+
+
+class LevelRenewalApproval(models.Model):
+    """
+    وقتی بیش از ۶۰ روز از آخرین ثبت‌نام/تعیین‌سطح دانش‌آموز گذشته، برای ادامه‌ی ثبت‌نام یا
+    باید تعیین‌سطح مجدد بشه یا مدیر آموزش سطح فعلی رو بدون تعیین‌سطح تازه تایید کنه.
+    """
+    class Status(models.TextChoices):
+        PENDING = 'pending', 'در انتظار بررسی'
+        APPROVED = 'approved', 'تاییدشده'
+        REJECTED = 'rejected', 'ردشده'
+
+    student = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='level_renewal_requests')
+    level = models.CharField(max_length=10)
+    requested_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name='level_renewals_requested')
+    status = models.CharField(max_length=10, choices=Status.choices, default=Status.PENDING)
+    reviewed_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name='level_renewals_reviewed')
+    note = models.CharField(max_length=255, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ['-created_at']
+
+    @property
+    def created_at_jalali(self):
+        return _jalali(self.created_at)
+
+    @property
+    def reviewed_at_jalali(self):
+        return _jalali(self.reviewed_at)
+
+    def __str__(self):
+        return f"{self.student.get_full_name()} — {self.level} — {self.get_status_display()}"
+
 
     def __str__(self):
         return f"{self.get_kind_display()} {self.amount} — {self.student.get_full_name()}"

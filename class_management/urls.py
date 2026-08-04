@@ -6,7 +6,9 @@ from .views import (
     TuitionSuggestionView, TuitionSettingListView, TuitionSettingDetailView, DiscountedPersonListView,
     RefundEnrollmentView, TransferEnrollmentOptionsView, TransferEnrollmentView, CreditToWalletView,
     StudentFinancialHistoryView, EnrollmentReportView, SplitClassView, DirectEnrollSuggestionsView,
-    MyDirectEnrollSuggestionsView, SelfEnrollView, VerifyEnrollmentPaymentView,
+    MyDirectEnrollSuggestionsView, SelfEnrollView, VerifyEnrollmentPaymentView, MyEnrollmentsView,
+    LevelRenewalApprovalListView, LevelRenewalApprovalDecideView,
+    PendingSelfEnrollmentsView, RejectPendingEnrollmentView, StudentEducationHistoryView,
 )
 
 urlpatterns = [
@@ -33,7 +35,13 @@ urlpatterns = [
     path('class-management/slots/<int:pk>/split/', SplitClassView.as_view(), name='class_slot_split'),
     path('class-management/direct-enroll-suggestions/', DirectEnrollSuggestionsView.as_view(), name='direct_enroll_suggestions'),
     path('class-management/my-direct-enroll-suggestions/', MyDirectEnrollSuggestionsView.as_view(), name='my_direct_enroll_suggestions'),
+    path('class-management/my-enrollments/', MyEnrollmentsView.as_view(), name='my_enrollments'),
+    path('class-management/level-renewal-requests/', LevelRenewalApprovalListView.as_view(), name='level_renewal_list'),
+    path('class-management/level-renewal-requests/<int:pk>/decide/', LevelRenewalApprovalDecideView.as_view(), name='level_renewal_decide'),
     path('class-management/slots/<int:pk>/self-enroll/', SelfEnrollView.as_view(), name='class_slot_self_enroll'),
     path('class-management/slots/<int:pk>/enroll/<int:student_id>/verify-payment/', VerifyEnrollmentPaymentView.as_view(), name='class_slot_verify_payment'),
+    path('class-management/slots/<int:pk>/enroll/<int:student_id>/reject-pending/', RejectPendingEnrollmentView.as_view(), name='class_slot_reject_pending'),
+    path('class-management/pending-self-enrollments/', PendingSelfEnrollmentsView.as_view(), name='pending_self_enrollments'),
+    path('class-management/students/<int:student_id>/education-history/', StudentEducationHistoryView.as_view(), name='student_education_history'),
     path('class-management/enrollment-report/', EnrollmentReportView.as_view(), name='enrollment_report'),
 ]

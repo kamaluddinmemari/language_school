@@ -15,10 +15,10 @@ class LevelTestIntakeSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = LevelTest
-        fields = ['id', 'first_name', 'last_name', 'father_name', 'birth_date', 'national_code', 'phone', 'student', 'price', 'payment_status']
+        fields = ['id', 'first_name', 'last_name', 'father_name', 'birth_date', 'national_code', 'phone', 'gender', 'student', 'price', 'payment_status']
 
     def validate(self, attrs):
-        for field in ['first_name', 'last_name', 'father_name', 'birth_date', 'national_code', 'phone']:
+        for field in ['first_name', 'last_name', 'father_name', 'birth_date', 'national_code', 'phone', 'gender']:
             if not attrs.get(field) and not (self.instance and getattr(self.instance, field, None)):
                 raise serializers.ValidationError({field: 'این فیلد لازم است'})
         return attrs
@@ -37,7 +37,7 @@ class LevelTestSerializer(serializers.ModelSerializer):
         model = LevelTest
         fields = [
             'id', 'first_name', 'last_name', 'father_name', 'birth_date', 'birth_date_jalali', 'age',
-            'national_code', 'phone', 'student', 'status', 'status_display', 'price', 'payment_status',
+            'national_code', 'phone', 'gender', 'student', 'status', 'status_display', 'price', 'payment_status',
             'age_group', 'level', 'test_date', 'test_date_jalali',
             'evaluator', 'evaluator_name', 'display_evaluator_name', 'notes', 'created_by',
             'created_at', 'created_at_jalali', 'updated_at',
