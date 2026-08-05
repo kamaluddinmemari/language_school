@@ -97,6 +97,7 @@ class EnrollStudentSerializer(serializers.Serializer):
     tuition_amount = serializers.IntegerField(min_value=0)
     discount_percent = serializers.IntegerField(min_value=0, max_value=100, required=False, default=0)
     pos_reference_code = serializers.CharField(max_length=50, required=False, allow_blank=True)
+    force_level_mismatch = serializers.BooleanField(required=False, default=False)
 
     def validate(self, data):
         if not data.get('student_id') and not data.get('national_code'):

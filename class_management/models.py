@@ -20,8 +20,8 @@ def infer_age_group_from_level(level):
     # سطوح کودک: e1..e5, s1..s5, g1..g5, u1..u5, m1..m5, h1..h5, i1..i5
     if re.match(r'^[esguhmi]\d+$', lvl):
         return 'kids'
-    # سطوح نوجوان: pre teen, teen1..teen15
-    if 'teen' in lvl:
+    # سطوح نوجوان: tns (استارتر، قبل از pre teen)، pre teen، teen1..teen15
+    if lvl == 'tns' or 'teen' in lvl:
         return 'teen'
     # سطوح بزرگسال: کدهای عددی خالص، مثلاً ۱۰۱ تا ۶۰۶
     if re.match(r'^\d+$', lvl):

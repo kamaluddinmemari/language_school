@@ -464,9 +464,16 @@ class ClassSlotEnrollView(APIView):
         except User.MultipleObjectsReturned:
             return Response({'error': 'بیش از یک دانش‌آموز با این مشخصات ثبت شده — با مدیر سیستم هماهنگ کنید'}, status=status.HTTP_400_BAD_REQUEST)
 
-        if slot.assigned_level and student.language_level and slot.assigned_level != student.language_level:
+        # خواسته‌ی ۱: سطح این کلاس باید با سطح واقعیِ فعلیِ دانش‌آموز (محاسبه‌شده از آخرین
+        # ثبت‌نام واقعی یا آخرین تعیین‌سطح — نه فیلد خام و اغلب خالیِ language_level) یکی
+        # باشد؛ وگرنه ثبت‌نام مسدود می‌شود (مگر با تایید صریح force_level_mismatch)
+        current_info = _compute_level_suggestion(student)
+        current_level = current_info['level']
+        if slot.assigned_level and current_level and _normalize_level(slot.assigned_level) != _normalize_level(current_level) \
+                and not data.get('force_level_mismatch'):
             return Response({
-                'error': f"سطح این دانش‌آموز ({student.language_level}) با سطح این کلاس ({slot.assigned_level}) یکی نیست"
+                'error': f"سطح فعلی این دانش‌آموز «{current_level}» است، ولی این کلاس سطح «{slot.assigned_level}» دارد — این ثبت‌نام با سطح دانش‌آموز همخوانی ندارد",
+                'level_mismatch': True, 'student_level': current_level, 'class_level': slot.assigned_level,
             }, status=status.HTTP_400_BAD_REQUEST)
 
         if slot.gender != ClassSlot.Gender.MIXED and student.gender:
@@ -577,10 +584,11 @@ class ClassSlotRosterView(generics.ListAPIView):
 
 class StudentEducationHistoryView(APIView):
     """
-    GET: سوابق آموزشیِ دانش‌آموز — سطح فعلی (همیشه به‌روز، از همون منطق تخصیص خودکار سطح)
-    + تاریخچه‌ی کامل ثبت‌نام‌های ترمیک (سطح، روش ثبت‌نام، تاریخ شمسی).
-    ⚠️ سوابق کلاس‌های خصوصی/گروهی/ورکشاپ اینجا نیست — آن‌ها توی اپ‌های دیگری (classes,
-    group_classes) هستند که این بخش بهشون دسترسی نداره.
+    GET: سوابق آموزشیِ کاملِ دانش‌آموز:
+    ۱) سطح فعلی (همیشه به‌روز، از همون منطق پیشنهاد خودکار سطح)
+    ۲) سوابق ثبت‌نام‌های ترمیک (سطح، روش ثبت‌نام، تاریخ شمسی)
+    ۳) سوابق کلاس‌های خصوصی/جبرانی/سایر (از اپ classes، مدل ClassRequest در accounts)
+    ۴) سوابق کلاس‌های گروهی/ورکشاپ (از اپ group_classes)
     """
     permission_classes = [IsAuthenticated]
 
@@ -596,6 +604,39 @@ class StudentEducationHistoryView(APIView):
 
         info = _compute_level_suggestion(student)
         history = ClassSlotEnrollment.objects.filter(student=student).select_related('class_slot').order_by('-created_at')
+
+        # کلاس‌های خصوصی/جبرانی/سایر (فاز ۱ — مدل ClassRequest در accounts، جلسات در اپ classes)
+        from accounts.models import ClassRequest
+        private_classes = ClassRequest.objects.filter(student=student).select_related('teacher').order_by('-created_at')
+        private_history = [{
+            'id': c.id,
+            'class_type': c.get_class_type_display() if c.class_type != 'other' else (c.custom_class_type or 'سایر'),
+            'language_level': c.language_level,
+            'teacher_name': f"{c.teacher.first_name} {c.teacher.last_name}" if c.teacher else '—',
+            'status_display': c.get_status_display(),
+            'session_count': c.session_count,
+            'sessions_done': c.sessions.filter(completed_at__isnull=False).count() if hasattr(c, 'sessions') else 0,
+            'class_date_jalali': c.class_date_jalali,
+            'completed_at_jalali': c.completed_at_jalali,
+            'created_at_jalali': c.created_at_jalali,
+            'total_price': c.total_price,
+        } for c in private_classes]
+
+        # کلاس‌های گروهی/ورکشاپ (فاز ۲ — اپ group_classes)
+        from group_classes.models import GroupSessionParticipant
+        group_participations = GroupSessionParticipant.objects.filter(student=student).select_related('group_session', 'group_session__teacher').order_by('-joined_at')
+        group_history = [{
+            'id': p.id,
+            'session_type': p.group_session.get_session_type_display(),
+            'title': p.group_session.title or p.group_session.language_level,
+            'language_level': p.group_session.language_level,
+            'teacher_name': f"{p.group_session.teacher.first_name} {p.group_session.teacher.last_name}" if p.group_session.teacher else '—',
+            'status_display': p.group_session.get_status_display(),
+            'payment_status_display': p.get_payment_status_display(),
+            'class_date_jalali': p.group_session.class_date_jalali,
+            'completed_at_jalali': p.group_session.completed_at_jalali,
+            'price_amount': p.price_amount,
+        } for p in group_participations]
 
         return Response({
             'current_level': info['level'],
@@ -613,6 +654,8 @@ class StudentEducationHistoryView(APIView):
                 'payment_verified': e.payment_verified,
                 'created_at_jalali': e.created_at_jalali,
             } for e in history],
+            'private_classes': private_history,
+            'group_classes': group_history,
         })
 
 
@@ -757,6 +800,26 @@ class MyEnrollmentsView(APIView):
 MAX_LEVELS_NEEDING_RETEST = {'i5', 'teen15', 'teen 15'}  # آخرین سطح کودکان/نوجوانان — عبور از این‌ها همیشه به تعیین‌سطح تازه نیاز دارد
 
 
+def _normalize_level(level):
+    return str(level or '').strip().lower()
+
+
+def _classes_matching_level(level, gender=None):
+    """
+    کلاس‌هایی که سطحشون با level یکیه — با مقایسه‌ی نرمال‌شده (فاصله/بزرگ‌کوچیکی حروف نادیده
+    گرفته می‌شه)، نه تطبیق دقیق رشته. رفع باگ: کلاس هم‌سطح ساخته‌شده پیدا نمی‌شد چون
+    assigned_level با فاصله یا حروف بزرگ/کوچیک متفاوت تایپ شده بود.
+    """
+    target = _normalize_level(level)
+    if not target:
+        return ClassSlot.objects.none()
+    matches = [c.id for c in ClassSlot.objects.all() if _normalize_level(c.assigned_level) == target]
+    qs = ClassSlot.objects.filter(id__in=matches)
+    if gender:
+        qs = qs.filter(Q(gender=gender) | Q(gender=ClassSlot.Gender.MIXED))
+    return qs
+
+
 def _compute_level_suggestion(student):
     """
     منطق مشترکِ حدس سطح دانش‌آموز برای «ثبت‌نام مستقیم» (هم پنل ادمین هم اپ):
@@ -800,10 +863,7 @@ def _compute_level_suggestion(student):
 
     eligible = []
     if level:
-        candidates = ClassSlot.objects.filter(assigned_level=level)
-        if student.gender:
-            candidates = candidates.filter(Q(gender=student.gender) | Q(gender=ClassSlot.Gender.MIXED))
-        eligible = [c for c in candidates if c.real_seats_left > 0]
+        eligible = [c for c in _classes_matching_level(level, student.gender) if c.real_seats_left > 0]
 
     age_group = infer_age_group_from_level(level)
     base_tuition = None
@@ -854,10 +914,7 @@ class DirectEnrollSuggestionsView(APIView):
         # خواسته‌ی ۲: اگه سطح پیشنهادی درست نبود، مدیر می‌تونه دستی سطح رو بزنه — کلاس‌های
         # همون سطح (در همه‌ی ساعت‌ها، هم‌جنسیت) دوباره لیست می‌شن، بدون چک انقضا/سطح‌پایانی
         if manual_level:
-            candidates = ClassSlot.objects.filter(assigned_level=manual_level)
-            if student.gender:
-                candidates = candidates.filter(Q(gender=student.gender) | Q(gender=ClassSlot.Gender.MIXED))
-            info['eligible'] = [c for c in candidates if c.real_seats_left > 0]
+            info['eligible'] = [c for c in _classes_matching_level(manual_level, student.gender) if c.real_seats_left > 0]
             info['level'] = manual_level
             info['age_group'] = infer_age_group_from_level(manual_level)
             setting = TuitionSetting.objects.filter(level=manual_level, age_group=info['age_group']).first()
