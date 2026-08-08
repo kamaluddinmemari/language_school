@@ -6,8 +6,8 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 import jdatetime
-from .models import Book, BookSale
-from .serializers import BookSerializer, BookSaleSerializer, SellBookSerializer
+from .models import Book, BookSale, BookStockAddition
+from .serializers import BookSerializer, BookSaleSerializer, SellBookSerializer, AddBookStockSerializer, BookStockAdditionSerializer
 
 MANAGE_ROLES = ('admin', 'evaluator', 'office')
 
@@ -83,6 +83,32 @@ class SellBookView(APIView):
         }, status=status.HTTP_201_CREATED)
 
 
+class AddBookStockView(APIView):
+    """POST: افزایش موجودی یک کتاب — بدنه: {quantity} — برای دکمه‌ی «+ افزودن» جلوی هر ردیف"""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, pk):
+        if request.user.role not in MANAGE_ROLES:
+            return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
+        try:
+            book = Book.objects.get(pk=pk)
+        except Book.DoesNotExist:
+            return Response({'error': 'کتاب پیدا نشد'}, status=status.HTTP_404_NOT_FOUND)
+
+        serializer = AddBookStockSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        quantity = serializer.validated_data['quantity']
+
+        addition = BookStockAddition.objects.create(book=book, quantity=quantity, added_by=request.user)
+        book.current_stock += quantity
+        book.save()
+
+        return Response({
+            'addition': BookStockAdditionSerializer(addition).data,
+            'book': BookSerializer(book).data,
+        }, status=status.HTTP_201_CREATED)
+
+
 class BookSalesHistoryView(generics.ListAPIView):
     """GET: تاریخچه‌ی فروش یک کتاب"""
     permission_classes = [IsAuthenticated]
@@ -108,6 +134,9 @@ class LibraryStatsView(APIView):
         total_sales_revenue = sum(b.total_sales_revenue for b in books)
         total_sales_quantity = sum(b.total_sales_quantity for b in books)
         total_predicted_need = sum(b.predicted_need for b in books)
+        total_cost = sum(b.total_cost for b in books)
+        total_cost_of_goods_sold = sum(b.cost_of_goods_sold for b in books)
+        total_profit = sum(b.total_profit for b in books)
 
         now_local = timezone.localtime(timezone.now())
         generated_at_jalali = jdatetime.datetime.fromgregorian(datetime=now_local).strftime('%Y/%m/%d - %H:%M:%S')
@@ -119,6 +148,9 @@ class LibraryStatsView(APIView):
             'total_sales_revenue': total_sales_revenue,
             'total_sales_quantity': total_sales_quantity,
             'total_predicted_need': total_predicted_need,
+            'total_cost': total_cost,
+            'total_cost_of_goods_sold': total_cost_of_goods_sold,
+            'total_profit': total_profit,
             'generated_at': now_local.isoformat(),
             'generated_at_jalali': generated_at_jalali,
             'books': BookSerializer(books, many=True).data,
