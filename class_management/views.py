@@ -854,7 +854,7 @@ class MyEnrollmentsView(APIView):
         if student.role != 'student':
             return Response({'error': 'این بخش فقط برای دانش‌آموزان است'}, status=status.HTTP_403_FORBIDDEN)
 
-        enrollments = ClassSlotEnrollment.objects.filter(student=student).select_related('class_slot').order_by('-created_at')
+        enrollments = ClassSlotEnrollment.objects.filter(student=student).select_related('class_slot', 'class_slot__term').order_by('-created_at')
         return Response([{
             'id': e.id,
             'class_number': e.class_slot.number,
@@ -865,6 +865,9 @@ class MyEnrollmentsView(APIView):
             'gender_display': e.class_slot.get_gender_display(),
             'is_online': e.class_slot.is_online,
             'meeting_link': e.class_slot.meeting_link if (e.class_slot.is_online and e.payment_verified) else '',
+            'term_title': e.class_slot.term.title if e.class_slot.term_id else '',
+            'term_start_jalali': e.class_slot.term.start_date_jalali if e.class_slot.term_id else '',
+            'term_end_jalali': e.class_slot.term.end_date_jalali if e.class_slot.term_id else '',
             'tuition_amount': e.tuition_amount,
             'discount_percent': e.discount_percent,
             'payment_method_display': e.get_payment_method_display(),
