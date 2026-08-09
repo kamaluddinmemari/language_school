@@ -1,8 +1,32 @@
 from django.db import models
 from django.utils import timezone
 from accounts.models import User, persian_only_validator
-from .levels import ALL_LEVEL_CHOICES
+from .levels import get_all_level_choices
 import jdatetime
+
+
+class StandardLevel(models.Model):
+    """
+    سطح استاندارد قابل تعریف از پنل («تعریف سطوح استاندارد») — منبع واحد و مرجع همه‌جای
+    پروژه: تعیین‌سطح، تعریف کلاس، ثبت‌نام، تعریف شهریه، پروفایل دانش‌آموز. با افزودن/حذف
+    سطح از این جدول، همه‌جا خودکار به‌روز می‌شود (چون choices همه‌ی فیلدهای مرتبط از
+    get_all_level_choices() که این جدول را می‌خواند تغذیه می‌شود، نه از لیست ثابت).
+    """
+    class AgeGroup(models.TextChoices):
+        KIDS = 'kids', 'کودک'
+        TEEN = 'teen', 'نوجوان'
+        ADULT = 'adult', 'بزرگسال'
+
+    code = models.CharField(max_length=20, unique=True, help_text='کد سطح، مثلاً E1 یا Teen3 یا 305')
+    age_group = models.CharField(max_length=10, choices=AgeGroup.choices)
+    order = models.PositiveIntegerField(default=0, help_text='ترتیب نمایش داخل گروه سنی')
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['age_group', 'order', 'code']
+
+    def __str__(self):
+        return f"{self.code} ({self.get_age_group_display()})"
 
 
 class LevelTestPriceSetting(models.Model):
@@ -57,7 +81,7 @@ class LevelTest(models.Model):
 
     # نتیجه — فقط توسط مسئول آموزش (یا مدیر به‌جایش) پر می‌شود
     age_group = models.CharField(max_length=10, choices=AgeGroup.choices, blank=True)
-    level = models.CharField(max_length=10, choices=ALL_LEVEL_CHOICES, blank=True)
+    level = models.CharField(max_length=10, choices=get_all_level_choices, blank=True)
     test_date = models.DateTimeField(null=True, blank=True)
     evaluator = models.ForeignKey(
         User, on_delete=models.SET_NULL, null=True, blank=True,

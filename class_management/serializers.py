@@ -1,5 +1,23 @@
 from rest_framework import serializers
-from .models import ClassSlot, ClassSlotEnrollment, TuitionSetting, DiscountedPerson, LevelRenewalApproval
+from .models import ClassSlot, ClassSlotEnrollment, TuitionSetting, DiscountedPerson, LevelRenewalApproval, Term
+
+
+class TermSerializer(serializers.ModelSerializer):
+    start_date_jalali = serializers.ReadOnlyField()
+    end_date_jalali = serializers.ReadOnlyField()
+    title = serializers.ReadOnlyField()
+    class_count = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Term
+        fields = [
+            'id', 'year', 'term_number', 'start_date', 'end_date',
+            'start_date_jalali', 'end_date_jalali', 'title', 'class_count', 'created_at',
+        ]
+        read_only_fields = ['id', 'created_at']
+
+    def get_class_count(self, obj):
+        return obj.class_slots.count()
 
 
 class ClassSlotSerializer(serializers.ModelSerializer):
@@ -14,17 +32,21 @@ class ClassSlotSerializer(serializers.ModelSerializer):
     real_seats_left = serializers.ReadOnlyField()
     real_surplus = serializers.ReadOnlyField()
     updated_at_jalali = serializers.ReadOnlyField()
+    term_title = serializers.SerializerMethodField()
 
     class Meta:
         model = ClassSlot
         fields = [
-            'id', 'number', 'title', 'day_type', 'day_type_display', 'gender', 'gender_display',
-            'capacity', 'teacher_name', 'time_slot', 'notes', 'is_three_day',
+            'id', 'number', 'term', 'term_title', 'title', 'day_type', 'day_type_display', 'gender', 'gender_display',
+            'capacity', 'teacher_name', 'time_slot', 'notes', 'is_three_day', 'is_online', 'meeting_link',
             'assigned_level', 'current_count', 'capacity_status', 'seats_left', 'surplus',
             'real_enrolled_count', 'real_capacity_status', 'real_seats_left', 'real_surplus',
             'updated_at', 'updated_at_jalali',
         ]
         read_only_fields = ['updated_at']
+
+    def get_term_title(self, obj):
+        return obj.term.title if obj.term_id else ''
 
 
 class LevelDemandSerializer(serializers.Serializer):
@@ -86,8 +108,17 @@ class RoomCapacitySerializer(serializers.Serializer):
 
 
 class BulkCreatePhysicalClassesSerializer(serializers.Serializer):
-    """ورودی دکمه‌ی «ساخت کلاس فیزیکی» — لیست شماره‌کلاس‌ها + ظرفیت هرکدام"""
+    """
+    ورودی دکمه‌ی «ساخت کلاس فیزیکی/آنلاین» — ترمی که این کلاس‌ها به آن تعلق دارند + لیست شماره‌کلاس‌ها و
+    ظرفیت هرکدام + فیلتر اختیاری اینکه کدوم ساعت‌ها اصلاً ساخته بشن + is_online (پیش‌فرض حضوری).
+    """
+    term_id = serializers.IntegerField()
     rooms = RoomCapacitySerializer(many=True)
+    include_time_slots = serializers.ListField(child=serializers.CharField(), required=False, default=list)
+    include_thursday_morning = serializers.BooleanField(required=False, default=True)
+    include_thursday_evening = serializers.BooleanField(required=False, default=True)
+    include_friday = serializers.BooleanField(required=False, default=True)
+    is_online = serializers.BooleanField(required=False, default=False)
 
 
 class EnrollStudentSerializer(serializers.Serializer):

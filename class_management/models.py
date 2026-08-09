@@ -2,7 +2,7 @@ from django.db import models
 from django.conf import settings
 from django.utils import timezone
 import jdatetime
-from level_tests.levels import ALL_LEVEL_CHOICES
+from level_tests.levels import get_all_level_choices
 from level_tests.models import LevelTest
 
 
@@ -46,6 +46,45 @@ FRIDAY_SLOT = '08:30-13:15'
 ALL_STANDARD_TIME_SLOTS = MORNING_TIME_SLOTS + EVENING_TIME_SLOTS + [THURSDAY_MORNING_SLOT, THURSDAY_EVENING_SLOT, FRIDAY_SLOT]
 
 
+class Term(models.Model):
+    """
+    ترم تحصیلی — هر سال شمسی معمولاً ۸ ترم دارد. با تعریف هر ترم (سال + شماره‌ترم ۱ تا ۸ +
+    بازه‌ی تاریخ شروع/پایان)، کلاس‌های فیزیکی که با «ساخت کلاس فیزیکی» ساخته می‌شوند به همان
+    ترم وصل می‌شوند — یعنی هر ترم مجموعه‌ی کامل و مستقل خودش از کلاس‌ها را دارد (خواسته‌ی
+    «انتخاب ترم» در بخش مدیریت کلاس‌ها).
+    """
+    year = models.PositiveIntegerField(help_text='سال شمسی، مثلاً ۱۴۰۵')
+    term_number = models.PositiveSmallIntegerField(help_text='شماره‌ی ترم، از ۱ تا ۸')
+    start_date = models.DateField(help_text='تاریخ شروع ترم (میلادی ذخیره می‌شود؛ در پنل به‌صورت شمسی وارد/نمایش می‌شود)')
+    end_date = models.DateField(help_text='تاریخ پایان ترم (میلادی ذخیره می‌شود؛ در پنل به‌صورت شمسی وارد/نمایش می‌شود)')
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-year', 'term_number']
+        constraints = [
+            models.UniqueConstraint(fields=['year', 'term_number'], name='unique_term_per_year')
+        ]
+
+    @property
+    def start_date_jalali(self):
+        if not self.start_date:
+            return None
+        return jdatetime.date.fromgregorian(date=self.start_date).strftime('%Y/%m/%d')
+
+    @property
+    def end_date_jalali(self):
+        if not self.end_date:
+            return None
+        return jdatetime.date.fromgregorian(date=self.end_date).strftime('%Y/%m/%d')
+
+    @property
+    def title(self):
+        return f"ترم {self.term_number} سال {self.year}"
+
+    def __str__(self):
+        return self.title
+
+
 class ClassSlot(models.Model):
     """
     یک کلاس، که مدیر یکی‌یکی وارد می‌کند — با روز/نوع برگزاری هفتگی، ساعت جاری (از لیست
@@ -69,10 +108,16 @@ class ClassSlot(models.Model):
         MIXED = 'mixed', 'مختلط'
 
     number = models.PositiveIntegerField(help_text='شماره کلاس — همان شماره می‌تواند در چند ساعت/روز مختلف تکرار شود (مثلاً کلاس ۱ هم صبح هم عصر)')
+    term = models.ForeignKey(
+        Term, on_delete=models.SET_NULL, null=True, blank=True, related_name='class_slots',
+        help_text='ترمی که این کلاس در آن ساخته شده — کلاس‌های قدیمی‌تر از قبل از این قابلیت می‌توانند خالی (بدون ترم) بمانند'
+    )
     title = models.CharField(max_length=100, blank=True)
     day_type = models.CharField(max_length=20, choices=DayType.choices)
     time_slot = models.CharField(max_length=20, blank=True, help_text='ساعت جاری کلاس — ترجیحاً از لیست استاندارد')
     gender = models.CharField(max_length=10, choices=Gender.choices, default=Gender.MIXED, help_text='دخترانه/پسرانه/مختلط — برای جایگذاری صحیح دانش‌آموزان')
+    is_online = models.BooleanField(default=False, help_text='کلاس آنلاین است — دقیقاً همان قواعد تشکیل/ثبت‌نام کلاس‌های ترمیک حضوری را دارد، فقط با لینک ورود آنلاین')
+    meeting_link = models.URLField(max_length=500, blank=True, help_text='لینک کلاس آنلاین (مثلاً Google Meet/Zoom) — بعد از تایید ثبت‌نام، هم به استاد هم به دانش‌آموز در اپ نمایش داده می‌شود')
     notes = models.TextField(blank=True, help_text='توضیحات آزاد، مثلاً «این کلاس فقط بین کلاس ۱ و ۹ جابجا شود»')
 
     capacity = models.PositiveIntegerField(default=10)
@@ -87,9 +132,9 @@ class ClassSlot(models.Model):
         ordering = ['number']
         constraints = [
             models.UniqueConstraint(
-                fields=['number', 'day_type', 'time_slot'],
-                name='unique_class_number_per_day_time',
-                violation_error_message='این شماره کلاس دقیقاً در همین روز و همین ساعت از قبل وجود دارد',
+                fields=['number', 'day_type', 'time_slot', 'term', 'is_online'],
+                name='unique_class_number_per_day_time_term_mode',
+                violation_error_message='این شماره کلاس دقیقاً در همین روز، ساعت، ترم و حالت (آنلاین/حضوری) از قبل وجود دارد',
             )
         ]
 
@@ -232,7 +277,7 @@ class TuitionSetting(models.Model):
     اپ level_tests استفاده می‌شود. موقع ثبت‌نام، با توجه به سطحِ کلاس و گروه سنی دانش‌آموز
     (از روی آخرین آزمون تعیین‌سطحِ تکمیل‌شده‌اش)، این مبلغ به‌عنوان پیش‌فرض پیشنهاد می‌شود.
     """
-    level = models.CharField(max_length=10, choices=ALL_LEVEL_CHOICES)
+    level = models.CharField(max_length=10, choices=get_all_level_choices)
     age_group = models.CharField(max_length=10, choices=LevelTest.AgeGroup.choices)
     amount = models.PositiveIntegerField(default=0, help_text='شهریه‌ی مصوب (تومان)')
     updated_at = models.DateTimeField(auto_now=True)
@@ -245,7 +290,7 @@ class TuitionSetting(models.Model):
 
     @property
     def level_display(self):
-        return dict(ALL_LEVEL_CHOICES).get(self.level, self.level)
+        return dict(get_all_level_choices()).get(self.level, self.level)
 
     @property
     def age_group_display(self):

@@ -8,14 +8,14 @@ from rest_framework.response import Response
 from rest_framework.parsers import MultiPartParser, FormParser
 from rest_framework.permissions import IsAuthenticated
 import jdatetime
-from .models import ClassSlot, ClassSlotEnrollment, TuitionSetting, DiscountedPerson, EnrollmentRefund, WalletTransaction, infer_age_group_from_level, _jalali, LevelRenewalApproval
+from .models import ClassSlot, ClassSlotEnrollment, TuitionSetting, DiscountedPerson, EnrollmentRefund, WalletTransaction, infer_age_group_from_level, _jalali, LevelRenewalApproval, Term
 from .models import THREE_DAY_TIME_SLOTS, THURSDAY_MORNING_SLOT, THURSDAY_EVENING_SLOT, FRIDAY_SLOT
 from .serializers import (
     ClassSlotSerializer, AllocateClassesSerializer, ConfirmOverflowSerializer,
     TransferSurplusSerializer, SpinOffSurplusSerializer,
     BulkCreatePhysicalClassesSerializer, EnrollStudentSerializer, ClassSlotEnrollmentSerializer,
     TuitionSettingSerializer, DiscountedPersonSerializer, RefundEnrollmentSerializer, TransferEnrollmentSerializer,
-    SplitClassSerializer, LevelRenewalApprovalSerializer,
+    SplitClassSerializer, LevelRenewalApprovalSerializer, TermSerializer,
 )
 from level_tests.models import LevelTest
 from .allocation import allocate_classes
@@ -67,12 +67,49 @@ class ClassSlotListView(generics.ListCreateAPIView):
     def get_queryset(self):
         if self.request.user.role not in MANAGE_ROLES:
             return ClassSlot.objects.none()
-        return ClassSlot.objects.all()
+        qs = ClassSlot.objects.all()
+        term_id = self.request.query_params.get('term')
+        if term_id:
+            qs = qs.filter(term_id=term_id)
+        return qs
 
     def create(self, request, *args, **kwargs):
         if request.user.role not in MANAGE_ROLES:
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         return super().create(request, *args, **kwargs)
+
+
+class TermListView(generics.ListCreateAPIView):
+    """GET: لیست ترم‌های تعریف‌شده / POST: تعریف یک ترم جدید (سال + شماره‌ترم ۱ تا ۸ + بازه‌ی تاریخ)"""
+    permission_classes = [IsAuthenticated]
+    serializer_class = TermSerializer
+
+    def get_queryset(self):
+        if self.request.user.role not in MANAGE_ROLES:
+            return Term.objects.none()
+        return Term.objects.all()
+
+    def create(self, request, *args, **kwargs):
+        if request.user.role not in MANAGE_ROLES:
+            return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
+        return super().create(request, *args, **kwargs)
+
+
+class TermDetailView(generics.RetrieveUpdateDestroyAPIView):
+    """GET/PATCH/DELETE یک ترم — مثلاً برای اصلاح تاریخ شروع/پایان"""
+    permission_classes = [IsAuthenticated]
+    serializer_class = TermSerializer
+    queryset = Term.objects.all()
+
+    def update(self, request, *args, **kwargs):
+        if request.user.role not in MANAGE_ROLES:
+            return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
+        return super().update(request, *args, **kwargs)
+
+    def destroy(self, request, *args, **kwargs):
+        if request.user.role not in MANAGE_ROLES:
+            return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
+        return super().destroy(request, *args, **kwargs)
 
 
 class ClassSlotDetailView(generics.RetrieveUpdateDestroyAPIView):
@@ -83,6 +120,22 @@ class ClassSlotDetailView(generics.RetrieveUpdateDestroyAPIView):
     def update(self, request, *args, **kwargs):
         if request.user.role not in MANAGE_ROLES:
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
+
+        # خواسته: توی هر ردیفِ روز+ساعت (مثلاً همه‌ی کلاس‌های زوج ساعت ۳:۴۵ الی ۵:۱۵)، یک استاد
+        # فقط می‌تواند همزمان روی یک کلاس باشد — نباید بین چند اتاق در همان روز/ساعت تداخل داشته باشد
+        new_teacher = (request.data.get('teacher_name') or '').strip()
+        if new_teacher:
+            obj = self.get_object()
+            conflict = ClassSlot.objects.filter(
+                day_type=obj.day_type, time_slot=obj.time_slot, term=obj.term,
+                teacher_name__iexact=new_teacher,
+            ).exclude(pk=obj.pk).first()
+            if conflict:
+                return Response(
+                    {'error': f'استاد «{new_teacher}» همین الان در همین روز و ساعت روی کلاس شماره {conflict.number} تعریف شده — یک استاد نمی‌تواند همزمان روی دو کلاس باشد'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
         return super().update(request, *args, **kwargs)
 
     def destroy(self, request, *args, **kwargs):
@@ -399,24 +452,42 @@ class BulkCreatePhysicalClassesView(APIView):
         serializer = BulkCreatePhysicalClassesSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         rooms = serializer.validated_data['rooms']
+        term_id = serializer.validated_data['term_id']
+        try:
+            term = Term.objects.get(pk=term_id)
+        except Term.DoesNotExist:
+            return Response({'error': 'ترم انتخاب‌شده پیدا نشد — اول یک ترم تعریف/انتخاب کنید'}, status=status.HTTP_404_NOT_FOUND)
 
         created, skipped = [], []
+        include_slots = set(serializer.validated_data.get('include_time_slots') or []) or set(THREE_DAY_TIME_SLOTS)
+        include_thu_morning = serializer.validated_data.get('include_thursday_morning', True)
+        include_thu_evening = serializer.validated_data.get('include_thursday_evening', True)
+        include_friday = serializer.validated_data.get('include_friday', True)
+        is_online = serializer.validated_data.get('is_online', False)
+
         for room in rooms:
             number = room['number']
             capacity = room['capacity']
 
             combos = []
             for slot in THREE_DAY_TIME_SLOTS:
-                combos.append((ClassSlot.DayType.EVEN, slot, ClassSlot.Gender.GIRLS))
+                if slot in include_slots:
+                    combos.append((ClassSlot.DayType.EVEN, slot, ClassSlot.Gender.GIRLS))
             for slot in THREE_DAY_TIME_SLOTS:
-                combos.append((ClassSlot.DayType.ODD, slot, ClassSlot.Gender.BOYS))
-            combos.append((ClassSlot.DayType.THURSDAY_MORNING, THURSDAY_MORNING_SLOT, room['thursday_morning_gender']))
-            combos.append((ClassSlot.DayType.THURSDAY_EVENING, THURSDAY_EVENING_SLOT, room['thursday_evening_gender']))
-            combos.append((ClassSlot.DayType.FRIDAY, FRIDAY_SLOT, room['friday_gender']))
+                if slot in include_slots:
+                    combos.append((ClassSlot.DayType.ODD, slot, ClassSlot.Gender.BOYS))
+            if include_thu_morning:
+                combos.append((ClassSlot.DayType.THURSDAY_MORNING, THURSDAY_MORNING_SLOT, room['thursday_morning_gender']))
+            if include_thu_evening:
+                combos.append((ClassSlot.DayType.THURSDAY_EVENING, THURSDAY_EVENING_SLOT, room['thursday_evening_gender']))
+            if include_friday:
+                combos.append((ClassSlot.DayType.FRIDAY, FRIDAY_SLOT, room['friday_gender']))
 
             for day_type, time_slot, gender in combos:
+                # get_or_create با term و is_online در ورودی جستجو، یعنی هر ترم و هر حالت
+                # (آنلاین/حضوری) مجموعه‌ی کاملاً مستقل خودش از کلاس‌ها را دارد
                 obj, was_created = ClassSlot.objects.get_or_create(
-                    number=number, day_type=day_type, time_slot=time_slot,
+                    number=number, day_type=day_type, time_slot=time_slot, term=term, is_online=is_online,
                     defaults={'capacity': capacity, 'gender': gender},
                 )
                 if was_created:
@@ -424,10 +495,11 @@ class BulkCreatePhysicalClassesView(APIView):
                 else:
                     skipped.append(obj.id)
 
-        slots = ClassSlot.objects.all().order_by('number')
+        slots = ClassSlot.objects.filter(term=term).order_by('number')
         return Response({
             'created_count': len(created),
             'skipped_count': len(skipped),
+            'term': TermSerializer(term).data,
             'slots': ClassSlotSerializer(slots, many=True).data,
         }, status=status.HTTP_201_CREATED)
 
@@ -487,12 +559,15 @@ class ClassSlotEnrollView(APIView):
         if ClassSlotEnrollment.objects.filter(class_slot=slot, student=student).exists():
             return Response({'error': 'این دانش‌آموز قبلاً توی همین کلاس ثبت‌نام شده'}, status=status.HTTP_400_BAD_REQUEST)
 
-        # خواسته‌ی ۲: کد ملی یکتاست — اگه همین الان توی یه کلاس دیگه ثبت‌نام فعال داره، اجازه‌ی
-        # ثبت‌نام دوم نمی‌دیم (اول باید با «انتقال کلاس» یا حذف/استرداد از کلاس قبلی خارجش کنن)
-        other_enrollment = ClassSlotEnrollment.objects.filter(student=student).exclude(class_slot=slot).select_related('class_slot').first()
+        # خواسته: کد ملی در هر ترم فقط یک ثبت‌نام فعال دارد — اگه همین الان توی یه کلاس دیگه‌ی
+        # همین ترم ثبت‌نام فعال داره، اجازه‌ی ثبت‌نام دوم نمی‌دیم (اول باید با «انتقال کلاس» یا
+        # حذف/استرداد از کلاس قبلی خارجش کنن). بین ترم‌های مختلف مانعی نیست.
+        other_enrollment = ClassSlotEnrollment.objects.filter(
+            student=student, class_slot__term=slot.term
+        ).exclude(class_slot=slot).select_related('class_slot').first()
         if other_enrollment:
             return Response({
-                'error': f"این دانش‌آموز از قبل توی کلاس {other_enrollment.class_slot.number} (سطح {other_enrollment.class_slot.assigned_level or '—'}) ثبت‌نام فعال دارد — برای جابه‌جایی از «انتقال کلاس» استفاده کنید"
+                'error': f"این دانش‌آموز از قبل توی کلاس {other_enrollment.class_slot.number} (سطح {other_enrollment.class_slot.assigned_level or '—'}) در همین ترم ثبت‌نام فعال دارد — برای جابه‌جایی از «انتقال کلاس» استفاده کنید"
             }, status=status.HTTP_400_BAD_REQUEST)
 
         # خواسته‌ی ۵: ثبت‌نام هرگز به‌خاطر پر بودن ظرفیت مسدود نمی‌شود — چون current_count
@@ -788,6 +863,8 @@ class MyEnrollmentsView(APIView):
             'day_type_display': e.class_slot.day_type_display,
             'time_slot': e.class_slot.time_slot,
             'gender_display': e.class_slot.get_gender_display(),
+            'is_online': e.class_slot.is_online,
+            'meeting_link': e.class_slot.meeting_link if (e.class_slot.is_online and e.payment_verified) else '',
             'tuition_amount': e.tuition_amount,
             'discount_percent': e.discount_percent,
             'payment_method_display': e.get_payment_method_display(),
@@ -809,6 +886,10 @@ def _classes_matching_level(level, gender=None):
     کلاس‌هایی که سطحشون با level یکیه — با مقایسه‌ی نرمال‌شده (فاصله/بزرگ‌کوچیکی حروف نادیده
     گرفته می‌شه)، نه تطبیق دقیق رشته. رفع باگ: کلاس هم‌سطح ساخته‌شده پیدا نمی‌شد چون
     assigned_level با فاصله یا حروف بزرگ/کوچیک متفاوت تایپ شده بود.
+
+    رفع باگ دوم: جنسیت دانش‌آموز (male/female — روی مدل User) با جنسیت کلاس (boys/girls —
+    روی ClassSlot) قبلاً مستقیم مقایسه می‌شد که هیچ‌وقت برابر نبودن، پس هیچ کلاس تک‌جنسیتی‌ای
+    match نمی‌شد. اینجا اول به مقدار معادل ClassSlot.Gender تبدیل می‌شود.
     """
     target = _normalize_level(level)
     if not target:
@@ -816,7 +897,8 @@ def _classes_matching_level(level, gender=None):
     matches = [c.id for c in ClassSlot.objects.all() if _normalize_level(c.assigned_level) == target]
     qs = ClassSlot.objects.filter(id__in=matches)
     if gender:
-        qs = qs.filter(Q(gender=gender) | Q(gender=ClassSlot.Gender.MIXED))
+        class_gender = {'male': ClassSlot.Gender.BOYS, 'female': ClassSlot.Gender.GIRLS}.get(gender, gender)
+        qs = qs.filter(Q(gender=class_gender) | Q(gender=ClassSlot.Gender.MIXED))
     return qs
 
 
@@ -1012,9 +1094,9 @@ class SelfEnrollView(APIView):
         if ClassSlotEnrollment.objects.filter(class_slot=slot, student=student).exists():
             return Response({'error': 'شما قبلاً توی همین کلاس ثبت‌نام کرده‌اید'}, status=status.HTTP_400_BAD_REQUEST)
 
-        other_enrollment = ClassSlotEnrollment.objects.filter(student=student).exclude(class_slot=slot).first()
+        other_enrollment = ClassSlotEnrollment.objects.filter(student=student, class_slot__term=slot.term).exclude(class_slot=slot).first()
         if other_enrollment:
-            return Response({'error': 'شما از قبل یک ثبت‌نام فعال دیگر دارید — برای تغییر کلاس با مدرسه تماس بگیرید'}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({'error': 'شما از قبل یک ثبت‌نام فعال دیگر در همین ترم دارید — برای تغییر کلاس با مدرسه تماس بگیرید'}, status=status.HTTP_400_BAD_REQUEST)
 
         # اگه سطح دانش‌آموز نیاز به تعیین‌سطح مجدد داره (منقضی یا آخرین سطح گروه سنی‌اش)،
         # اجازه‌ی ثبت‌نام خودکار نمی‌دیم — باید یا تعیین‌سطح بده یا مدیر آموزش تاییدش کنه
@@ -1459,3 +1541,139 @@ class SplitClassView(APIView):
             'source': ClassSlotSerializer(source).data,
             'target': ClassSlotSerializer(target).data,
         })
+
+
+class TeacherEducationHistoryView(APIView):
+    """
+    GET /api/class-management/teachers/<teacher_id>/education-history/?term=<term_id>
+    سوابق آموزشیِ کاملِ یک استاد — برای بخش «سوابق آموزشی» در «مدیریت اساتید»:
+    ۱) سوابق کلاس‌های ترمیک (بر اساس ترم انتخابی؛ اگر term داده نشود، جدیدترین ترم پیش‌فرض است)
+       — چون ClassSlot رابطه‌ی مستقیم (FK) به استاد ندارد، تطبیق روی نام کامل (teacher_name) انجام می‌شود
+    ۲) سوابق کلاس‌های خصوصی/جبرانی/سایر (فاز ۱ — مدل ClassRequest در accounts)
+    ۳) سوابق کلاس‌های ورکشاپ/خصوصی‌گروهی (فاز ۲ — اپ group_classes)
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, teacher_id):
+        if request.user.role not in MANAGE_ROLES:
+            return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
+        from django.contrib.auth import get_user_model
+        User = get_user_model()
+        try:
+            teacher = User.objects.get(pk=teacher_id, role__in=User.TEACHER_LIKE_ROLES)
+        except User.DoesNotExist:
+            return Response({'error': 'استاد پیدا نشد'}, status=status.HTTP_404_NOT_FOUND)
+
+        teacher_full_name = f"{teacher.first_name} {teacher.last_name}".strip()
+
+        # ۱) ترم‌ها برای انتخابگر + کلاس‌های ترمیک استاد در ترم انتخابی (یا جدیدترین ترم)
+        terms = Term.objects.all().order_by('-year', '-term_number')
+        term_id = request.query_params.get('term')
+        selected_term = terms.filter(pk=term_id).first() if term_id else None
+        if not selected_term:
+            selected_term = terms.first()
+
+        term_classes = []
+        if selected_term:
+            term_slots = ClassSlot.objects.filter(
+                term=selected_term, teacher_name__iexact=teacher_full_name
+            ).order_by('day_type', 'time_slot', 'number')
+            for s in term_slots:
+                term_classes.append({
+                    'id': s.id, 'number': s.number, 'day_type_display': s.day_type_display,
+                    'time_slot': s.time_slot, 'assigned_level': s.assigned_level,
+                    'gender_display': s.get_gender_display(),
+                    'is_online': s.is_online, 'meeting_link': s.meeting_link,
+                    'real_enrolled_count': s.real_enrolled_count, 'capacity': s.capacity,
+                })
+
+        # ۲) کلاس‌های خصوصی/جبرانی/سایر (فاز ۱)
+        private_history = []
+        try:
+            from accounts.models import ClassRequest
+            private_classes = ClassRequest.objects.filter(
+                teacher=teacher, status=ClassRequest.Status.COMPLETED
+            ).select_related('student').order_by('-completed_at')
+            for c in private_classes:
+                private_history.append({
+                    'id': c.id,
+                    'class_type': c.get_class_type_display() if c.class_type != 'other' else (c.custom_class_type or 'سایر'),
+                    'language_level': c.language_level,
+                    'student_name': f"{c.student.first_name} {c.student.last_name}" if c.student else '—',
+                    'session_count': c.session_count,
+                    'completed_at_jalali': getattr(c, 'completed_at_jalali', None),
+                    'total_price': c.total_price,
+                    'teacher_share': c.teacher_share,
+                })
+        except Exception:
+            pass  # اگه اپ classes در دسترس نبود، این بخش خالی برمی‌گرده نه اینکه کل صفحه خطا بده
+
+        # ۳) کلاس‌های ورکشاپ/خصوصی‌گروهی (فاز ۲)
+        group_history = []
+        try:
+            from group_classes.models import GroupSession, GroupSessionParticipant
+            group_sessions = GroupSession.objects.filter(teacher=teacher).order_by('-id')
+            for g in group_sessions:
+                group_history.append({
+                    'id': g.id,
+                    'session_type': g.get_session_type_display(),
+                    'title': g.title or g.language_level,
+                    'language_level': g.language_level,
+                    'status_display': g.get_status_display(),
+                    'class_date_jalali': getattr(g, 'class_date_jalali', None),
+                    'completed_at_jalali': getattr(g, 'completed_at_jalali', None),
+                    'participant_count': GroupSessionParticipant.objects.filter(group_session=g).count(),
+                })
+        except Exception:
+            pass
+
+        return Response({
+            'teacher_id': teacher.id, 'teacher_name': teacher_full_name,
+            'terms': TermSerializer(terms, many=True).data,
+            'selected_term': TermSerializer(selected_term).data if selected_term else None,
+            'term_classes': term_classes,
+            'private_classes': private_history,
+            'group_classes': group_history,
+        })
+
+
+class TeacherTermClassesView(APIView):
+    """
+    GET /api/class-management/my-term-classes/
+    برای اپ موبایل استاد — کلاس‌های ترمیکِ خودِ استاد در «ترم جاری» (بر اساس تاریخ امروز؛ اگر
+    ترم جاری‌ای پیدا نشد، آخرین ترمِ تعریف‌شده به‌عنوان جایگزین استفاده می‌شود)، همراه با اسم
+    دانش‌آموزهای هرکلاس، روز، ساعت، سطح و ظرفیت.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        from django.contrib.auth import get_user_model
+        User = get_user_model()
+        if request.user.role not in User.TEACHER_LIKE_ROLES:
+            return Response({'error': 'این بخش فقط برای اساتید است'}, status=status.HTTP_403_FORBIDDEN)
+
+        today = timezone.now().date()
+        term = Term.objects.filter(start_date__lte=today, end_date__gte=today).order_by('-start_date').first()
+        if not term:
+            term = Term.objects.order_by('-year', '-term_number').first()
+        if not term:
+            return Response({'term': None, 'classes': []})
+
+        teacher_full_name = request.user.get_full_name().strip()
+        slots = ClassSlot.objects.filter(
+            term=term, teacher_name__iexact=teacher_full_name
+        ).order_by('day_type', 'time_slot', 'number')
+
+        result = []
+        for s in slots:
+            students = ClassSlotEnrollment.objects.filter(class_slot=s, payment_verified=True).select_related('student')
+            result.append({
+                'id': s.id, 'number': s.number, 'day_type_display': s.day_type_display,
+                'time_slot': s.time_slot, 'gender_display': s.get_gender_display(),
+                'assigned_level': s.assigned_level, 'capacity': s.capacity,
+                'is_online': s.is_online, 'meeting_link': s.meeting_link if s.is_online else '',
+                'student_count': students.count(),
+                'students': [f"{e.student.first_name} {e.student.last_name}".strip() for e in students],
+            })
+
+        return Response({'term': TermSerializer(term).data, 'classes': result})

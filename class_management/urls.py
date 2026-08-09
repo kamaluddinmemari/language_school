@@ -9,6 +9,7 @@ from .views import (
     MyDirectEnrollSuggestionsView, SelfEnrollView, VerifyEnrollmentPaymentView, MyEnrollmentsView,
     LevelRenewalApprovalListView, LevelRenewalApprovalDecideView,
     PendingSelfEnrollmentsView, RejectPendingEnrollmentView, StudentEducationHistoryView,
+    TermListView, TermDetailView, TeacherEducationHistoryView, TeacherTermClassesView,
 )
 
 urlpatterns = [
@@ -44,4 +45,8 @@ urlpatterns = [
     path('class-management/pending-self-enrollments/', PendingSelfEnrollmentsView.as_view(), name='pending_self_enrollments'),
     path('class-management/students/<int:student_id>/education-history/', StudentEducationHistoryView.as_view(), name='student_education_history'),
     path('class-management/enrollment-report/', EnrollmentReportView.as_view(), name='enrollment_report'),
+    path('class-management/terms/', TermListView.as_view(), name='term_list'),
+    path('class-management/terms/<int:pk>/', TermDetailView.as_view(), name='term_detail'),
+    path('class-management/teachers/<int:teacher_id>/education-history/', TeacherEducationHistoryView.as_view(), name='teacher_education_history'),
+    path('class-management/my-term-classes/', TeacherTermClassesView.as_view(), name='my_term_classes'),
 ]

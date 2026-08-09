@@ -1,14 +1,64 @@
-from rest_framework import status
+from rest_framework import status, generics
+from rest_framework import serializers as drf_serializers
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from django.utils import timezone
 from django.db.models import Q
-from .models import LevelTest, LevelTestPriceSetting
+from .models import LevelTest, LevelTestPriceSetting, StandardLevel
 from .serializers import LevelTestIntakeSerializer, LevelTestSerializer, LevelTestPriceSettingSerializer
-from .levels import LEVELS_BY_AGE_GROUP, AGE_GROUP_LABELS
+from .levels import get_levels_by_age_group, AGE_GROUP_LABELS
 from accounts.models import User
 from accounts.serializers import StudentSerializer
+
+MANAGE_LEVEL_ROLES = ('admin', 'evaluator')
+
+
+class StandardLevelSerializer(drf_serializers.ModelSerializer):
+    age_group_display = drf_serializers.CharField(source='get_age_group_display', read_only=True)
+
+    class Meta:
+        model = StandardLevel
+        fields = ['id', 'code', 'age_group', 'age_group_display', 'order', 'created_at']
+        read_only_fields = ['id', 'created_at']
+
+
+class StandardLevelListView(generics.ListCreateAPIView):
+    """GET: لیست سطوح استاندارد تعریف‌شده / POST: افزودن سطح استاندارد جدید — منبع واحد سطوح در کل پروژه"""
+    permission_classes = [IsAuthenticated]
+    serializer_class = StandardLevelSerializer
+
+    def get_queryset(self):
+        if self.request.user.role not in MANAGE_LEVEL_ROLES:
+            return StandardLevel.objects.none()
+        return StandardLevel.objects.all()
+
+    def create(self, request, *args, **kwargs):
+        if request.user.role not in MANAGE_LEVEL_ROLES:
+            return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
+        code = (request.data.get('code') or '').strip()
+        if not code:
+            return Response({'error': 'کد سطح را وارد کنید'}, status=status.HTTP_400_BAD_REQUEST)
+        if StandardLevel.objects.filter(code__iexact=code).exists():
+            return Response({'error': f'سطح «{code}» از قبل وجود دارد'}, status=status.HTTP_400_BAD_REQUEST)
+        return super().create(request, *args, **kwargs)
+
+
+class StandardLevelDetailView(generics.RetrieveUpdateDestroyAPIView):
+    """GET/PATCH/DELETE یک سطح استاندارد"""
+    permission_classes = [IsAuthenticated]
+    serializer_class = StandardLevelSerializer
+    queryset = StandardLevel.objects.all()
+
+    def update(self, request, *args, **kwargs):
+        if request.user.role not in MANAGE_LEVEL_ROLES:
+            return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
+        return super().update(request, *args, **kwargs)
+
+    def destroy(self, request, *args, **kwargs):
+        if request.user.role not in MANAGE_LEVEL_ROLES:
+            return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
+        return super().destroy(request, *args, **kwargs)
 
 
 class LevelChoicesView(APIView):
@@ -18,7 +68,7 @@ class LevelChoicesView(APIView):
     def get(self, request):
         return Response({
             'age_groups': [{'value': k, 'label': v} for k, v in AGE_GROUP_LABELS.items()],
-            'levels_by_age_group': LEVELS_BY_AGE_GROUP,
+            'levels_by_age_group': get_levels_by_age_group(),
         })
 
 
