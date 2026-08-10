@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from .models import ClassSlot, ClassSlotEnrollment, TuitionSetting, DiscountedPerson, LevelRenewalApproval, Term
+from .models import ClassSlot, ClassSlotEnrollment, TuitionSetting, DiscountedPerson, LevelRenewalApproval, Term, OnlineCourse, OnlineCourseEnrollment
 
 
 class TermSerializer(serializers.ModelSerializer):
@@ -178,13 +178,15 @@ class DiscountedPersonSerializer(serializers.ModelSerializer):
     student_national_code = serializers.CharField(source='student.national_code', read_only=True)
     student_phone = serializers.CharField(source='student.phone', read_only=True)
     class_slot_number = serializers.IntegerField(source='class_slot.number', read_only=True)
+    online_course_title = serializers.CharField(source='online_course.title', read_only=True)
     updated_at_jalali = serializers.ReadOnlyField()
 
     class Meta:
         model = DiscountedPerson
         fields = [
             'id', 'student', 'student_first_name', 'student_last_name', 'student_national_code',
-            'student_phone', 'discount_percent', 'class_slot', 'class_slot_number', 'approved_tuition',
+            'student_phone', 'discount_percent', 'class_slot', 'class_slot_number',
+            'online_course', 'online_course_title', 'approved_tuition',
             'created_at', 'updated_at', 'updated_at_jalali',
         ]
         read_only_fields = ['id', 'created_at', 'updated_at']
@@ -193,6 +195,50 @@ class DiscountedPersonSerializer(serializers.ModelSerializer):
 class RefundEnrollmentSerializer(serializers.Serializer):
     card_number = serializers.CharField(max_length=30)
     receiver_name = serializers.CharField(max_length=150)
+
+
+class OnlineCourseSerializer(serializers.ModelSerializer):
+    seats_left = serializers.ReadOnlyField()
+    enrolled_count = serializers.ReadOnlyField()
+    created_at_jalali = serializers.ReadOnlyField()
+
+    class Meta:
+        model = OnlineCourse
+        fields = [
+            'id', 'title', 'price', 'session_count', 'capacity', 'teacher_name', 'schedule_note',
+            'meeting_link', 'is_active', 'seats_left', 'enrolled_count', 'created_at', 'created_at_jalali',
+        ]
+        read_only_fields = ['id', 'created_at']
+
+
+class OnlineCourseEnrollSerializer(serializers.Serializer):
+    student_id = serializers.IntegerField(required=False)
+    national_code = serializers.CharField(max_length=20, required=False, allow_blank=True)
+    payment_method = serializers.ChoiceField(choices=OnlineCourseEnrollment.PaymentMethod.choices)
+    price_paid = serializers.IntegerField(min_value=0)
+    discount_percent = serializers.IntegerField(min_value=0, max_value=100, required=False, default=0)
+
+    def validate(self, data):
+        if not data.get('student_id') and not data.get('national_code'):
+            raise serializers.ValidationError('یا شناسه‌ی دانش‌آموز یا کد ملی لازم است')
+        return data
+    student_first_name = serializers.CharField(source='student.first_name', read_only=True)
+    student_last_name = serializers.CharField(source='student.last_name', read_only=True)
+    student_national_code = serializers.CharField(source='student.national_code', read_only=True)
+    student_phone = serializers.CharField(source='student.phone', read_only=True)
+    course_title = serializers.CharField(source='course.title', read_only=True)
+    payment_method_display = serializers.CharField(source='get_payment_method_display', read_only=True)
+    created_at_jalali = serializers.ReadOnlyField()
+
+    class Meta:
+        model = OnlineCourseEnrollment
+        fields = [
+            'id', 'course', 'course_title', 'student', 'student_first_name', 'student_last_name',
+            'student_national_code', 'student_phone', 'payment_method', 'payment_method_display',
+            'price_paid', 'discount_percent', 'receipt_image', 'self_enrolled', 'payment_verified',
+            'created_at', 'created_at_jalali',
+        ]
+        read_only_fields = ['id', 'created_at']
 
 
 class LevelRenewalApprovalSerializer(serializers.ModelSerializer):

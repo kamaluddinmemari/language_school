@@ -3,13 +3,17 @@ from .views import (
     ClassSlotListView, ClassSlotDetailView, AllocateClassesView,
     ConfirmOverflowView, TransferSurplusView, SpinOffSurplusView, ClassStatsView,
     BulkCreatePhysicalClassesView, ClassSlotEnrollView, ClassSlotUnenrollView, ClassSlotRosterView,
-    TuitionSuggestionView, TuitionSettingListView, TuitionSettingDetailView, DiscountedPersonListView,
+    TuitionSuggestionView, TuitionSettingListView, TuitionSettingDetailView, DiscountedPersonListView, DiscountedPersonDetailView,
     RefundEnrollmentView, TransferEnrollmentOptionsView, TransferEnrollmentView, CreditToWalletView,
     StudentFinancialHistoryView, EnrollmentReportView, SplitClassView, DirectEnrollSuggestionsView,
     MyDirectEnrollSuggestionsView, SelfEnrollView, VerifyEnrollmentPaymentView, MyEnrollmentsView,
     LevelRenewalApprovalListView, LevelRenewalApprovalDecideView,
     PendingSelfEnrollmentsView, RejectPendingEnrollmentView, StudentEducationHistoryView,
     TermListView, TermDetailView, TeacherEducationHistoryView, TeacherTermClassesView,
+    OnlineCourseListView, OnlineCourseDetailView, OnlineCourseCatalogView, OnlineCourseEnrollView,
+    OnlineCourseSelfEnrollView, PendingOnlineCourseEnrollmentsView, VerifyOnlineCourseEnrollmentPaymentView,
+    RejectPendingOnlineCourseEnrollmentView, RefundOnlineCourseEnrollmentView, CreditOnlineCourseToWalletView,
+    MyOnlineCourseEnrollmentsView, TeacherOnlineCoursesView,
 )
 
 urlpatterns = [
@@ -32,6 +36,7 @@ urlpatterns = [
     path('class-management/tuition-settings/', TuitionSettingListView.as_view(), name='tuition_setting_list'),
     path('class-management/tuition-settings/<int:pk>/', TuitionSettingDetailView.as_view(), name='tuition_setting_detail'),
     path('class-management/discounted-persons/', DiscountedPersonListView.as_view(), name='discounted_person_list'),
+    path('class-management/discounted-persons/<int:pk>/', DiscountedPersonDetailView.as_view(), name='discounted_person_detail'),
     path('class-management/students/<int:student_id>/financial-history/', StudentFinancialHistoryView.as_view(), name='student_financial_history'),
     path('class-management/slots/<int:pk>/split/', SplitClassView.as_view(), name='class_slot_split'),
     path('class-management/direct-enroll-suggestions/', DirectEnrollSuggestionsView.as_view(), name='direct_enroll_suggestions'),
@@ -49,4 +54,18 @@ urlpatterns = [
     path('class-management/terms/<int:pk>/', TermDetailView.as_view(), name='term_detail'),
     path('class-management/teachers/<int:teacher_id>/education-history/', TeacherEducationHistoryView.as_view(), name='teacher_education_history'),
     path('class-management/my-term-classes/', TeacherTermClassesView.as_view(), name='my_term_classes'),
+
+    # --- سایر دوره‌ها / کلاس‌های علمی (OnlineCourse) ---
+    path('class-management/courses/', OnlineCourseListView.as_view(), name='online_course_list'),
+    path('class-management/courses/<int:pk>/', OnlineCourseDetailView.as_view(), name='online_course_detail'),
+    path('class-management/courses-catalog/', OnlineCourseCatalogView.as_view(), name='online_course_catalog'),
+    path('class-management/courses/<int:pk>/enroll/', OnlineCourseEnrollView.as_view(), name='online_course_enroll'),
+    path('class-management/courses/<int:pk>/self-enroll/', OnlineCourseSelfEnrollView.as_view(), name='online_course_self_enroll'),
+    path('class-management/pending-course-enrollments/', PendingOnlineCourseEnrollmentsView.as_view(), name='pending_course_enrollments'),
+    path('class-management/courses/<int:pk>/enroll/<int:student_id>/verify-payment/', VerifyOnlineCourseEnrollmentPaymentView.as_view(), name='online_course_verify_payment'),
+    path('class-management/courses/<int:pk>/enroll/<int:student_id>/reject-pending/', RejectPendingOnlineCourseEnrollmentView.as_view(), name='online_course_reject_pending'),
+    path('class-management/courses/<int:pk>/enroll/<int:student_id>/refund/', RefundOnlineCourseEnrollmentView.as_view(), name='online_course_refund'),
+    path('class-management/courses/<int:pk>/enroll/<int:student_id>/to-wallet/', CreditOnlineCourseToWalletView.as_view(), name='online_course_to_wallet'),
+    path('class-management/my-course-enrollments/', MyOnlineCourseEnrollmentsView.as_view(), name='my_course_enrollments'),
+    path('class-management/my-online-courses/', TeacherOnlineCoursesView.as_view(), name='teacher_online_courses'),
 ]

@@ -8,7 +8,7 @@ from rest_framework.response import Response
 from rest_framework.parsers import MultiPartParser, FormParser
 from rest_framework.permissions import IsAuthenticated
 import jdatetime
-from .models import ClassSlot, ClassSlotEnrollment, TuitionSetting, DiscountedPerson, EnrollmentRefund, WalletTransaction, infer_age_group_from_level, _jalali, LevelRenewalApproval, Term
+from .models import ClassSlot, ClassSlotEnrollment, TuitionSetting, DiscountedPerson, EnrollmentRefund, WalletTransaction, infer_age_group_from_level, _jalali, LevelRenewalApproval, Term, OnlineCourse, OnlineCourseEnrollment
 from .models import THREE_DAY_TIME_SLOTS, THURSDAY_MORNING_SLOT, THURSDAY_EVENING_SLOT, FRIDAY_SLOT
 from .serializers import (
     ClassSlotSerializer, AllocateClassesSerializer, ConfirmOverflowSerializer,
@@ -16,6 +16,7 @@ from .serializers import (
     BulkCreatePhysicalClassesSerializer, EnrollStudentSerializer, ClassSlotEnrollmentSerializer,
     TuitionSettingSerializer, DiscountedPersonSerializer, RefundEnrollmentSerializer, TransferEnrollmentSerializer,
     SplitClassSerializer, LevelRenewalApprovalSerializer, TermSerializer,
+    OnlineCourseSerializer, OnlineCourseEnrollmentSerializer, OnlineCourseEnrollSerializer,
 )
 from level_tests.models import LevelTest
 from .allocation import allocate_classes
@@ -1329,14 +1330,31 @@ class TuitionSettingDetailView(generics.RetrieveUpdateDestroyAPIView):
 
 
 class DiscountedPersonListView(generics.ListAPIView):
-    """GET: لیست «افراد دارای تخفیف» — خودکار از روی ثبت‌نام‌های دارای تخفیف ساخته می‌شود"""
+    """GET: لیست «افراد دارای تخفیف» — خودکار از روی ثبت‌نام‌های دارای تخفیف (کلاس ترمیک یا دوره‌ی آنلاین) ساخته می‌شود"""
     permission_classes = [IsAuthenticated]
     serializer_class = DiscountedPersonSerializer
 
     def get_queryset(self):
         if self.request.user.role not in MANAGE_ROLES:
             return DiscountedPerson.objects.none()
-        return DiscountedPerson.objects.select_related('student', 'class_slot').all()
+        return DiscountedPerson.objects.select_related('student', 'class_slot', 'online_course').all()
+
+
+class DiscountedPersonDetailView(generics.RetrieveUpdateDestroyAPIView):
+    """PATCH/DELETE — برای ویرایش درصد تخفیفِ رکوردهای خودکارساخته‌شده از صفحه‌ی «افراد دارای تخفیف»"""
+    permission_classes = [IsAuthenticated]
+    serializer_class = DiscountedPersonSerializer
+    queryset = DiscountedPerson.objects.all()
+
+    def update(self, request, *args, **kwargs):
+        if request.user.role not in MANAGE_ROLES:
+            return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
+        return super().update(request, *args, **kwargs)
+
+    def destroy(self, request, *args, **kwargs):
+        if request.user.role not in MANAGE_ROLES:
+            return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
+        return super().destroy(request, *args, **kwargs)
 
 
 class RefundEnrollmentView(APIView):
@@ -1630,6 +1648,17 @@ class TeacherEducationHistoryView(APIView):
         except Exception:
             pass
 
+        # ۴) سایر دوره‌ها / کلاس‌های علمی (OnlineCourse مستقل)
+        online_course_history = []
+        courses = OnlineCourse.objects.filter(teacher_name__iexact=teacher_full_name).order_by('-created_at')
+        for c in courses:
+            online_course_history.append({
+                'id': c.id, 'title': c.title, 'schedule_note': c.schedule_note,
+                'session_count': c.session_count, 'price': c.price, 'is_active': c.is_active,
+                'created_at_jalali': c.created_at_jalali,
+                'enrolled_count': c.enrolled_count,
+            })
+
         return Response({
             'teacher_id': teacher.id, 'teacher_name': teacher_full_name,
             'terms': TermSerializer(terms, many=True).data,
@@ -1637,6 +1666,7 @@ class TeacherEducationHistoryView(APIView):
             'term_classes': term_classes,
             'private_classes': private_history,
             'group_classes': group_history,
+            'online_courses': online_course_history,
         })
 
 
@@ -1680,3 +1710,337 @@ class TeacherTermClassesView(APIView):
             })
 
         return Response({'term': TermSerializer(term).data, 'classes': result})
+
+
+# ==================== سایر دوره‌ها / کلاس‌های علمی (OnlineCourse) ====================
+# دوره‌های آنلاین مستقل از سیستم ترم/کلاس فیزیکی — دانش‌آموز بدون محدودیت تعداد می‌خرد،
+# استاد یکتا/بدون‌تداخل نیست (فقط هشدار)، و کد ملی محدودیت یک‌کلاس ندارد.
+
+class OnlineCourseListView(generics.ListCreateAPIView):
+    """GET/POST برای پنل ادمین — هم دکمه‌ی «کلاس‌های علمی» (تعریف سطوح) هم بخش «سایر دوره‌ها» از همینجا کار می‌کنند"""
+    permission_classes = [IsAuthenticated]
+    serializer_class = OnlineCourseSerializer
+
+    def get_queryset(self):
+        if self.request.user.role not in MANAGE_ROLES:
+            return OnlineCourse.objects.none()
+        return OnlineCourse.objects.all()
+
+    def create(self, request, *args, **kwargs):
+        if request.user.role not in MANAGE_ROLES:
+            return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
+        # هشدار (نه مسدودسازی) تداخل زمانی استاد با دوره‌های دیگرش
+        warning = self._teacher_overlap_warning(request.data.get('teacher_name', ''), request.data.get('schedule_note', ''))
+        response = super().create(request, *args, **kwargs)
+        if warning:
+            response.data['teacher_overlap_warning'] = warning
+        return response
+
+    def _teacher_overlap_warning(self, teacher_name, schedule_note, exclude_id=None):
+        teacher_name = (teacher_name or '').strip()
+        schedule_note = (schedule_note or '').strip()
+        if not teacher_name or not schedule_note:
+            return None
+        qs = OnlineCourse.objects.filter(teacher_name__iexact=teacher_name, schedule_note__iexact=schedule_note, is_active=True)
+        if exclude_id:
+            qs = qs.exclude(pk=exclude_id)
+        conflict = qs.first()
+        if conflict:
+            return f'⚠ توجه: استاد «{teacher_name}» از قبل روی دوره‌ی «{conflict.title}» با همین زمان‌بندی («{schedule_note}») تعریف شده — این فقط هشدار است و مانع ثبت نمی‌شود'
+        return None
+
+
+class OnlineCourseDetailView(generics.RetrieveUpdateDestroyAPIView):
+    """GET/PATCH/DELETE یک دوره — برای ویرایش، تخصیص استاد، تعریف تعداد جلسات/قیمت/لینک"""
+    permission_classes = [IsAuthenticated]
+    serializer_class = OnlineCourseSerializer
+    queryset = OnlineCourse.objects.all()
+
+    def update(self, request, *args, **kwargs):
+        if request.user.role not in MANAGE_ROLES:
+            return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
+        obj = self.get_object()
+        warning = OnlineCourseListView()._teacher_overlap_warning(
+            request.data.get('teacher_name', obj.teacher_name),
+            request.data.get('schedule_note', obj.schedule_note),
+            exclude_id=obj.pk,
+        )
+        response = super().update(request, *args, **kwargs)
+        if warning:
+            response.data['teacher_overlap_warning'] = warning
+        return response
+
+    def destroy(self, request, *args, **kwargs):
+        if request.user.role not in MANAGE_ROLES:
+            return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
+        return super().destroy(request, *args, **kwargs)
+
+
+class OnlineCourseCatalogView(generics.ListAPIView):
+    """
+    GET — برای اپ دانش‌آموز، بخش «کلاس‌های آنلاین». همه‌ی دوره‌های فعال، بدون نیاز به سرچ یا
+    شرط سطح/جنسیت، به‌صورت پیش‌فرض نمایش داده می‌شوند — دانش‌آموز بدون محدودیت تعداد می‌تواند
+    از هرکدام خرید کند.
+    """
+    permission_classes = [IsAuthenticated]
+    serializer_class = OnlineCourseSerializer
+
+    def get_queryset(self):
+        if self.request.user.role != 'student':
+            return OnlineCourse.objects.none()
+        return OnlineCourse.objects.filter(is_active=True)
+
+
+class OnlineCourseEnrollView(APIView):
+    """POST: ثبت‌نام دستیِ مدیر برای یک دانش‌آموز در یک دوره — بدون محدودیت کد ملی/ترم"""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, pk):
+        if request.user.role not in MANAGE_ROLES:
+            return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
+        try:
+            course = OnlineCourse.objects.get(pk=pk)
+        except OnlineCourse.DoesNotExist:
+            return Response({'error': 'دوره پیدا نشد'}, status=status.HTTP_404_NOT_FOUND)
+
+        serializer = OnlineCourseEnrollSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+
+        from django.contrib.auth import get_user_model
+        User = get_user_model()
+        try:
+            if data.get('student_id'):
+                student = User.objects.get(pk=data['student_id'], role='student')
+            else:
+                student = User.objects.get(national_code=data['national_code'], role='student')
+        except User.DoesNotExist:
+            return Response({'error': 'دانش‌آموز پیدا نشد'}, status=status.HTTP_404_NOT_FOUND)
+
+        price_paid = data['price_paid']
+        discount_percent = data.get('discount_percent', 0)
+
+        if data['payment_method'] == OnlineCourseEnrollment.PaymentMethod.WALLET:
+            if student.wallet_balance < price_paid:
+                return Response({'error': f'موجودی کیف پول این دانش‌آموز ({student.wallet_balance:,} تومان) کافی نیست'}, status=status.HTTP_400_BAD_REQUEST)
+
+        enrollment = OnlineCourseEnrollment.objects.create(
+            course=course, student=student, payment_method=data['payment_method'],
+            price_paid=price_paid, discount_percent=discount_percent,
+        )
+
+        if data['payment_method'] == OnlineCourseEnrollment.PaymentMethod.WALLET:
+            student.wallet_balance -= price_paid
+            student.save(update_fields=['wallet_balance'])
+            WalletTransaction.objects.create(
+                student=student, kind=WalletTransaction.Kind.DEBIT, amount=price_paid,
+                reason=f'پرداخت دوره «{course.title}»', online_course=course,
+            )
+
+        discount_record = None
+        if discount_percent > 0:
+            discount_record, _ = DiscountedPerson.objects.update_or_create(
+                student=student,
+                defaults={'discount_percent': discount_percent, 'online_course': course, 'approved_tuition': price_paid},
+            )
+
+        return Response({
+            'enrollment': OnlineCourseEnrollmentSerializer(enrollment).data,
+            'course': OnlineCourseSerializer(course).data,
+            'discount_record': DiscountedPersonSerializer(discount_record).data if discount_record else None,
+            'wallet_balance': student.wallet_balance,
+        }, status=status.HTTP_201_CREATED)
+
+
+class OnlineCourseSelfEnrollView(APIView):
+    """POST: خودِ دانش‌آموز از اپ، بدون هیچ محدودیتی، هر تعداد دوره که بخواهد می‌خرد — کارت‌به‌کارت یا درگاه"""
+    permission_classes = [IsAuthenticated]
+    parser_classes = [MultiPartParser, FormParser]
+
+    def post(self, request, pk):
+        student = request.user
+        if student.role != 'student':
+            return Response({'error': 'این بخش فقط برای دانش‌آموزان است'}, status=status.HTTP_403_FORBIDDEN)
+        try:
+            course = OnlineCourse.objects.get(pk=pk, is_active=True)
+        except OnlineCourse.DoesNotExist:
+            return Response({'error': 'دوره پیدا نشد'}, status=status.HTTP_404_NOT_FOUND)
+
+        payment_method = request.data.get('payment_method')
+        if payment_method not in (OnlineCourseEnrollment.PaymentMethod.CARD_TO_CARD, OnlineCourseEnrollment.PaymentMethod.GATEWAY):
+            return Response({'error': 'روش پرداخت نامعتبر است'}, status=status.HTTP_400_BAD_REQUEST)
+        if payment_method == OnlineCourseEnrollment.PaymentMethod.GATEWAY:
+            return Response({'error': 'پرداخت از طریق درگاه فعلاً راه‌اندازی نشده — لطفاً کارت‌به‌کارت را انتخاب کنید'}, status=status.HTTP_400_BAD_REQUEST)
+
+        receipt = request.FILES.get('receipt')
+        if not receipt:
+            return Response({'error': 'تصویر رسید کارت‌به‌کارت الزامی است'}, status=status.HTTP_400_BAD_REQUEST)
+
+        existing_discount = DiscountedPerson.objects.filter(student=student).order_by('-updated_at').first()
+        discount_percent = existing_discount.discount_percent if existing_discount else 0
+        price_paid = round(course.price * (100 - discount_percent) / 100)
+
+        enrollment = OnlineCourseEnrollment.objects.create(
+            course=course, student=student, payment_method=payment_method,
+            price_paid=price_paid, discount_percent=discount_percent,
+            receipt_image=receipt, self_enrolled=True, payment_verified=False,
+        )
+
+        return Response({
+            'message': 'ثبت‌نام شما ثبت شد — بعد از بررسی رسید توسط مدیریت نهایی می‌شود',
+            'enrollment': OnlineCourseEnrollmentSerializer(enrollment).data,
+        }, status=status.HTTP_201_CREATED)
+
+
+class PendingOnlineCourseEnrollmentsView(generics.ListAPIView):
+    """GET: لیست ثبت‌نام‌های در-انتظارِ دوره‌ها — طبق همون پروتکل قبلی، پیش‌فرض توی پنجره‌ی هشدار مدیریت کلاس‌ها می‌آید"""
+    permission_classes = [IsAuthenticated]
+    serializer_class = OnlineCourseEnrollmentSerializer
+
+    def get_queryset(self):
+        if self.request.user.role not in MANAGE_ROLES:
+            return OnlineCourseEnrollment.objects.none()
+        return OnlineCourseEnrollment.objects.filter(self_enrolled=True, payment_verified=False).select_related('student', 'course').order_by('created_at')
+
+
+class VerifyOnlineCourseEnrollmentPaymentView(APIView):
+    """POST: تایید رسید یک ثبت‌نام دوره"""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, pk, student_id):
+        if request.user.role not in MANAGE_ROLES:
+            return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
+        try:
+            enrollment = OnlineCourseEnrollment.objects.get(course_id=pk, student_id=student_id)
+        except OnlineCourseEnrollment.DoesNotExist:
+            return Response({'error': 'ثبت‌نام پیدا نشد'}, status=status.HTTP_404_NOT_FOUND)
+        enrollment.payment_verified = True
+        enrollment.save(update_fields=['payment_verified'])
+        return Response({'message': 'پرداخت تایید شد', 'enrollment': OnlineCourseEnrollmentSerializer(enrollment).data})
+
+
+class RejectPendingOnlineCourseEnrollmentView(APIView):
+    """POST: رد یک ثبت‌نامِ در-انتظارِ دوره (رسید نامعتبر)"""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, pk, student_id):
+        if request.user.role not in MANAGE_ROLES:
+            return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
+        try:
+            enrollment = OnlineCourseEnrollment.objects.get(course_id=pk, student_id=student_id, self_enrolled=True, payment_verified=False)
+        except OnlineCourseEnrollment.DoesNotExist:
+            return Response({'error': 'ثبت‌نام در انتظاری پیدا نشد'}, status=status.HTTP_404_NOT_FOUND)
+        enrollment.delete()
+        return Response({'message': 'ثبت‌نام رد شد و حذف گردید'})
+
+
+class RefundOnlineCourseEnrollmentView(APIView):
+    """POST: استرداد وجه یک ثبت‌نام دوره"""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, pk, student_id):
+        if request.user.role not in MANAGE_ROLES:
+            return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
+        try:
+            course = OnlineCourse.objects.get(pk=pk)
+            enrollment = OnlineCourseEnrollment.objects.get(course=course, student_id=student_id)
+        except (OnlineCourse.DoesNotExist, OnlineCourseEnrollment.DoesNotExist):
+            return Response({'error': 'ثبت‌نام پیدا نشد'}, status=status.HTTP_404_NOT_FOUND)
+
+        serializer = RefundEnrollmentSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+
+        refund = EnrollmentRefund.objects.create(
+            student_id=student_id, online_course=course, amount=enrollment.price_paid,
+            card_number=data['card_number'], receiver_name=data['receiver_name'],
+            refunded_by=request.user,
+        )
+        enrollment.delete()
+
+        return Response({
+            'message': 'وجه مسترد شد و دانش‌آموز از دوره حذف شد',
+            'refund': {'id': refund.id, 'amount': refund.amount, 'card_number': refund.card_number, 'receiver_name': refund.receiver_name},
+        })
+
+
+class CreditOnlineCourseToWalletView(APIView):
+    """POST: انتقال وجه ثبت‌نامِ یک دوره به کیف پول دانش‌آموز"""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, pk, student_id):
+        if request.user.role not in MANAGE_ROLES:
+            return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
+        try:
+            course = OnlineCourse.objects.get(pk=pk)
+            enrollment = OnlineCourseEnrollment.objects.get(course=course, student_id=student_id)
+        except (OnlineCourse.DoesNotExist, OnlineCourseEnrollment.DoesNotExist):
+            return Response({'error': 'ثبت‌نام پیدا نشد'}, status=status.HTTP_404_NOT_FOUND)
+
+        amount = enrollment.price_paid
+        student = enrollment.student
+        enrollment.delete()
+
+        student.wallet_balance += amount
+        student.save(update_fields=['wallet_balance'])
+        WalletTransaction.objects.create(
+            student=student, kind=WalletTransaction.Kind.CREDIT, amount=amount,
+            reason=f'انتقال از دوره «{course.title}» به کیف پول', online_course=course,
+        )
+
+        return Response({
+            'message': f'{amount:,} تومان به کیف پول دانش‌آموز واریز شد',
+            'wallet_balance': student.wallet_balance,
+            'course': OnlineCourseSerializer(course).data,
+        })
+
+
+class MyOnlineCourseEnrollmentsView(APIView):
+    """GET: دوره‌های آنلاینی که خودِ دانش‌آموز خریده — برای اپ دانش‌آموز"""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        student = request.user
+        if student.role != 'student':
+            return Response({'error': 'این بخش فقط برای دانش‌آموزان است'}, status=status.HTTP_403_FORBIDDEN)
+        enrollments = OnlineCourseEnrollment.objects.filter(student=student).select_related('course').order_by('-created_at')
+        return Response([{
+            'id': e.id,
+            'course_id': e.course.id,
+            'course_title': e.course.title,
+            'teacher_name': e.course.teacher_name,
+            'schedule_note': e.course.schedule_note,
+            'session_count': e.course.session_count,
+            'meeting_link': e.course.meeting_link if e.payment_verified else '',
+            'price_paid': e.price_paid,
+            'discount_percent': e.discount_percent,
+            'payment_verified': e.payment_verified,
+            'created_at_jalali': e.created_at_jalali,
+        } for e in enrollments])
+
+
+class TeacherOnlineCoursesView(APIView):
+    """GET: دوره‌های آنلاین مستقلی که به خودِ استاد تخصیص داده شده — برای اپ استاد، همراه با تاریخچه‌ی همه‌ی دوره‌های قبلی‌اش"""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        from django.contrib.auth import get_user_model
+        User = get_user_model()
+        if request.user.role not in User.TEACHER_LIKE_ROLES:
+            return Response({'error': 'این بخش فقط برای اساتید است'}, status=status.HTTP_403_FORBIDDEN)
+
+        teacher_full_name = request.user.get_full_name().strip()
+        courses = OnlineCourse.objects.filter(teacher_name__iexact=teacher_full_name).order_by('-created_at')
+
+        result = []
+        for c in courses:
+            students = OnlineCourseEnrollment.objects.filter(course=c, payment_verified=True).select_related('student')
+            result.append({
+                'id': c.id, 'title': c.title, 'schedule_note': c.schedule_note,
+                'session_count': c.session_count, 'meeting_link': c.meeting_link,
+                'is_active': c.is_active, 'created_at_jalali': c.created_at_jalali,
+                'student_count': students.count(),
+                'students': [f"{e.student.first_name} {e.student.last_name}".strip() for e in students],
+            })
+
+        return Response({'courses': result})

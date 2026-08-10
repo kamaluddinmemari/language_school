@@ -312,6 +312,7 @@ class DiscountedPerson(models.Model):
     student = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='discount_records')
     discount_percent = models.PositiveIntegerField(default=0)
     class_slot = models.ForeignKey(ClassSlot, on_delete=models.SET_NULL, null=True, blank=True, related_name='discount_records')
+    online_course = models.ForeignKey('OnlineCourse', on_delete=models.SET_NULL, null=True, blank=True, related_name='discount_records')
     approved_tuition = models.PositiveIntegerField(default=0, help_text='مبلغ نهایی شهریه بعد از تخفیف، در آخرین ثبت‌نامِ دارای تخفیف')
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -331,6 +332,7 @@ class EnrollmentRefund(models.Model):
     """رکورد استرداد شهریه — با زدن دکمه‌ی «استرداد» روی یک دانش‌آموزِ ثبت‌نام‌شده ساخته می‌شود"""
     student = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='refunds')
     class_slot = models.ForeignKey(ClassSlot, on_delete=models.SET_NULL, null=True, blank=True, related_name='refunds')
+    online_course = models.ForeignKey('OnlineCourse', on_delete=models.SET_NULL, null=True, blank=True, related_name='refunds')
     amount = models.PositiveIntegerField(default=0)
     card_number = models.CharField(max_length=30)
     receiver_name = models.CharField(max_length=150)
@@ -360,6 +362,7 @@ class WalletTransaction(models.Model):
     amount = models.PositiveIntegerField()
     reason = models.CharField(max_length=255, blank=True)
     class_slot = models.ForeignKey(ClassSlot, on_delete=models.SET_NULL, null=True, blank=True, related_name='wallet_transactions')
+    online_course = models.ForeignKey('OnlineCourse', on_delete=models.SET_NULL, null=True, blank=True, related_name='wallet_transactions')
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -406,3 +409,77 @@ class LevelRenewalApproval(models.Model):
 
     def __str__(self):
         return f"{self.get_kind_display()} {self.amount} — {self.student.get_full_name()}"
+
+
+class OnlineCourse(models.Model):
+    """
+    «کلاس‌های علمی» / «سایر دوره‌ها» — دوره‌های آنلاینِ مستقل از سیستم ترم/کلاس فیزیکی و شماره‌ی
+    کلاس. یک دانش‌آموز می‌تواند بدون هیچ محدودیتی (نه محدودیت یک‌کد‌ملی‌یک‌کلاس، نه وابستگی به
+    ترم) هر تعداد از این دوره‌ها را که خواست بخرد. بر خلاف ClassSlot، استاد اینجا یکتا/بدون
+    تداخل نیست — فقط هشدار تداخلِ زمانی داده می‌شود، نه مسدودسازی.
+    """
+    title = models.CharField(max_length=200, help_text='عنوان دوره، مثلاً «دوره فشرده مکالمه تابستانه»')
+    price = models.PositiveIntegerField(default=0, help_text='قیمت کل دوره به تومان')
+    session_count = models.PositiveIntegerField(default=1, help_text='تعداد جلسات دوره')
+    capacity = models.PositiveIntegerField(default=20)
+    teacher_name = models.CharField(max_length=100, blank=True)
+    schedule_note = models.CharField(max_length=200, blank=True, help_text='زمان‌بندی آزاد، مثلاً «سه‌شنبه‌ها ۱۸:۰۰ تا ۱۹:۳۰» — فقط برای هشدار تداخل استاد و نمایش به دانش‌آموز استفاده می‌شود')
+    meeting_link = models.URLField(max_length=500, blank=True)
+    is_active = models.BooleanField(default=True, help_text='غیرفعال یعنی دیگر توی کاتالوگ دانش‌آموز نشان داده نمی‌شود (ولی ثبت‌نام‌های قبلی می‌مانند)')
+    internal_number = models.PositiveIntegerField(unique=True, editable=False, help_text='شماره‌ی داخلی خودکار — هیچ‌جا به کاربر نشان داده نمی‌شود، فقط برای یکتایی دیتابیس')
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-created_at']
+
+    def save(self, *args, **kwargs):
+        if not self.internal_number:
+            last = OnlineCourse.objects.order_by('-internal_number').first()
+            self.internal_number = (last.internal_number + 1) if last else 1
+        super().save(*args, **kwargs)
+
+    @property
+    def enrolled_count(self):
+        return self.enrollments.filter(payment_verified=True).count()
+
+    @property
+    def seats_left(self):
+        return max(0, self.capacity - self.enrolled_count)
+
+    @property
+    def created_at_jalali(self):
+        return _jalali(self.created_at)
+
+    def __str__(self):
+        return self.title
+
+
+class OnlineCourseEnrollment(models.Model):
+    """ثبت‌نام یک دانش‌آموز در یک «دوره‌ی آنلاین مستقل» — همان پروتکل تایید/رد و کارت‌به‌کارت کلاس‌های ترمیک را دارد"""
+
+    class PaymentMethod(models.TextChoices):
+        POS = 'pos', 'دستگاه کارت‌خوان (پوز)'
+        CASH = 'cash', 'نقدی'
+        GATEWAY = 'gateway', 'درگاه پرداخت آنلاین'
+        CARD_TO_CARD = 'card_to_card', 'کارت به کارت'
+        WALLET = 'wallet', 'کیف پول'
+
+    course = models.ForeignKey(OnlineCourse, on_delete=models.CASCADE, related_name='enrollments')
+    student = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='online_course_enrollments')
+    payment_method = models.CharField(max_length=20, choices=PaymentMethod.choices)
+    price_paid = models.PositiveIntegerField(default=0, help_text='مبلغ نهایی پرداختی (بعد از تخفیف، اگر داشته باشد)')
+    discount_percent = models.PositiveIntegerField(default=0)
+    receipt_image = models.ImageField(upload_to='course_receipts/', null=True, blank=True)
+    self_enrolled = models.BooleanField(default=False)
+    payment_verified = models.BooleanField(default=True, help_text='ثبت‌نام دستی مدیر همیشه تاییدشده؛ ثبت‌نام خودِ دانش‌آموز تا بررسی رسید False می‌ماند')
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-created_at']
+
+    @property
+    def created_at_jalali(self):
+        return _jalali(self.created_at)
+
+    def __str__(self):
+        return f"{self.student.get_full_name()} — {self.course.title}"
