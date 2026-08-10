@@ -114,7 +114,7 @@ class GroupSessionAdminSerializer(serializers.ModelSerializer):
     class Meta:
         model = GroupSession
         fields = [
-            'id', 'session_type', 'title', 'language_level',
+            'id', 'session_type', 'title', 'is_online', 'meeting_link', 'language_level',
             'class_date', 'class_date_jalali', 'session_duration', 'session_count',
             'capacity', 'participant_count', 'seats_left',
             'price_per_person', 'price_per_session', 'price_per_person_computed', 'price_per_session_computed',
@@ -152,7 +152,7 @@ class GroupSessionCreateSerializer(serializers.ModelSerializer):
     class Meta:
         model = GroupSession
         fields = [
-            'id', 'session_type', 'title', 'language_level', 'class_date',
+            'id', 'session_type', 'title', 'is_online', 'meeting_link', 'language_level', 'class_date',
             'session_duration', 'session_count', 'capacity', 'price_per_person',
             'price_per_session', 'teacher_share_percent_override', 'notes',
         ]
@@ -184,7 +184,7 @@ class GroupSessionTeacherSerializer(serializers.ModelSerializer):
     class Meta:
         model = GroupSession
         fields = [
-            'id', 'session_type', 'title', 'language_level', 'class_date', 'class_date_jalali',
+            'id', 'session_type', 'title', 'is_online', 'meeting_link', 'language_level', 'class_date', 'class_date_jalali',
             'session_duration', 'session_count', 'meetings', 'capacity', 'participant_count', 'participant_names',
             'price_per_person_computed', 'price_per_session_computed', 'total_price',
             'teacher_share_percent_effective', 'teacher_share',
@@ -214,6 +214,7 @@ class GroupSessionStudentSerializer(serializers.ModelSerializer):
     my_participation = serializers.SerializerMethodField()
     price_per_person_computed = serializers.SerializerMethodField()
     teacher_name = serializers.SerializerMethodField()
+    meeting_link = serializers.SerializerMethodField()
     created_at_jalali = serializers.ReadOnlyField()
     class_date_jalali = serializers.ReadOnlyField()
     meetings = GroupSessionMeetingSerializer(many=True, read_only=True)
@@ -221,7 +222,7 @@ class GroupSessionStudentSerializer(serializers.ModelSerializer):
     class Meta:
         model = GroupSession
         fields = [
-            'id', 'session_type', 'title', 'language_level', 'class_date', 'class_date_jalali',
+            'id', 'session_type', 'title', 'is_online', 'meeting_link', 'language_level', 'class_date', 'class_date_jalali',
             'session_duration', 'session_count', 'meetings', 'capacity', 'seats_left',
             'price_per_person_computed', 'teacher_name', 'status', 'my_participation',
             'created_at', 'created_at_jalali',
@@ -232,6 +233,11 @@ class GroupSessionStudentSerializer(serializers.ModelSerializer):
 
     def get_teacher_name(self, obj):
         return f"{obj.teacher.first_name} {obj.teacher.last_name}" if obj.teacher else None
+
+    def get_meeting_link(self, obj):
+        if obj.is_online and obj.status in [GroupSession.Status.CONFIRMED, GroupSession.Status.COMPLETED]:
+            return obj.meeting_link
+        return ''
 
     def get_my_participation(self, obj):
         user = self.context['request'].user

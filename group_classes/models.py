@@ -49,6 +49,8 @@ class GroupSession(models.Model):
 
     session_type = models.CharField(max_length=20, choices=SessionType.choices)
     title = models.CharField(max_length=200, blank=True, help_text='عنوان ورکشاپ (اختیاری). برای خصوصی گروهی خودکار ساخته می‌شود')
+    is_online = models.BooleanField(default=False, help_text='آنلاین است — دقیقاً همان شرایط کلاس‌های آنلاین ترمیک را دارد؛ بعد از تایید نهایی، لینک به اپ استاد و شرکت‌کننده‌ها نمایش داده می‌شود')
+    meeting_link = models.URLField(max_length=500, blank=True)
     language_level = models.CharField(max_length=50)
     class_date = models.DateTimeField(null=True, blank=True)
     session_duration = models.CharField(max_length=5, choices=SessionDuration.choices, default=SessionDuration.ONE_HALF)

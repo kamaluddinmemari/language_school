@@ -103,6 +103,8 @@ class ClassRequest(models.Model):
     accepted_teachers = models.ManyToManyField(User, blank=True, related_name='accepted_classes', limit_choices_to={'role__in': User.TEACHER_LIKE_ROLES})
     class_type = models.CharField(max_length=10, choices=ClassType.choices, default=ClassType.PRIVATE)
     custom_class_type = models.CharField(max_length=100, blank=True)
+    is_online = models.BooleanField(default=False, help_text='کلاس آنلاین است — دقیقاً همان شرایط کلاس‌های آنلاین ترمیک را دارد؛ بعد از تایید نهایی، لینک به اپ استاد و دانش‌آموز نمایش داده می‌شود')
+    meeting_link = models.URLField(max_length=500, blank=True)
     language_level = models.CharField(max_length=50)
     proposed_time = models.CharField(max_length=100, blank=True)
     suggested_teacher_name = models.CharField(max_length=150, blank=True)

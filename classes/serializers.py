@@ -42,7 +42,7 @@ class ClassRequestAdminSerializer(serializers.ModelSerializer):
             'id', 'student', 'student_info', 'teacher', 'teacher_info',
             'assigned_teachers', 'assigned_teachers_info',
             'accepted_teachers', 'accepted_teachers_info',
-            'class_type', 'custom_class_type', 'language_level',
+            'class_type', 'custom_class_type', 'is_online', 'meeting_link', 'language_level',
             'proposed_time', 'class_date', 'class_date_jalali', 'class_date_approved',
             'suggested_teacher_name',
             'session_duration', 'session_count', 'sessions',
@@ -73,6 +73,8 @@ class ClassRequestAdminCreateSerializer(serializers.Serializer):
     phone = serializers.CharField(max_length=11)
     class_type = serializers.ChoiceField(choices=ClassRequest.ClassType.choices, default=ClassRequest.ClassType.PRIVATE)
     custom_class_type = serializers.CharField(max_length=100, required=False, allow_blank=True)
+    is_online = serializers.BooleanField(required=False, default=False)
+    meeting_link = serializers.CharField(max_length=500, required=False, allow_blank=True)
     language_level = serializers.CharField(max_length=50)
     proposed_time = serializers.CharField(max_length=100, required=False, allow_blank=True)
     session_count = serializers.IntegerField(min_value=1)
@@ -126,7 +128,7 @@ class ClassRequestCreateSerializer(serializers.ModelSerializer):
     class Meta:
         model = ClassRequest
         fields = [
-            'class_type', 'language_level', 'proposed_time',
+            'class_type', 'language_level', 'proposed_time', 'is_online',
             'session_count', 'session_duration', 'receipt', 'notes',
         ]
         extra_kwargs = {
@@ -155,7 +157,7 @@ class ClassRequestTeacherSerializer(serializers.ModelSerializer):
     class Meta:
         model = ClassRequest
         fields = [
-            'id', 'student_name', 'class_type', 'custom_class_type',
+            'id', 'student_name', 'class_type', 'custom_class_type', 'is_online', 'meeting_link',
             'language_level', 'proposed_time', 'class_date', 'class_date_jalali',
             'session_duration', 'session_count', 'sessions', 'total_price', 'teacher_share',
             'status', 'has_accepted', 'is_assigned_to_me', 'is_completed',
@@ -199,6 +201,7 @@ class ClassRequestStudentSerializer(serializers.ModelSerializer):
     نام استاد فقط بعد از تایید نهایی مدیر (وضعیت confirmed به بعد) نشان داده می‌شود.
     """
     teacher_name = serializers.SerializerMethodField()
+    meeting_link = serializers.SerializerMethodField()
     created_at_jalali = serializers.ReadOnlyField()
     class_date_jalali = serializers.ReadOnlyField()
     sessions = ClassSessionSerializer(many=True, read_only=True)
@@ -206,7 +209,7 @@ class ClassRequestStudentSerializer(serializers.ModelSerializer):
     class Meta:
         model = ClassRequest
         fields = [
-            'id', 'teacher_name', 'class_type', 'custom_class_type',
+            'id', 'teacher_name', 'class_type', 'custom_class_type', 'is_online', 'meeting_link',
             'language_level', 'proposed_time', 'class_date', 'class_date_jalali',
             'session_duration', 'session_count', 'sessions', 'amount', 'total_price',
             'payment_status', 'status', 'notes', 'receipt',
@@ -219,3 +222,8 @@ class ClassRequestStudentSerializer(serializers.ModelSerializer):
         if obj.status in [ClassRequest.Status.CONFIRMED, ClassRequest.Status.COMPLETED] and obj.teacher:
             return obj.teacher.get_full_name()
         return None
+
+    def get_meeting_link(self, obj):
+        if obj.is_online and obj.status in [ClassRequest.Status.CONFIRMED, ClassRequest.Status.COMPLETED]:
+            return obj.meeting_link
+        return ''
