@@ -5,10 +5,10 @@ from rest_framework.permissions import IsAuthenticated
 from django.utils import timezone
 from django.contrib.auth import get_user_model
 
-from .models import EmployeeProfile, SalaryProfile, MonthlyPayroll, LeaveBalance, LeaveRequest
+from .models import EmployeeProfile, SalaryProfile, MonthlyPayroll, LeaveBalance, LeaveRequest, AttendanceLog
 from .serializers import (
     EmployeeProfileSerializer, SalaryProfileSerializer, MonthlyPayrollSerializer,
-    LeaveBalanceSerializer, LeaveRequestSerializer,
+    LeaveBalanceSerializer, LeaveRequestSerializer, AttendanceLogSerializer,
 )
 
 User = get_user_model()
@@ -106,7 +106,22 @@ class MonthlyPayrollListCreateView(AdminEditOwnViewMixin, generics.ListCreateAPI
     def create(self, request, *args, **kwargs):
         if not self.check_write_permission():
             return Response({'error': 'فقط مدیر می‌تواند فیش حقوقی ثبت کند'}, status=status.HTTP_403_FORBIDDEN)
-        return super().create(request, *args, **kwargs)
+        # اگه ساعت کارکرد صریحاً نیومده بود، به‌صورت پیش‌فرض از AttendanceLog همون ماه محاسبه می‌شه
+        # (ولی همچنان دستی هم قابل‌جایگزینی/ویرایش هست، چون فقط پیش‌فرضِ اولیه‌ست)
+        data = request.data.copy()
+        if 'worked_hours' not in data or data.get('worked_hours') in (None, ''):
+            try:
+                user_id = int(data.get('user'))
+                jy = int(data.get('jalali_year'))
+                jm = int(data.get('jalali_month'))
+                temp = MonthlyPayroll(user_id=user_id, jalali_year=jy, jalali_month=jm)
+                data['worked_hours'] = temp.auto_worked_hours
+            except (TypeError, ValueError):
+                pass
+        serializer = self.get_serializer(data=data)
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        return Response(serializer.data, status=status.HTTP_201_CREATED)
 
 
 class MonthlyPayrollDetailView(AdminEditOwnViewMixin, generics.RetrieveUpdateDestroyAPIView):
@@ -245,3 +260,151 @@ class MonthlyPayrollAcknowledgeView(APIView):
             payroll.acknowledged_at = timezone.now()
             payroll.save()
         return Response(MonthlyPayrollSerializer(payroll).data)
+
+
+# ==================== ثبت ساعت ورود و خروج (AttendanceLog) ====================
+
+class MyAttendanceTodayView(APIView):
+    """GET: وضعیت ثبت ورود/خروج خودِ کارمند برای همین امروز — برای فعال/غیرفعال کردن دکمه‌های سبز/قرمز داشبورد"""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        today = timezone.localtime(timezone.now()).date()
+        log = AttendanceLog.objects.filter(user=request.user, date=today).first()
+        return Response(AttendanceLogSerializer(log).data if log else {
+            'date': today.isoformat(), 'check_in': None, 'check_out': None,
+        })
+
+
+class CheckInView(APIView):
+    """POST: دکمه‌ی سبز «ثبت ورود» — فقط یک‌بار در روز، توسط خودِ کارمند، غیرقابل‌ویرایش برای خودش"""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        today = timezone.localtime(timezone.now()).date()
+        log, created = AttendanceLog.objects.get_or_create(user=request.user, date=today)
+        if log.check_in:
+            return Response({'error': f'شما امروز ساعت {log.check_in_time_jalali} ورودتان ثبت شده — هر روز فقط یک‌بار قابل ثبت است'}, status=status.HTTP_400_BAD_REQUEST)
+        log.check_in = timezone.now()
+        log.save(update_fields=['check_in', 'updated_at'])
+        return Response(AttendanceLogSerializer(log).data, status=status.HTTP_201_CREATED)
+
+
+class CheckOutView(APIView):
+    """POST: دکمه‌ی قرمز «ثبت خروج» — فقط یک‌بار در روز، توسط خودِ کارمند، غیرقابل‌ویرایش برای خودش"""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        today = timezone.localtime(timezone.now()).date()
+        log = AttendanceLog.objects.filter(user=request.user, date=today).first()
+        if not log or not log.check_in:
+            return Response({'error': 'اول باید ورودتان را ثبت کنید'}, status=status.HTTP_400_BAD_REQUEST)
+        if log.check_out:
+            return Response({'error': f'شما امروز ساعت {log.check_out_time_jalali} خروجتان ثبت شده — هر روز فقط یک‌بار قابل ثبت است'}, status=status.HTTP_400_BAD_REQUEST)
+        log.check_out = timezone.now()
+        log.save(update_fields=['check_out', 'updated_at'])
+        return Response(AttendanceLogSerializer(log).data)
+
+
+class AttendanceLogListCreateView(AdminEditOwnViewMixin, generics.ListCreateAPIView):
+    """GET: مدیر لیست کامل (با فیلتر user/تاریخ)، کارمند فقط لیست خودش. POST: فقط مدیر (برای اصلاح دستی/افزودن رکورد فراموش‌شده)"""
+    serializer_class = AttendanceLogSerializer
+    permission_classes = [IsAuthenticated]
+
+    def queryset_base(self):
+        qs = AttendanceLog.objects.select_related('user')
+        date_from = self.request.query_params.get('date_from')
+        date_to = self.request.query_params.get('date_to')
+        if date_from:
+            qs = qs.filter(date__gte=date_from)
+        if date_to:
+            qs = qs.filter(date__lte=date_to)
+        return qs
+
+    def create(self, request, *args, **kwargs):
+        if not self.check_write_permission():
+            return Response({'error': 'فقط مدیر می‌تواند رکورد حضور دستی ثبت کند'}, status=status.HTTP_403_FORBIDDEN)
+        data = request.data.copy()
+        data['edited_by_admin'] = True
+        serializer = self.get_serializer(data=data)
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        return Response(serializer.data, status=status.HTTP_201_CREATED)
+
+
+class AttendanceLogDetailView(AdminEditOwnViewMixin, generics.RetrieveUpdateDestroyAPIView):
+    """فقط مدیر می‌تواند ساعت/تاریخ ورود-خروج ثبت‌شده را دستی اصلاح یا حذف کند"""
+    serializer_class = AttendanceLogSerializer
+    permission_classes = [IsAuthenticated]
+
+    def queryset_base(self):
+        return AttendanceLog.objects.select_related('user')
+
+    def update(self, request, *args, **kwargs):
+        if not self.check_write_permission():
+            return Response({'error': 'فقط مدیر می‌تواند اصلاح کند'}, status=status.HTTP_403_FORBIDDEN)
+        data = request.data.copy()
+        data['edited_by_admin'] = True
+        serializer = self.get_serializer(self.get_object(), data=data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        return Response(serializer.data)
+
+    def destroy(self, request, *args, **kwargs):
+        if not self.check_write_permission():
+            return Response({'error': 'فقط مدیر می‌تواند حذف کند'}, status=status.HTTP_403_FORBIDDEN)
+        return super().destroy(request, *args, **kwargs)
+
+
+class AttendanceSummaryView(APIView):
+    """
+    GET: خلاصه‌ی ساعات کارکرد روزانه/هفتگی/ماهانه‌ی یک کارمند — مدیر با ?user=<id>، کارمند برای خودش.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        target_user = request.user
+        if is_admin(request.user):
+            user_id = request.query_params.get('user')
+            if user_id:
+                try:
+                    target_user = User.objects.get(pk=user_id)
+                except User.DoesNotExist:
+                    return Response({'error': 'کارمند پیدا نشد'}, status=status.HTTP_404_NOT_FOUND)
+        elif request.query_params.get('user') and str(request.query_params.get('user')) != str(request.user.id):
+            return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
+
+        today = timezone.localtime(timezone.now()).date()
+        today_jalali = __import__('jdatetime').date.fromgregorian(date=today)
+
+        logs = AttendanceLog.objects.filter(user=target_user).order_by('-date')
+
+        # امروز
+        today_log = logs.filter(date=today).first()
+        today_hours = today_log.worked_hours if today_log else 0
+
+        # همین هفته‌ی شمسی (شنبه تا امروز)
+        weekday = (today_jalali.weekday() + 1) % 7  # jdatetime: شنبه=0
+        week_start = today - timezone.timedelta(days=(today_jalali.weekday()))
+        week_hours = sum(l.worked_hours for l in logs if l.date >= week_start)
+
+        # همین ماه شمسی
+        month_hours = 0.0
+        daily_breakdown = []
+        for l in logs:
+            jd = __import__('jdatetime').date.fromgregorian(date=l.date)
+            if jd.year == today_jalali.year and jd.month == today_jalali.month:
+                month_hours += l.worked_hours
+                daily_breakdown.append({
+                    'date_jalali': l.date_jalali, 'check_in': l.check_in_time_jalali,
+                    'check_out': l.check_out_time_jalali, 'worked_hours': l.worked_hours,
+                })
+
+        return Response({
+            'user': target_user.id, 'user_full_name': target_user.get_full_name(),
+            'today_hours': today_hours,
+            'week_hours': round(week_hours, 2),
+            'month_hours': round(month_hours, 2),
+            'jalali_year': today_jalali.year, 'jalali_month': today_jalali.month,
+            'daily_breakdown': sorted(daily_breakdown, key=lambda x: x['date_jalali']),
+        })

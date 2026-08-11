@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from .models import EmployeeProfile, SalaryProfile, MonthlyPayroll, LeaveBalance, LeaveRequest
+from .models import EmployeeProfile, SalaryProfile, MonthlyPayroll, LeaveBalance, LeaveRequest, AttendanceLog
 
 
 class EmployeeProfileSerializer(serializers.ModelSerializer):
@@ -17,13 +17,20 @@ class SalaryProfileSerializer(serializers.ModelSerializer):
     gross_base_monthly = serializers.ReadOnlyField()
     housing_allowance_monthly = serializers.ReadOnlyField()
     components_breakdown = serializers.ReadOnlyField()
+    seniority_base_annual = serializers.ReadOnlyField()
+    seniority_base_monthly = serializers.ReadOnlyField()
+    seniority_base_daily = serializers.ReadOnlyField()
+    seniority_base_hourly = serializers.ReadOnlyField()
+    is_seniority_eligible = serializers.ReadOnlyField()
     user_full_name = serializers.SerializerMethodField()
 
     class Meta:
         model = SalaryProfile
         fields = ['id', 'user', 'user_full_name', 'work_year', 'base_salary', 'food_allowance',
-                   'marriage_allowance', 'child_allowance', 'seniority_allowance',
-                   'housing_allowance_yearly', 'housing_allowance_monthly',
+                   'marriage_allowance', 'child_allowance',
+                   'is_seniority_eligible', 'seniority_base_annual', 'seniority_base_monthly',
+                   'seniority_base_daily', 'seniority_base_hourly',
+                   'housing_allowance', 'housing_allowance_monthly',
                    'insurance_base_single', 'insurance_base_married',
                    'gross_base_monthly', 'components_breakdown', 'updated_at']
         read_only_fields = ['id', 'updated_at']
@@ -50,18 +57,30 @@ class MonthlyPayrollSerializer(serializers.ModelSerializer):
     approved_leave_hours_this_month = serializers.ReadOnlyField()
     jalali_label = serializers.ReadOnlyField()
     acknowledged_at_jalali = serializers.ReadOnlyField()
+    auto_worked_hours = serializers.ReadOnlyField()
+    marital_status_display = serializers.ReadOnlyField()
+    children_count = serializers.ReadOnlyField()
+    seniority_base_monthly = serializers.ReadOnlyField()
+    seniority_base_daily = serializers.ReadOnlyField()
+    seniority_base_hourly = serializers.ReadOnlyField()
+    is_seniority_eligible = serializers.ReadOnlyField()
+    component_amounts_this_month = serializers.ReadOnlyField()
     user_full_name = serializers.SerializerMethodField()
 
     class Meta:
         model = MonthlyPayroll
         fields = [
             'id', 'user', 'user_full_name', 'jalali_year', 'jalali_month', 'jalali_label',
-            'worked_hours', 'insurance_days', 'absence_days', 'absence_hours', 'undertime_hours',
+            'marital_status_display', 'children_count',
+            'worked_hours', 'auto_worked_hours',
+            'insurance_days', 'absence_days', 'absence_hours', 'undertime_hours',
             'overtime_hours', 'bonus_amount', 'extra_payment', 'notes',
             'days_in_month', 'standard_monthly_hours_this_month',
             'hourly_wage', 'daily_wage', 'insurance_base_30days', 'insurance_amount', 'overtime_pay',
             'absence_deduction', 'undertime_deduction', 'total_deductions', 'gross_pay', 'net_pay',
             'net_pay_words', 'approved_leave_days_this_month', 'approved_leave_hours_this_month',
+            'is_seniority_eligible', 'seniority_base_monthly', 'seniority_base_daily', 'seniority_base_hourly',
+            'component_amounts_this_month',
             'acknowledged_at', 'acknowledged_at_jalali', 'created_at', 'updated_at',
         ]
         read_only_fields = ['id', 'acknowledged_at', 'created_at', 'updated_at']
@@ -73,6 +92,26 @@ class MonthlyPayrollSerializer(serializers.ModelSerializer):
         if value < 1 or value > 12:
             raise serializers.ValidationError('ماه باید بین ۱ تا ۱۲ باشد')
         return value
+
+
+class AttendanceLogSerializer(serializers.ModelSerializer):
+    date_jalali = serializers.ReadOnlyField()
+    check_in_time_jalali = serializers.ReadOnlyField()
+    check_out_time_jalali = serializers.ReadOnlyField()
+    worked_hours = serializers.ReadOnlyField()
+    user_full_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = AttendanceLog
+        fields = [
+            'id', 'user', 'user_full_name', 'date', 'date_jalali', 'check_in', 'check_out',
+            'check_in_time_jalali', 'check_out_time_jalali', 'worked_hours', 'edited_by_admin',
+            'created_at', 'updated_at',
+        ]
+        read_only_fields = ['id', 'created_at', 'updated_at']
+
+    def get_user_full_name(self, obj):
+        return obj.user.get_full_name()
 
 
 class LeaveBalanceSerializer(serializers.ModelSerializer):

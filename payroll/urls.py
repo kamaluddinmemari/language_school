@@ -5,6 +5,8 @@ from .views import (
     MonthlyPayrollListCreateView, MonthlyPayrollDetailView, MonthlyPayrollAcknowledgeView,
     LeaveBalanceListCreateView, LeaveBalanceDetailView,
     LeaveRequestListCreateView, LeaveRequestDetailView, LeaveRequestDecideView,
+    MyAttendanceTodayView, CheckInView, CheckOutView,
+    AttendanceLogListCreateView, AttendanceLogDetailView, AttendanceSummaryView,
 )
 
 urlpatterns = [
@@ -24,4 +26,12 @@ urlpatterns = [
     path('leave-requests/', LeaveRequestListCreateView.as_view(), name='leave_request_list'),
     path('leave-requests/<int:pk>/', LeaveRequestDetailView.as_view(), name='leave_request_detail'),
     path('leave-requests/<int:pk>/decide/', LeaveRequestDecideView.as_view(), name='leave_request_decide'),
+
+    # --- ثبت ساعت ورود و خروج ---
+    path('attendance/my-today/', MyAttendanceTodayView.as_view(), name='attendance_my_today'),
+    path('attendance/check-in/', CheckInView.as_view(), name='attendance_check_in'),
+    path('attendance/check-out/', CheckOutView.as_view(), name='attendance_check_out'),
+    path('attendance/', AttendanceLogListCreateView.as_view(), name='attendance_list'),
+    path('attendance/<int:pk>/', AttendanceLogDetailView.as_view(), name='attendance_detail'),
+    path('attendance/summary/', AttendanceSummaryView.as_view(), name='attendance_summary'),
 ]

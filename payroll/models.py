@@ -117,8 +117,9 @@ class SalaryProfile(models.Model):
     food_allowance = models.PositiveIntegerField(default=0, help_text='حق خوار و بار (ماهانه)')
     marriage_allowance = models.PositiveIntegerField(default=0, help_text='حق تاهل (ماهانه)')
     child_allowance = models.PositiveIntegerField(default=0, help_text='حق اولاد (ماهانه)')
-    seniority_allowance = models.PositiveIntegerField(default=0, help_text='سنوات سالانه — حق سنوات (معادل ماهانه‌اش اینجا وارد می‌شود)')
-    housing_allowance_yearly = models.PositiveIntegerField(default=0, help_text='حق مسکن سالانه (تومان) — معادل ماهانه/روزانه/ساعتی‌اش خودکار محاسبه می‌شود')
+    seniority_allowance = models.PositiveIntegerField(default=0, help_text='(قدیمی/غیرفعال — دیگر استفاده نمی‌شود) از این پس «پایه سنوات» خودکار از روی سابقه‌کار محاسبه می‌شود؛ این فیلد فقط برای سازگاری با داده‌های قبلی نگه داشته شده')
+    housing_allowance_yearly = models.PositiveIntegerField(default=0, help_text='(قدیمی/غیرفعال — دیگر استفاده نمی‌شود) حق مسکن سالانه؛ برای سازگاری با داده‌های قبلی نگه داشته شده')
+    housing_allowance = models.PositiveIntegerField(default=0, help_text='حق مسکن ماهانه (تومان) — مستقیم ماهانه وارد می‌شود')
     # مزد مبنای بیمه (برای ۳۰ روز کامل) — طبق قانون برای متاهل و مجرد می‌تواند فرق کند
     # (چون اجزای تشکیل‌دهنده‌ی مزد مبنای بیمه‌ی متاهل معمولاً حق تاهل/اولاد را هم شامل می‌شود)
     insurance_base_single = models.PositiveIntegerField(default=0, help_text='مزد مبنای بیمه برای کارمند مجرد (۳۰ روز کامل، تومان)')
@@ -131,12 +132,62 @@ class SalaryProfile(models.Model):
 
     @property
     def housing_allowance_monthly(self):
+        """حق مسکن ماهانه — مستقیم از فیلد housing_allowance؛ اگر هنوز مقدار قدیمیِ سالانه ثبت شده
+        ولی مقدار ماهانه‌ی جدید صفر باشد، برای سازگاری با داده‌های قبلی از آن استفاده می‌شود"""
+        if self.housing_allowance:
+            return self.housing_allowance
         return round(self.housing_allowance_yearly / 12) if self.housing_allowance_yearly else 0
+
+    def tenure_years(self, as_of=None):
+        """سابقه‌ی کارِ کامل (سال) بر اساس تاریخ استخدام در پروفایل کارمندی — برای محاسبه‌ی سنوات"""
+        try:
+            hire_date = self.user.employee_profile.hire_date
+        except Exception:
+            hire_date = None
+        if not hire_date:
+            return 0
+        today = as_of or timezone.now().date()
+        years = today.year - hire_date.year - ((today.month, today.day) < (hire_date.month, hire_date.day))
+        return max(0, years)
+
+    @property
+    def is_seniority_eligible(self):
+        """طبق قانون کار، فقط افرادی که بیش از یک سال سابقه‌کار دارند مشمول حق سنوات می‌شوند"""
+        return self.tenure_years() >= 1
+
+    @property
+    def seniority_basis_monthly(self):
+        """مبنای محاسبه‌ی سنوات — «آخرین حقوق و مزایای ثابت ماهانه» بدون خودِ سنوات (برای جلوگیری از محاسبه‌ی حلقوی)"""
+        return self.base_salary + self.food_allowance + self.marriage_allowance + self.child_allowance + self.housing_allowance_monthly
+
+    @property
+    def seniority_base_annual(self):
+        """
+        پایه سنوات سالانه — طبق عرف رایج قانون کار (یک روز مزد به ازای هر ماه کارکرد؛ یعنی معادل
+        یک ماه آخرین حقوق و مزایای ثابت، به ازای هر سال سابقه‌ی تکمیل‌شده). فقط برای افرادی با
+        بیش از یک سال سابقه محاسبه می‌شود.
+        """
+        if not self.is_seniority_eligible:
+            return 0
+        return self.seniority_basis_monthly
+
+    @property
+    def seniority_base_monthly(self):
+        """معادل ماهانه‌ی پایه سنوات — کل سالانه تقسیم بر ۱۲، که در فیش حقوقی هر ماه اضافه می‌شود"""
+        return round(self.seniority_base_annual / 12) if self.seniority_base_annual else 0
+
+    @property
+    def seniority_base_daily(self):
+        return round(self.seniority_base_monthly / 30) if self.seniority_base_monthly else 0
+
+    @property
+    def seniority_base_hourly(self):
+        return round(self.seniority_base_monthly / STANDARD_MONTHLY_HOURS) if self.seniority_base_monthly else 0
 
     @property
     def gross_base_monthly(self):
         return (self.base_salary + self.food_allowance + self.marriage_allowance +
-                self.child_allowance + self.seniority_allowance + self.housing_allowance_monthly)
+                self.child_allowance + self.seniority_base_monthly + self.housing_allowance_monthly)
 
     def _component_breakdown(self, monthly_amount):
         return {
@@ -153,7 +204,7 @@ class SalaryProfile(models.Model):
             'food_allowance': self._component_breakdown(self.food_allowance),
             'marriage_allowance': self._component_breakdown(self.marriage_allowance),
             'child_allowance': self._component_breakdown(self.child_allowance),
-            'seniority_allowance': self._component_breakdown(self.seniority_allowance),
+            'seniority_base': self._component_breakdown(self.seniority_base_monthly),
             'housing_allowance': self._component_breakdown(self.housing_allowance_monthly),
         }
 
@@ -203,6 +254,80 @@ class MonthlyPayroll(models.Model):
     def gross_base_monthly(self):
         sp = self._salary_profile
         return sp.gross_base_monthly if sp else 0
+
+    @property
+    def marital_status(self):
+        try:
+            return self.user.employee_profile.marital_status
+        except Exception:
+            return ''
+
+    @property
+    def marital_status_display(self):
+        return {'single': 'مجرد', 'married': 'متاهل'}.get(self.marital_status, '—')
+
+    @property
+    def children_count(self):
+        try:
+            return self.user.employee_profile.children_count
+        except Exception:
+            return 0
+
+    @property
+    def seniority_base_monthly(self):
+        sp = self._salary_profile
+        return sp.seniority_base_monthly if sp else 0
+
+    @property
+    def seniority_base_daily(self):
+        sp = self._salary_profile
+        return sp.seniority_base_daily if sp else 0
+
+    @property
+    def seniority_base_hourly(self):
+        sp = self._salary_profile
+        return sp.seniority_base_hourly if sp else 0
+
+    @property
+    def is_seniority_eligible(self):
+        sp = self._salary_profile
+        return sp.is_seniority_eligible if sp else False
+
+    @property
+    def auto_worked_hours(self):
+        """
+        ساعات کارکردِ خودکار — از روی ثبت‌های ورود/خروجِ (AttendanceLog) همین کارمند در همین ماه
+        شمسی محاسبه می‌شود. فقط برای نمایش راهنما (کم‌رنگ) در کنار فیلد قابل‌ویرایش worked_hours
+        استفاده می‌شود؛ خودِ worked_hours همچنان مقدار نهایی و قابل‌ویرایش دستی است.
+        """
+        logs = AttendanceLog.objects.filter(user=self.user)
+        total = 0.0
+        for log in logs:
+            jd = jdatetime.date.fromgregorian(date=log.date)
+            if jd.year == self.jalali_year and jd.month == self.jalali_month:
+                total += log.worked_hours
+        return round(total, 2)
+
+    @property
+    def component_amounts_this_month(self):
+        """
+        معادلِ ریالیِ هرکدام از اجزای حقوق (پایه، خوار و بار، تاهل، اولاد، سنوات، مسکن)، متناسب با
+        نسبت ساعات کارکرد واقعیِ این ماه به ساعت استاندارد همین ماه — برای نمایش تفکیکی در فیش حقوقی.
+        """
+        sp = self._salary_profile
+        if not sp:
+            return {}
+        std_hours = self.standard_monthly_hours_this_month
+        ratio = (float(self.worked_hours) / std_hours) if std_hours else 0
+        breakdown = sp.components_breakdown
+        result = {}
+        total = 0
+        for key, comp in breakdown.items():
+            amount = round(comp['monthly'] * ratio)
+            result[key] = amount
+            total += amount
+        result['total'] = total
+        return result
 
     @property
     def days_in_month(self):
@@ -311,6 +436,51 @@ class MonthlyPayroll(models.Model):
 
     def __str__(self):
         return f"فیش {self.user.get_full_name()} — {self.jalali_label}"
+
+
+class AttendanceLog(models.Model):
+    """
+    ثبت ساعت ورود و خروج روزانه‌ی هر کارمند. ثبت ورود/خروج توسط خودِ کارمند از دکمه‌های سبز/قرمز
+    داشبورد انجام می‌شود و هرکدام فقط یک‌بار در روز قابل ثبت است (غیرقابل‌ویرایش توسط خودِ کارمند)؛
+    فقط مدیر می‌تواند تاریخ/ساعت را دستی اصلاح کند.
+    """
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='attendance_logs')
+    date = models.DateField(help_text='تاریخ (میلادی ذخیره می‌شود) — روزی که این ثبت مربوط به آن است')
+    check_in = models.DateTimeField(null=True, blank=True)
+    check_out = models.DateTimeField(null=True, blank=True)
+    edited_by_admin = models.BooleanField(default=False, help_text='اگر مدیر دستی این رکورد را اصلاح کرده باشد True می‌شود')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=['user', 'date'], name='unique_attendance_per_user_day')]
+        ordering = ['-date']
+
+    @property
+    def date_jalali(self):
+        return jdatetime.date.fromgregorian(date=self.date).strftime('%Y/%m/%d')
+
+    @property
+    def check_in_time_jalali(self):
+        if not self.check_in:
+            return None
+        return jdatetime.datetime.fromgregorian(datetime=timezone.localtime(self.check_in)).strftime('%H:%M')
+
+    @property
+    def check_out_time_jalali(self):
+        if not self.check_out:
+            return None
+        return jdatetime.datetime.fromgregorian(datetime=timezone.localtime(self.check_out)).strftime('%H:%M')
+
+    @property
+    def worked_hours(self):
+        if self.check_in and self.check_out and self.check_out > self.check_in:
+            delta = self.check_out - self.check_in
+            return round(delta.total_seconds() / 3600, 2)
+        return 0.0
+
+    def __str__(self):
+        return f"حضور {self.user.get_full_name()} — {self.date_jalali}"
 
 
 class LeaveBalance(models.Model):
