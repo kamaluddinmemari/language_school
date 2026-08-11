@@ -106,13 +106,13 @@ class EmployeeProfile(models.Model):
 
 class SalaryProfile(models.Model):
     """
-    مبالغ پایه‌ی حقوق هر کارمند برای یک سال کاری مشخص (چون حداقل حقوق و مصوبات هرسال عوض می‌شوند).
+    تنظیمات پایه‌ی حقوق — **مشترک برای همه‌ی کارمندان**، فقط یک‌بار به ازای هر سال کاری وارد
+    می‌شود (چون حداقل حقوق و مصوبات هرسال برای کل کشور یکسان تغییر می‌کنند، نه به ازای هر کارمند).
     همه‌ی مبالغ زیر «ماهانه‌ی کامل» وارد می‌شوند؛ سیستم خودش معادل روزانه/ساعتی‌شان را
-    (بر مبنای ۳۰ روز / ۲۲۰ ساعت استاندارد ماهانه) محاسبه و در محاسبات واقعی هر ماه، متناسب
-    با ساعات کارکردِ واقعیِ آن ماه، به‌کار می‌برد.
+    (بر مبنای ۳۰ روز / ۲۲۰ ساعت استاندارد ماهانه) محاسبه و در محاسبات واقعی هر کارمند در هر ماه،
+    متناسب با ساعات کارکردِ واقعیِ خودِ آن کارمند در آن ماه، به‌کار می‌برد.
     """
-    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='salary_profiles')
-    work_year = models.PositiveIntegerField(help_text='سال کاری شمسی، مثلاً ۱۴۰۴')
+    work_year = models.PositiveIntegerField(unique=True, help_text='سال کاری شمسی، مثلاً ۱۴۰۴ — برای کل مجموعه یکتا')
     base_salary = models.PositiveIntegerField(default=0, help_text='حداقل حقوق پایه‌ی سال کاری (تومان، ماهانه)')
     food_allowance = models.PositiveIntegerField(default=0, help_text='حق خوار و بار (ماهانه)')
     marriage_allowance = models.PositiveIntegerField(default=0, help_text='حق تاهل (ماهانه)')
@@ -127,7 +127,7 @@ class SalaryProfile(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
-        constraints = [models.UniqueConstraint(fields=['user', 'work_year'], name='unique_salary_profile_per_user_year')]
+        constraints = []
         ordering = ['-work_year']
 
     @property
@@ -138,56 +138,14 @@ class SalaryProfile(models.Model):
             return self.housing_allowance
         return round(self.housing_allowance_yearly / 12) if self.housing_allowance_yearly else 0
 
-    def tenure_years(self, as_of=None):
-        """سابقه‌ی کارِ کامل (سال) بر اساس تاریخ استخدام در پروفایل کارمندی — برای محاسبه‌ی سنوات"""
-        try:
-            hire_date = self.user.employee_profile.hire_date
-        except Exception:
-            hire_date = None
-        if not hire_date:
-            return 0
-        today = as_of or timezone.now().date()
-        years = today.year - hire_date.year - ((today.month, today.day) < (hire_date.month, hire_date.day))
-        return max(0, years)
-
     @property
-    def is_seniority_eligible(self):
-        """طبق قانون کار، فقط افرادی که بیش از یک سال سابقه‌کار دارند مشمول حق سنوات می‌شوند"""
-        return self.tenure_years() >= 1
-
-    @property
-    def seniority_basis_monthly(self):
-        """مبنای محاسبه‌ی سنوات — «آخرین حقوق و مزایای ثابت ماهانه» بدون خودِ سنوات (برای جلوگیری از محاسبه‌ی حلقوی)"""
+    def gross_base_monthly_shared(self):
+        """
+        جمع مبالغ «مشترک» ماهانه (پایه + خوار‌وبار + تاهل + اولاد + مسکن) — بدون سنوات، چون سنوات
+        به سابقه‌ی فردیِ هر کارمند وابسته است و در سطح MonthlyPayroll (به ازای هر کارمند) محاسبه
+        می‌شود، نه اینجا.
+        """
         return self.base_salary + self.food_allowance + self.marriage_allowance + self.child_allowance + self.housing_allowance_monthly
-
-    @property
-    def seniority_base_annual(self):
-        """
-        پایه سنوات سالانه — طبق عرف رایج قانون کار (یک روز مزد به ازای هر ماه کارکرد؛ یعنی معادل
-        یک ماه آخرین حقوق و مزایای ثابت، به ازای هر سال سابقه‌ی تکمیل‌شده). فقط برای افرادی با
-        بیش از یک سال سابقه محاسبه می‌شود.
-        """
-        if not self.is_seniority_eligible:
-            return 0
-        return self.seniority_basis_monthly
-
-    @property
-    def seniority_base_monthly(self):
-        """معادل ماهانه‌ی پایه سنوات — کل سالانه تقسیم بر ۱۲، که در فیش حقوقی هر ماه اضافه می‌شود"""
-        return round(self.seniority_base_annual / 12) if self.seniority_base_annual else 0
-
-    @property
-    def seniority_base_daily(self):
-        return round(self.seniority_base_monthly / 30) if self.seniority_base_monthly else 0
-
-    @property
-    def seniority_base_hourly(self):
-        return round(self.seniority_base_monthly / STANDARD_MONTHLY_HOURS) if self.seniority_base_monthly else 0
-
-    @property
-    def gross_base_monthly(self):
-        return (self.base_salary + self.food_allowance + self.marriage_allowance +
-                self.child_allowance + self.seniority_base_monthly + self.housing_allowance_monthly)
 
     def _component_breakdown(self, monthly_amount):
         return {
@@ -198,13 +156,12 @@ class SalaryProfile(models.Model):
 
     @property
     def components_breakdown(self):
-        """معادل روزانه/ساعتیِ هرکدام از اجزای حقوق — صرفاً برای نمایش به مدیر، محاسبه‌ی نهایی حقوق از گروس کلی انجام می‌شود"""
+        """معادل روزانه/ساعتیِ هرکدام از اجزای «مشترک»ِ حقوق (سنوات چون فردیه اینجا نیست، در فیش هر کارمند جدا محاسبه می‌شود)"""
         return {
             'base_salary': self._component_breakdown(self.base_salary),
             'food_allowance': self._component_breakdown(self.food_allowance),
             'marriage_allowance': self._component_breakdown(self.marriage_allowance),
             'child_allowance': self._component_breakdown(self.child_allowance),
-            'seniority_base': self._component_breakdown(self.seniority_base_monthly),
             'housing_allowance': self._component_breakdown(self.housing_allowance_monthly),
         }
 
@@ -247,13 +204,56 @@ class MonthlyPayroll(models.Model):
 
     @property
     def _salary_profile(self):
-        return self.user.salary_profiles.filter(work_year=self.jalali_year).order_by('-work_year').first() \
-            or self.user.salary_profiles.order_by('-work_year').first()
+        """تنظیمات مشترک حقوق برای همون سال کاری (یک رکورد واحد برای کل مجموعه)؛ اگه سال دقیق پیدا نشد، آخرین سالِ ثبت‌شده استفاده می‌شود"""
+        return SalaryProfile.objects.filter(work_year=self.jalali_year).first() or SalaryProfile.objects.order_by('-work_year').first()
+
+    def tenure_years(self, as_of=None):
+        """سابقه‌ی کارِ کاملِ همین کارمند (سال) بر اساس تاریخ استخدام در پروفایل کارمندی‌اش — برای محاسبه‌ی سنوات فردی"""
+        try:
+            hire_date = self.user.employee_profile.hire_date
+        except Exception:
+            hire_date = None
+        if not hire_date:
+            return 0
+        today = as_of or timezone.now().date()
+        years = today.year - hire_date.year - ((today.month, today.day) < (hire_date.month, hire_date.day))
+        return max(0, years)
+
+    @property
+    def is_seniority_eligible(self):
+        """طبق قانون کار، فقط افرادی که بیش از یک سال سابقه‌کار دارند مشمول حق سنوات می‌شوند"""
+        return self.tenure_years() >= 1
+
+    @property
+    def seniority_base_annual(self):
+        """
+        پایه سنوات سالانه = معادل یک ماه حقوق پایه (base_salary، نه کل مزایا)، به ازای سابقه‌ی
+        همین کارمند — فقط برای کارمندانی با بیش از یک سال سابقه محاسبه می‌شود.
+        """
+        if not self.is_seniority_eligible:
+            return 0
+        sp = self._salary_profile
+        return sp.base_salary if sp else 0
+
+    @property
+    def seniority_base_monthly(self):
+        """معادل ماهانه‌ی پایه سنوات — کل سالانه تقسیم بر ۱۲، که در فیش حقوقی هر ماه اضافه می‌شود"""
+        return round(self.seniority_base_annual / 12) if self.seniority_base_annual else 0
+
+    @property
+    def seniority_base_daily(self):
+        return round(self.seniority_base_monthly / 30) if self.seniority_base_monthly else 0
+
+    @property
+    def seniority_base_hourly(self):
+        return round(self.seniority_base_monthly / STANDARD_MONTHLY_HOURS) if self.seniority_base_monthly else 0
 
     @property
     def gross_base_monthly(self):
+        """جمع ناخالص ماهانه‌ی مصوب برای همین کارمند = مبالغ مشترک (سطح کل مجموعه) + سنوات فردیِ خودش"""
         sp = self._salary_profile
-        return sp.gross_base_monthly if sp else 0
+        shared = sp.gross_base_monthly_shared if sp else 0
+        return shared + self.seniority_base_monthly
 
     @property
     def marital_status(self):
@@ -272,26 +272,6 @@ class MonthlyPayroll(models.Model):
             return self.user.employee_profile.children_count
         except Exception:
             return 0
-
-    @property
-    def seniority_base_monthly(self):
-        sp = self._salary_profile
-        return sp.seniority_base_monthly if sp else 0
-
-    @property
-    def seniority_base_daily(self):
-        sp = self._salary_profile
-        return sp.seniority_base_daily if sp else 0
-
-    @property
-    def seniority_base_hourly(self):
-        sp = self._salary_profile
-        return sp.seniority_base_hourly if sp else 0
-
-    @property
-    def is_seniority_eligible(self):
-        sp = self._salary_profile
-        return sp.is_seniority_eligible if sp else False
 
     @property
     def auto_worked_hours(self):
@@ -313,13 +293,15 @@ class MonthlyPayroll(models.Model):
         """
         معادلِ ریالیِ هرکدام از اجزای حقوق (پایه، خوار و بار، تاهل، اولاد، سنوات، مسکن)، متناسب با
         نسبت ساعات کارکرد واقعیِ این ماه به ساعت استاندارد همین ماه — برای نمایش تفکیکی در فیش حقوقی.
+        سنوات چون فردیه، جدا از مبالغ مشترک محاسبه و اضافه می‌شود.
         """
         sp = self._salary_profile
         if not sp:
             return {}
         std_hours = self.standard_monthly_hours_this_month
         ratio = (float(self.worked_hours) / std_hours) if std_hours else 0
-        breakdown = sp.components_breakdown
+        breakdown = dict(sp.components_breakdown)
+        breakdown['seniority_base'] = sp._component_breakdown(self.seniority_base_monthly)
         result = {}
         total = 0
         for key, comp in breakdown.items():

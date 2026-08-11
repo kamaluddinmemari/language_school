@@ -66,11 +66,15 @@ class EmployeeProfileDetailView(AdminEditOwnViewMixin, generics.RetrieveUpdateDe
 
 
 class SalaryProfileListCreateView(AdminEditOwnViewMixin, generics.ListCreateAPIView):
+    """
+    تنظیمات پایه‌ی حقوق — مشترک برای همه‌ی کارمندان، نه مخصوص یک نفر؛ همه (مدیر و کارمند) می‌توانند
+    ببینند، فقط مدیر می‌تواند ثبت/ویرایش کند. یک رکورد به ازای هر سال کاری (work_year یکتاست).
+    """
     serializer_class = SalaryProfileSerializer
     permission_classes = [IsAuthenticated]
 
-    def queryset_base(self):
-        return SalaryProfile.objects.select_related('user')
+    def get_queryset(self):
+        return SalaryProfile.objects.all()
 
     def create(self, request, *args, **kwargs):
         if not self.check_write_permission():
@@ -82,8 +86,8 @@ class SalaryProfileDetailView(AdminEditOwnViewMixin, generics.RetrieveUpdateDest
     serializer_class = SalaryProfileSerializer
     permission_classes = [IsAuthenticated]
 
-    def queryset_base(self):
-        return SalaryProfile.objects.select_related('user')
+    def get_queryset(self):
+        return SalaryProfile.objects.all()
 
     def update(self, request, *args, **kwargs):
         if not self.check_write_permission():

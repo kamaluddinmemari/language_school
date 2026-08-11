@@ -14,29 +14,18 @@ class EmployeeProfileSerializer(serializers.ModelSerializer):
 
 
 class SalaryProfileSerializer(serializers.ModelSerializer):
-    gross_base_monthly = serializers.ReadOnlyField()
+    gross_base_monthly_shared = serializers.ReadOnlyField()
     housing_allowance_monthly = serializers.ReadOnlyField()
     components_breakdown = serializers.ReadOnlyField()
-    seniority_base_annual = serializers.ReadOnlyField()
-    seniority_base_monthly = serializers.ReadOnlyField()
-    seniority_base_daily = serializers.ReadOnlyField()
-    seniority_base_hourly = serializers.ReadOnlyField()
-    is_seniority_eligible = serializers.ReadOnlyField()
-    user_full_name = serializers.SerializerMethodField()
 
     class Meta:
         model = SalaryProfile
-        fields = ['id', 'user', 'user_full_name', 'work_year', 'base_salary', 'food_allowance',
+        fields = ['id', 'work_year', 'base_salary', 'food_allowance',
                    'marriage_allowance', 'child_allowance',
-                   'is_seniority_eligible', 'seniority_base_annual', 'seniority_base_monthly',
-                   'seniority_base_daily', 'seniority_base_hourly',
                    'housing_allowance', 'housing_allowance_monthly',
                    'insurance_base_single', 'insurance_base_married',
-                   'gross_base_monthly', 'components_breakdown', 'updated_at']
+                   'gross_base_monthly_shared', 'components_breakdown', 'updated_at']
         read_only_fields = ['id', 'updated_at']
-
-    def get_user_full_name(self, obj):
-        return obj.user.get_full_name()
 
 
 class MonthlyPayrollSerializer(serializers.ModelSerializer):
