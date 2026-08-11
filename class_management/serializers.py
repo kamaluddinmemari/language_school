@@ -222,6 +222,9 @@ class OnlineCourseEnrollSerializer(serializers.Serializer):
         if not data.get('student_id') and not data.get('national_code'):
             raise serializers.ValidationError('یا شناسه‌ی دانش‌آموز یا کد ملی لازم است')
         return data
+
+
+class OnlineCourseEnrollmentSerializer(serializers.ModelSerializer):
     student_first_name = serializers.CharField(source='student.first_name', read_only=True)
     student_last_name = serializers.CharField(source='student.last_name', read_only=True)
     student_national_code = serializers.CharField(source='student.national_code', read_only=True)
