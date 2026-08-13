@@ -1817,6 +1817,10 @@ class OnlineCourseEnrollView(APIView):
         except User.DoesNotExist:
             return Response({'error': 'دانش‌آموز پیدا نشد'}, status=status.HTTP_404_NOT_FOUND)
 
+        # خواسته: خرید دوباره‌ی «همون» دوره برای یک نفر خطا بدهد؛ خرید دوره‌های دیگر آزاد است
+        if OnlineCourseEnrollment.objects.filter(course=course, student=student).exists():
+            return Response({'error': f'این دانش‌آموز از قبل در دوره‌ی «{course.title}» ثبت‌نام دارد'}, status=status.HTTP_400_BAD_REQUEST)
+
         price_paid = data['price_paid']
         discount_percent = data.get('discount_percent', 0)
 
@@ -1865,6 +1869,10 @@ class OnlineCourseSelfEnrollView(APIView):
             course = OnlineCourse.objects.get(pk=pk, is_active=True)
         except OnlineCourse.DoesNotExist:
             return Response({'error': 'دوره پیدا نشد'}, status=status.HTTP_404_NOT_FOUND)
+
+        # خواسته: خرید دوباره‌ی «همون» دوره خطا بدهد؛ خرید دوره‌های دیگر هم‌زمان آزاد است
+        if OnlineCourseEnrollment.objects.filter(course=course, student=student).exists():
+            return Response({'error': f'شما از قبل در دوره‌ی «{course.title}» ثبت‌نام کرده‌اید'}, status=status.HTTP_400_BAD_REQUEST)
 
         payment_method = request.data.get('payment_method')
         if payment_method not in (OnlineCourseEnrollment.PaymentMethod.CARD_TO_CARD, OnlineCourseEnrollment.PaymentMethod.GATEWAY):
@@ -2044,3 +2052,20 @@ class TeacherOnlineCoursesView(APIView):
             })
 
         return Response({'courses': result})
+
+
+class GatewayPaymentInitiateView(APIView):
+    """
+    POST: شروع پرداخت از درگاه — ساختار آماده برای اتصال بعدی به یک درگاه واقعی (زرین‌پال/آیدی‌پی/...).
+    فعلاً فقط پیام «به‌زودی» برمی‌گرداند؛ وقتی مشخصات درگاه واقعی مشخص شد، این ویو باید:
+    ۱) یک تراکنش/سفارش pending بسازد (شبیه به self-enroll ولی payment_method='gateway')
+    ۲) درخواست به API درگاه بزند و لینک پرداخت (authority/redirect_url) را برگرداند
+    ۳) در callback درگاه، وضعیت را verify و payment_verified=True کند
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        return Response(
+            {'error': 'پرداخت از درگاه هنوز راه‌اندازی نشده — لطفاً از کارت‌به‌کارت استفاده کنید'},
+            status=status.HTTP_501_NOT_IMPLEMENTED,
+        )
