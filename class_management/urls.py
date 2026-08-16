@@ -13,7 +13,8 @@ from .views import (
     OnlineCourseListView, OnlineCourseDetailView, OnlineCourseCatalogView, OnlineCourseEnrollView,
     OnlineCourseSelfEnrollView, PendingOnlineCourseEnrollmentsView, VerifyOnlineCourseEnrollmentPaymentView,
     RejectPendingOnlineCourseEnrollmentView, RefundOnlineCourseEnrollmentView, CreditOnlineCourseToWalletView,
-    MyOnlineCourseEnrollmentsView, TeacherOnlineCoursesView, GatewayPaymentInitiateView,
+    MyOnlineCourseEnrollmentsView, TeacherOnlineCoursesView, GatewayPaymentInitiateView, PaymentSettingsView,
+    MarkAttendanceView, ClassAttendanceListView,
 )
 
 urlpatterns = [
@@ -69,4 +70,7 @@ urlpatterns = [
     path('class-management/my-course-enrollments/', MyOnlineCourseEnrollmentsView.as_view(), name='my_course_enrollments'),
     path('class-management/my-online-courses/', TeacherOnlineCoursesView.as_view(), name='teacher_online_courses'),
     path('class-management/gateway-payment/initiate/', GatewayPaymentInitiateView.as_view(), name='gateway_payment_initiate'),
+    path('class-management/payment-settings/', PaymentSettingsView.as_view(), name='payment_settings'),
+    path('class-management/attendance/mark/', MarkAttendanceView.as_view(), name='mark_attendance'),
+    path('class-management/attendance/', ClassAttendanceListView.as_view(), name='attendance_list'),
 ]

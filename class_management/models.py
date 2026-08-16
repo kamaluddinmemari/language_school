@@ -411,6 +411,58 @@ class LevelRenewalApproval(models.Model):
         return f"{self.get_kind_display()} {self.amount} — {self.student.get_full_name()}"
 
 
+class PaymentSettings(models.Model):
+    """
+    تنظیمات نمایش اطلاعات کارت‌به‌کارت — تک‌رکورد سراسری (singleton)، فقط توسط مدیر قابل تنظیم؛
+    در همه‌ی مسیرهای پرداخت کارت‌به‌کارت (ثبت‌نام کلاس ترمیک، خرید دوره‌ی علمی، کلاس خصوصی،
+    ورکشاپ/خصوصی‌گروهی) به دانش‌آموز نشان داده می‌شود تا بداند به کدام کارت و به نام چه کسی
+    باید واریز کند.
+    """
+    card_number = models.CharField(max_length=20, blank=True, help_text='شماره کارت مقصد برای واریز کارت‌به‌کارت (بدون خط تیره)')
+    card_holder_name = models.CharField(max_length=100, blank=True, help_text='نام و نام‌خانوادگیِ صاحب کارت')
+    bank_name = models.CharField(max_length=50, blank=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f"تنظیمات کارت‌به‌کارت — {self.card_holder_name or 'تنظیم‌نشده'}"
+
+    @classmethod
+    def get_solo(cls):
+        obj, _ = cls.objects.get_or_create(pk=1)
+        return obj
+
+
+class ClassAttendance(models.Model):
+    """
+    حضور و غیاب یک دانش‌آموز در یک تاریخ مشخص — برای کلاس ترمیک (ClassSlot) یا دوره‌ی علمی
+    (OnlineCourse). توسط استاد از اپ ثبت می‌شود؛ نتیجه‌اش جلوی اسم همون دانش‌آموز در لیست
+    کلاس (هم توی اپ استاد هم پنل ادمین) با تاریخ نشون داده می‌شه و قابل ویرایش می‌مونه.
+    """
+    class_slot = models.ForeignKey(ClassSlot, null=True, blank=True, on_delete=models.CASCADE, related_name='attendances')
+    online_course = models.ForeignKey('OnlineCourse', null=True, blank=True, on_delete=models.CASCADE, related_name='attendances')
+    student = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='class_attendances')
+    date = models.DateField(default=timezone.now, help_text='تاریخ جلسه (میلادی ذخیره می‌شود؛ شمسی نمایش داده می‌شود)')
+    is_present = models.BooleanField(default=True)
+    note = models.CharField(max_length=200, blank=True)
+    marked_by = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL, related_name='+')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-date']
+        constraints = [
+            models.UniqueConstraint(fields=['class_slot', 'student', 'date'], name='unique_attendance_slot_per_day'),
+            models.UniqueConstraint(fields=['online_course', 'student', 'date'], name='unique_attendance_course_per_day'),
+        ]
+
+    @property
+    def date_jalali(self):
+        return jdatetime.date.fromgregorian(date=self.date).strftime('%Y/%m/%d')
+
+    def __str__(self):
+        return f"{self.student.get_full_name()} — {self.date_jalali} — {'حاضر' if self.is_present else 'غایب'}"
+
+
 class OnlineCourse(models.Model):
     """
     «کلاس‌های علمی» / «سایر دوره‌ها» — دوره‌های آنلاینِ مستقل از سیستم ترم/کلاس فیزیکی و شماره‌ی
@@ -424,6 +476,8 @@ class OnlineCourse(models.Model):
     capacity = models.PositiveIntegerField(default=20)
     teacher_name = models.CharField(max_length=100, blank=True)
     schedule_note = models.CharField(max_length=200, blank=True, help_text='زمان‌بندی آزاد، مثلاً «سه‌شنبه‌ها ۱۸:۰۰ تا ۱۹:۳۰» — فقط برای هشدار تداخل استاد و نمایش به دانش‌آموز استفاده می‌شود')
+    session_date = models.DateField(null=True, blank=True, help_text='تاریخ برگزاری (میلادی ذخیره می‌شود؛ در پنل/اپ به‌صورت شمسی نمایش داده می‌شود) — برای دوره‌های تک‌جلسه یا تاریخ شروع دوره‌های چندجلسه‌ای')
+    session_time = models.CharField(max_length=20, blank=True, help_text='ساعت برگزاری، مثلاً «18:00-19:30»')
     meeting_link = models.URLField(max_length=500, blank=True)
     is_active = models.BooleanField(default=True, help_text='غیرفعال یعنی دیگر توی کاتالوگ دانش‌آموز نشان داده نمی‌شود (ولی ثبت‌نام‌های قبلی می‌مانند)')
     internal_number = models.PositiveIntegerField(unique=True, editable=False, help_text='شماره‌ی داخلی خودکار — هیچ‌جا به کاربر نشان داده نمی‌شود، فقط برای یکتایی دیتابیس')
@@ -449,6 +503,12 @@ class OnlineCourse(models.Model):
     @property
     def created_at_jalali(self):
         return _jalali(self.created_at)
+
+    @property
+    def session_date_jalali(self):
+        if not self.session_date:
+            return None
+        return jdatetime.date.fromgregorian(date=self.session_date).strftime('%Y/%m/%d')
 
     def __str__(self):
         return self.title

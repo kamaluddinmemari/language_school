@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from .models import ClassSlot, ClassSlotEnrollment, TuitionSetting, DiscountedPerson, LevelRenewalApproval, Term, OnlineCourse, OnlineCourseEnrollment
+from .models import ClassSlot, ClassSlotEnrollment, TuitionSetting, DiscountedPerson, LevelRenewalApproval, Term, OnlineCourse, OnlineCourseEnrollment, PaymentSettings, ClassAttendance
 
 
 class TermSerializer(serializers.ModelSerializer):
@@ -192,6 +192,26 @@ class DiscountedPersonSerializer(serializers.ModelSerializer):
         read_only_fields = ['id', 'created_at', 'updated_at']
 
 
+class PaymentSettingsSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = PaymentSettings
+        fields = ['card_number', 'card_holder_name', 'bank_name', 'updated_at']
+        read_only_fields = ['updated_at']
+
+
+class ClassAttendanceSerializer(serializers.ModelSerializer):
+    date_jalali = serializers.ReadOnlyField()
+    student_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = ClassAttendance
+        fields = ['id', 'class_slot', 'online_course', 'student', 'student_name', 'date', 'date_jalali', 'is_present', 'note', 'updated_at']
+        read_only_fields = ['id', 'updated_at']
+
+    def get_student_name(self, obj):
+        return obj.student.get_full_name()
+
+
 class RefundEnrollmentSerializer(serializers.Serializer):
     card_number = serializers.CharField(max_length=30)
     receiver_name = serializers.CharField(max_length=150)
@@ -201,11 +221,13 @@ class OnlineCourseSerializer(serializers.ModelSerializer):
     seats_left = serializers.ReadOnlyField()
     enrolled_count = serializers.ReadOnlyField()
     created_at_jalali = serializers.ReadOnlyField()
+    session_date_jalali = serializers.ReadOnlyField()
 
     class Meta:
         model = OnlineCourse
         fields = [
             'id', 'title', 'price', 'session_count', 'capacity', 'teacher_name', 'schedule_note',
+            'session_date', 'session_date_jalali', 'session_time',
             'meeting_link', 'is_active', 'seats_left', 'enrolled_count', 'created_at', 'created_at_jalali',
         ]
         read_only_fields = ['id', 'created_at']

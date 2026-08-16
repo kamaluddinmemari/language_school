@@ -8,7 +8,7 @@ from rest_framework.response import Response
 from rest_framework.parsers import MultiPartParser, FormParser
 from rest_framework.permissions import IsAuthenticated
 import jdatetime
-from .models import ClassSlot, ClassSlotEnrollment, TuitionSetting, DiscountedPerson, EnrollmentRefund, WalletTransaction, infer_age_group_from_level, _jalali, LevelRenewalApproval, Term, OnlineCourse, OnlineCourseEnrollment
+from .models import ClassSlot, ClassSlotEnrollment, TuitionSetting, DiscountedPerson, EnrollmentRefund, WalletTransaction, infer_age_group_from_level, _jalali, LevelRenewalApproval, Term, OnlineCourse, OnlineCourseEnrollment, PaymentSettings, ClassAttendance
 from .models import THREE_DAY_TIME_SLOTS, THURSDAY_MORNING_SLOT, THURSDAY_EVENING_SLOT, FRIDAY_SLOT
 from .serializers import (
     ClassSlotSerializer, AllocateClassesSerializer, ConfirmOverflowSerializer,
@@ -16,7 +16,8 @@ from .serializers import (
     BulkCreatePhysicalClassesSerializer, EnrollStudentSerializer, ClassSlotEnrollmentSerializer,
     TuitionSettingSerializer, DiscountedPersonSerializer, RefundEnrollmentSerializer, TransferEnrollmentSerializer,
     SplitClassSerializer, LevelRenewalApprovalSerializer, TermSerializer,
-    OnlineCourseSerializer, OnlineCourseEnrollmentSerializer, OnlineCourseEnrollSerializer,
+    OnlineCourseSerializer, OnlineCourseEnrollmentSerializer, OnlineCourseEnrollSerializer, PaymentSettingsSerializer,
+    ClassAttendanceSerializer,
 )
 from level_tests.models import LevelTest
 from .allocation import allocate_classes
@@ -966,6 +967,10 @@ def _compute_level_suggestion(student):
         'days_since_source': days_since_source, 'needs_retest': needs_retest, 'retest_reason': retest_reason,
         'renewal_status': renewal_status, 'eligible': eligible, 'age_group': age_group,
         'base_tuition': base_tuition, 'discount_percent': discount_percent,
+        # خواسته‌ی جدید: اگه نه تعیین‌سطحی داره نه هیچ کلاس قبلی، یعنی کاملاً «ورودی جدید» است —
+        # اولین سطحی که براش (معمولاً با تعیین‌سطح) ثبت بشه، خودکار مبنای این تابع می‌شود چون
+        # last_test/last_enrollment در دفعه‌ی بعد پیدا می‌شوند؛ فعلاً فقط پرچم هشدار لازم است.
+        'is_new_entrant': not last_enrollment and not last_test,
     }
 
 
@@ -1026,6 +1031,8 @@ class DirectEnrollSuggestionsView(APIView):
             'base_tuition': info['base_tuition'],
             'wallet_balance': student.wallet_balance,
             'previous_discount_percent': info['discount_percent'],
+            'is_new_entrant': info['is_new_entrant'],
+            'needs_editing': student.needs_editing,
         })
 
 
@@ -1062,6 +1069,7 @@ class MyDirectEnrollSuggestionsView(APIView):
             'discount_percent': discount_percent,
             'final_tuition': final_tuition,
             'wallet_balance': student.wallet_balance,
+            'is_new_entrant': info['is_new_entrant'],
         })
 
 
@@ -1654,6 +1662,7 @@ class TeacherEducationHistoryView(APIView):
         for c in courses:
             online_course_history.append({
                 'id': c.id, 'title': c.title, 'schedule_note': c.schedule_note,
+                'session_date_jalali': c.session_date_jalali, 'session_time': c.session_time,
                 'session_count': c.session_count, 'price': c.price, 'is_active': c.is_active,
                 'created_at_jalali': c.created_at_jalali,
                 'enrolled_count': c.enrolled_count,
@@ -1698,8 +1707,10 @@ class TeacherTermClassesView(APIView):
         ).order_by('day_type', 'time_slot', 'number')
 
         result = []
+        today_str = today.isoformat()
         for s in slots:
             students = ClassSlotEnrollment.objects.filter(class_slot=s, payment_verified=True).select_related('student')
+            today_attendance = {a.student_id: a for a in ClassAttendance.objects.filter(class_slot=s, date=today)}
             result.append({
                 'id': s.id, 'number': s.number, 'day_type_display': s.day_type_display,
                 'time_slot': s.time_slot, 'gender_display': s.get_gender_display(),
@@ -1707,6 +1718,15 @@ class TeacherTermClassesView(APIView):
                 'is_online': s.is_online, 'meeting_link': s.meeting_link if s.is_online else '',
                 'student_count': students.count(),
                 'students': [f"{e.student.first_name} {e.student.last_name}".strip() for e in students],
+                'roster': [{
+                    'student_id': e.student.id,
+                    'student_name': f"{e.student.first_name} {e.student.last_name}".strip(),
+                    'today_attendance': (
+                        {'is_present': today_attendance[e.student.id].is_present, 'date_jalali': today_attendance[e.student.id].date_jalali}
+                        if e.student.id in today_attendance else None
+                    ),
+                } for e in students],
+                'today_date': today_str,
             })
 
         return Response({'term': TermSerializer(term).data, 'classes': result})
@@ -2018,6 +2038,8 @@ class MyOnlineCourseEnrollmentsView(APIView):
             'course_title': e.course.title,
             'teacher_name': e.course.teacher_name,
             'schedule_note': e.course.schedule_note,
+            'session_date_jalali': e.course.session_date_jalali,
+            'session_time': e.course.session_time,
             'session_count': e.course.session_count,
             'meeting_link': e.course.meeting_link if e.payment_verified else '',
             'price_paid': e.price_paid,
@@ -2041,14 +2063,27 @@ class TeacherOnlineCoursesView(APIView):
         courses = OnlineCourse.objects.filter(teacher_name__iexact=teacher_full_name).order_by('-created_at')
 
         result = []
+        today_str = timezone.now().date().isoformat()
+        today = timezone.now().date()
         for c in courses:
             students = OnlineCourseEnrollment.objects.filter(course=c, payment_verified=True).select_related('student')
+            today_attendance = {a.student_id: a for a in ClassAttendance.objects.filter(online_course=c, date=today)}
             result.append({
                 'id': c.id, 'title': c.title, 'schedule_note': c.schedule_note,
+                'session_date_jalali': c.session_date_jalali, 'session_time': c.session_time,
                 'session_count': c.session_count, 'meeting_link': c.meeting_link,
                 'is_active': c.is_active, 'created_at_jalali': c.created_at_jalali,
                 'student_count': students.count(),
                 'students': [f"{e.student.first_name} {e.student.last_name}".strip() for e in students],
+                'roster': [{
+                    'student_id': e.student.id,
+                    'student_name': f"{e.student.first_name} {e.student.last_name}".strip(),
+                    'today_attendance': (
+                        {'is_present': today_attendance[e.student.id].is_present, 'date_jalali': today_attendance[e.student.id].date_jalali}
+                        if e.student.id in today_attendance else None
+                    ),
+                } for e in students],
+                'today_date': today_str,
             })
 
         return Response({'courses': result})
@@ -2069,3 +2104,91 @@ class GatewayPaymentInitiateView(APIView):
             {'error': 'پرداخت از درگاه هنوز راه‌اندازی نشده — لطفاً از کارت‌به‌کارت استفاده کنید'},
             status=status.HTTP_501_NOT_IMPLEMENTED,
         )
+
+
+class PaymentSettingsView(APIView):
+    """
+    GET: شماره‌کارت/نام صاحب‌کارت برای واریز کارت‌به‌کارت — همه‌ی کاربران احراز‌هویت‌شده می‌بینند
+    (تا موقع پرداخت در اپ نشان داده شود). PATCH: فقط مدیر می‌تواند تنظیم/ویرایش کند.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        return Response(PaymentSettingsSerializer(PaymentSettings.get_solo()).data)
+
+    def patch(self, request):
+        if request.user.role not in MANAGE_ROLES:
+            return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
+        obj = PaymentSettings.get_solo()
+        serializer = PaymentSettingsSerializer(obj, data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        return Response(serializer.data)
+
+
+# ==================== حضور و غیاب آنلاین توسط استاد ====================
+
+class MarkAttendanceView(APIView):
+    """
+    POST: استاد (یا مدیر) حضور/غیاب یک دانش‌آموز را برای یک تاریخ مشخص، در یک کلاس ترمیک یا
+    دوره‌ی علمی ثبت/ویرایش می‌کند. اگر برای همون دانش‌آموز/تاریخ قبلاً رکوردی بود، آپدیت می‌شود
+    (یعنی کاملاً قابل ویرایش است، نه فقط یک‌بار ثبت).
+    بدنه‌ی درخواست: class_slot یا online_course (یکی از این دو الزامی)، student, date (YYYY-MM-DD میلادی)، is_present, note
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        from django.contrib.auth import get_user_model
+        User = get_user_model()
+        if request.user.role not in MANAGE_ROLES and request.user.role not in User.TEACHER_LIKE_ROLES:
+            return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
+
+        class_slot_id = request.data.get('class_slot')
+        online_course_id = request.data.get('online_course')
+        student_id = request.data.get('student')
+        date_str = request.data.get('date')
+        is_present = request.data.get('is_present', True)
+        note = request.data.get('note', '')
+
+        if not student_id or not date_str or (not class_slot_id and not online_course_id):
+            return Response({'error': 'student، date، و یکی از class_slot/online_course الزامی است'}, status=status.HTTP_400_BAD_REQUEST)
+
+        # اگه استاد (نه مدیر) درخواست داده، فقط اجازه داره برای کلاس‌های خودش ثبت کنه
+        if request.user.role in User.TEACHER_LIKE_ROLES and request.user.role not in MANAGE_ROLES:
+            teacher_full_name = request.user.get_full_name().strip()
+            if class_slot_id:
+                owns = ClassSlot.objects.filter(pk=class_slot_id, teacher_name__iexact=teacher_full_name).exists()
+            else:
+                owns = OnlineCourse.objects.filter(pk=online_course_id, teacher_name__iexact=teacher_full_name).exists()
+            if not owns:
+                return Response({'error': 'این کلاس/دوره متعلق به شما نیست'}, status=status.HTTP_403_FORBIDDEN)
+
+        lookup = {'student_id': student_id, 'date': date_str}
+        if class_slot_id:
+            lookup['class_slot_id'] = class_slot_id
+        else:
+            lookup['online_course_id'] = online_course_id
+
+        attendance, _created = ClassAttendance.objects.update_or_create(
+            **lookup, defaults={'is_present': is_present, 'note': note, 'marked_by': request.user},
+        )
+        return Response(ClassAttendanceSerializer(attendance).data)
+
+
+class ClassAttendanceListView(generics.ListAPIView):
+    """GET: لیست حضور و غیاب یک کلاس ترمیک یا دوره‌ی علمی — با ?class_slot=<id> یا ?online_course=<id>، اختیاری ?date=<YYYY-MM-DD>"""
+    permission_classes = [IsAuthenticated]
+    serializer_class = ClassAttendanceSerializer
+
+    def get_queryset(self):
+        qs = ClassAttendance.objects.select_related('student')
+        class_slot_id = self.request.query_params.get('class_slot')
+        online_course_id = self.request.query_params.get('online_course')
+        date_str = self.request.query_params.get('date')
+        if class_slot_id:
+            qs = qs.filter(class_slot_id=class_slot_id)
+        if online_course_id:
+            qs = qs.filter(online_course_id=online_course_id)
+        if date_str:
+            qs = qs.filter(date=date_str)
+        return qs
