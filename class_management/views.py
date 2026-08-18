@@ -2192,3 +2192,76 @@ class ClassAttendanceListView(generics.ListAPIView):
         if date_str:
             qs = qs.filter(date=date_str)
         return qs
+
+
+class BulkClassSlotActionView(APIView):
+    """
+    POST: عملیات دسته‌جمعی روی کلاس‌های ترمیک — بر اساس فیلتر روز (زوج/فرد/پنجشنبه‌صبح/
+    پنجشنبه‌عصر/جمعه — هرکدوم یا هر ترکیبی)، اختیاری ساعت‌های استاندارد، اختیاری ترم، و اختیاری
+    آنلاین/فیزیکی، همه‌ی کلاس‌های منطبق را یکجا حذف یا ویرایش می‌کند — بدون نیاز به باز کردن
+    هرکلاس جداگانه (که همچنان هم موجود و قابل‌استفاده است).
+
+    بدنه‌ی درخواست:
+      action: 'delete' | 'edit'
+      day_types: ['even', 'odd', 'thursday_morning', 'thursday_evening', 'friday']  (الزامی، حداقل یکی)
+      time_slots: [...]  (اختیاری — فقط برای زوج/فرد؛ اگه خالی باشه یعنی همه‌ی ساعت‌ها)
+      term_id: عدد (اختیاری)
+      is_online: true/false (اختیاری — اگه نیاد یعنی فرقی نکنه)
+      fields: {teacher_name, assigned_level, capacity, gender, notes, meeting_link, is_online}  (فقط برای action=edit؛ فقط فیلدهایی که واقعاً می‌خوای عوض کنی رو بفرست)
+    """
+    permission_classes = [IsAuthenticated]
+    ALLOWED_EDIT_FIELDS = ['teacher_name', 'assigned_level', 'capacity', 'gender', 'notes', 'meeting_link', 'is_online']
+
+    def post(self, request):
+        if request.user.role not in MANAGE_ROLES:
+            return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
+
+        action = request.data.get('action')
+        day_types = request.data.get('day_types') or []
+        time_slots = request.data.get('time_slots') or []
+        term_id = request.data.get('term_id')
+        is_online_filter = request.data.get('is_online')
+
+        if action not in ('delete', 'edit'):
+            return Response({'error': "action باید 'delete' یا 'edit' باشد"}, status=status.HTTP_400_BAD_REQUEST)
+        if not day_types:
+            return Response({'error': 'حداقل یک روز (زوج/فرد/پنجشنبه‌صبح/پنجشنبه‌عصر/جمعه) را انتخاب کنید'}, status=status.HTTP_400_BAD_REQUEST)
+
+        qs = ClassSlot.objects.filter(day_type__in=day_types)
+        if time_slots:
+            qs = qs.filter(time_slot__in=time_slots)
+        if term_id:
+            qs = qs.filter(term_id=term_id)
+        if is_online_filter is not None:
+            qs = qs.filter(is_online=is_online_filter)
+
+        match_count = qs.count()
+        if match_count == 0:
+            return Response({'error': 'هیچ کلاسی با این فیلتر پیدا نشد'}, status=status.HTTP_404_NOT_FOUND)
+
+        if action == 'delete':
+            qs.delete()
+            return Response({'message': f'{match_count} کلاس حذف شد', 'deleted_count': match_count})
+
+        # action == 'edit'
+        raw_fields = request.data.get('fields') or {}
+        updates = {k: v for k, v in raw_fields.items() if k in self.ALLOWED_EDIT_FIELDS}
+        if not updates:
+            return Response({'error': 'هیچ فیلدی برای ویرایش دسته‌جمعی مشخص نشده'}, status=status.HTTP_400_BAD_REQUEST)
+
+        updated, skipped = 0, 0
+        from django.db import IntegrityError
+        for slot in qs:
+            try:
+                for k, v in updates.items():
+                    setattr(slot, k, v)
+                slot.full_clean()
+                slot.save()
+                updated += 1
+            except (IntegrityError, Exception):
+                skipped += 1
+
+        msg = f'{updated} کلاس ویرایش شد'
+        if skipped:
+            msg += f' — {skipped} مورد به‌خاطر تداخل (مثلاً یکتاییِ شماره کلاس در همون روز/ساعت) رد شد'
+        return Response({'message': msg, 'updated_count': updated, 'skipped_count': skipped})

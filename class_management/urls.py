@@ -14,7 +14,7 @@ from .views import (
     OnlineCourseSelfEnrollView, PendingOnlineCourseEnrollmentsView, VerifyOnlineCourseEnrollmentPaymentView,
     RejectPendingOnlineCourseEnrollmentView, RefundOnlineCourseEnrollmentView, CreditOnlineCourseToWalletView,
     MyOnlineCourseEnrollmentsView, TeacherOnlineCoursesView, GatewayPaymentInitiateView, PaymentSettingsView,
-    MarkAttendanceView, ClassAttendanceListView,
+    MarkAttendanceView, ClassAttendanceListView, BulkClassSlotActionView,
 )
 
 urlpatterns = [
@@ -73,4 +73,5 @@ urlpatterns = [
     path('class-management/payment-settings/', PaymentSettingsView.as_view(), name='payment_settings'),
     path('class-management/attendance/mark/', MarkAttendanceView.as_view(), name='mark_attendance'),
     path('class-management/attendance/', ClassAttendanceListView.as_view(), name='attendance_list'),
+    path('class-management/slots/bulk-action/', BulkClassSlotActionView.as_view(), name='bulk_class_slot_action'),
 ]
