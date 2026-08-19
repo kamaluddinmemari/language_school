@@ -8,7 +8,7 @@ from rest_framework.response import Response
 from rest_framework.parsers import MultiPartParser, FormParser
 from rest_framework.permissions import IsAuthenticated
 import jdatetime
-from .models import ClassSlot, ClassSlotEnrollment, TuitionSetting, DiscountedPerson, EnrollmentRefund, WalletTransaction, infer_age_group_from_level, _jalali, LevelRenewalApproval, Term, OnlineCourse, OnlineCourseEnrollment, PaymentSettings, ClassAttendance
+from .models import ClassSlot, ClassSlotEnrollment, TuitionSetting, DiscountedPerson, EnrollmentRefund, WalletTransaction, infer_age_group_from_level, _jalali, LevelRenewalApproval, Term, OnlineCourse, OnlineCourseEnrollment, PaymentSettings, ClassAttendance, OnlineCourseActionRequest
 from .models import THREE_DAY_TIME_SLOTS, THURSDAY_MORNING_SLOT, THURSDAY_EVENING_SLOT, FRIDAY_SLOT
 from .serializers import (
     ClassSlotSerializer, AllocateClassesSerializer, ConfirmOverflowSerializer,
@@ -17,7 +17,8 @@ from .serializers import (
     TuitionSettingSerializer, DiscountedPersonSerializer, RefundEnrollmentSerializer, TransferEnrollmentSerializer,
     SplitClassSerializer, LevelRenewalApprovalSerializer, TermSerializer,
     OnlineCourseSerializer, OnlineCourseEnrollmentSerializer, OnlineCourseEnrollSerializer, PaymentSettingsSerializer,
-    ClassAttendanceSerializer,
+    ClassAttendanceSerializer, OnlineCourseTransferSerializer, OnlineCourseActionRequestSerializer,
+    OnlineCourseActionRequestCreateSerializer, OnlineCourseActionRequestReviewSerializer,
 )
 from level_tests.models import LevelTest
 from .allocation import allocate_classes
@@ -870,6 +871,8 @@ class MyEnrollmentsView(APIView):
             'term_title': e.class_slot.term.title if e.class_slot.term_id else '',
             'term_start_jalali': e.class_slot.term.start_date_jalali if e.class_slot.term_id else '',
             'term_end_jalali': e.class_slot.term.end_date_jalali if e.class_slot.term_id else '',
+            'capacity': e.class_slot.capacity,
+            'current_count': e.class_slot.current_count,
             'tuition_amount': e.tuition_amount,
             'discount_percent': e.discount_percent,
             'payment_method_display': e.get_payment_method_display(),
@@ -2021,6 +2024,250 @@ class CreditOnlineCourseToWalletView(APIView):
             'wallet_balance': student.wallet_balance,
             'course': OnlineCourseSerializer(course).data,
         })
+
+
+class OnlineCourseRosterView(generics.ListAPIView):
+    """GET: لیست دانش‌آموزانِ *تاییدشده*ی یک دوره‌ی علمی/آنلاین خاص — پایه‌ی دکمه‌های استرداد/کیف‌پول/حذف/انتقال"""
+    permission_classes = [IsAuthenticated]
+    serializer_class = OnlineCourseEnrollmentSerializer
+
+    def get_queryset(self):
+        if self.request.user.role not in MANAGE_ROLES:
+            return OnlineCourseEnrollment.objects.none()
+        return OnlineCourseEnrollment.objects.filter(course_id=self.kwargs['pk'], payment_verified=True).select_related('student')
+
+
+class OnlineCourseUnenrollView(APIView):
+    """DELETE: دکمه‌ی «حذف» — دانش‌آموز بدون استرداد یا انتقالِ وجه از دوره حذف می‌شود (مثلاً ثبت‌نام اشتباه)"""
+    permission_classes = [IsAuthenticated]
+
+    def delete(self, request, pk, student_id):
+        if request.user.role not in MANAGE_ROLES:
+            return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
+        try:
+            course = OnlineCourse.objects.get(pk=pk)
+            enrollment = OnlineCourseEnrollment.objects.get(course=course, student_id=student_id)
+        except (OnlineCourse.DoesNotExist, OnlineCourseEnrollment.DoesNotExist):
+            return Response({'error': 'ثبت‌نام پیدا نشد'}, status=status.HTTP_404_NOT_FOUND)
+        enrollment.delete()
+        return Response({'message': 'دانش‌آموز از این دوره حذف شد', 'course': OnlineCourseSerializer(course).data})
+
+
+class OnlineCourseTransferOptionsView(APIView):
+    """GET: لیست دوره‌های علمی/آنلاینِ فعالِ دیگر (به‌جز خودِ همین دوره) که جای خالی دارند — برای دکمه‌ی «انتقال کلاس»"""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, pk, student_id):
+        if request.user.role not in MANAGE_ROLES:
+            return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
+        try:
+            course = OnlineCourse.objects.get(pk=pk)
+        except OnlineCourse.DoesNotExist:
+            return Response({'error': 'دوره پیدا نشد'}, status=status.HTTP_404_NOT_FOUND)
+
+        candidates = OnlineCourse.objects.exclude(pk=course.pk).filter(is_active=True)
+        candidates = [c for c in candidates if c.seats_left > 0]
+
+        return Response([{
+            'id': c.id, 'title': c.title, 'teacher_name': c.teacher_name,
+            'schedule_note': c.schedule_note, 'seats_left': c.seats_left, 'price': c.price,
+        } for c in candidates])
+
+
+class OnlineCourseTransferView(APIView):
+    """POST: دکمه‌ی «انتقال کلاس» — دانش‌آموز از این دوره حذف و به دوره‌ی مقصدِ انتخاب‌شده منتقل می‌شود"""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, pk, student_id):
+        if request.user.role not in MANAGE_ROLES:
+            return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
+        try:
+            source = OnlineCourse.objects.get(pk=pk)
+            enrollment = OnlineCourseEnrollment.objects.get(course=source, student_id=student_id)
+        except (OnlineCourse.DoesNotExist, OnlineCourseEnrollment.DoesNotExist):
+            return Response({'error': 'ثبت‌نام پیدا نشد'}, status=status.HTTP_404_NOT_FOUND)
+
+        serializer = OnlineCourseTransferSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        try:
+            target = OnlineCourse.objects.get(pk=serializer.validated_data['target_course_id'])
+        except OnlineCourse.DoesNotExist:
+            return Response({'error': 'دوره‌ی مقصد پیدا نشد'}, status=status.HTTP_404_NOT_FOUND)
+
+        if target.pk == source.pk:
+            return Response({'error': 'دوره‌ی مقصد نمی‌تواند همان دوره‌ی فعلی باشد'}, status=status.HTTP_400_BAD_REQUEST)
+        if target.seats_left <= 0:
+            return Response({'error': 'دوره‌ی مقصد ظرفیت خالی ندارد'}, status=status.HTTP_400_BAD_REQUEST)
+        if OnlineCourseEnrollment.objects.filter(course=target, student_id=student_id).exists():
+            return Response({'error': 'این دانش‌آموز از قبل توی دوره‌ی مقصد ثبت‌نام شده'}, status=status.HTTP_400_BAD_REQUEST)
+
+        OnlineCourseEnrollment.objects.create(
+            course=target, student_id=student_id, payment_method=enrollment.payment_method,
+            price_paid=enrollment.price_paid, discount_percent=enrollment.discount_percent,
+        )
+        enrollment.delete()
+
+        return Response({
+            'message': f'دانش‌آموز به دوره‌ی «{target.title}» منتقل شد',
+            'source': OnlineCourseSerializer(source).data,
+            'target': OnlineCourseSerializer(target).data,
+        })
+
+
+class StudentCreateOnlineCourseActionRequestView(APIView):
+    """
+    POST: دانش‌آموز از اپ برای یک دوره‌ی علمی که در آن ثبت‌نامِ تاییدشده دارد، درخواست
+    استرداد یا انتقال کلاس ثبت می‌کند. این فقط یک درخواست است؛ تا وقتی مدیر تاییدش نکند
+    هیچ تغییری در ثبت‌نام واقعی ایجاد نمی‌شود.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        if request.user.role != 'student':
+            return Response({'error': 'فقط دانش‌آموز می‌تواند این درخواست را ثبت کند'}, status=status.HTTP_403_FORBIDDEN)
+
+        serializer = OnlineCourseActionRequestCreateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+
+        try:
+            course = OnlineCourse.objects.get(pk=data['online_course_id'])
+        except OnlineCourse.DoesNotExist:
+            return Response({'error': 'دوره پیدا نشد'}, status=status.HTTP_404_NOT_FOUND)
+
+        if not OnlineCourseEnrollment.objects.filter(course=course, student=request.user, payment_verified=True).exists():
+            return Response({'error': 'شما در این دوره ثبت‌نامِ تاییدشده‌ای ندارید'}, status=status.HTTP_400_BAD_REQUEST)
+
+        if OnlineCourseActionRequest.objects.filter(
+            student=request.user, online_course=course, status=OnlineCourseActionRequest.Status.PENDING,
+        ).exists():
+            return Response({'error': 'یک درخواست در-انتظار برای همین دوره از قبل ثبت شده است'}, status=status.HTTP_400_BAD_REQUEST)
+
+        target_course = None
+        if data.get('requested_target_course_id'):
+            target_course = OnlineCourse.objects.filter(pk=data['requested_target_course_id']).first()
+
+        req = OnlineCourseActionRequest.objects.create(
+            student=request.user, online_course=course, action_type=data['action_type'],
+            card_number=data.get('card_number', ''), receiver_name=data.get('receiver_name', ''),
+            requested_target_course=target_course, reason=data.get('reason', ''),
+        )
+        return Response(OnlineCourseActionRequestSerializer(req).data, status=status.HTTP_201_CREATED)
+
+
+class MyOnlineCourseActionRequestsView(generics.ListAPIView):
+    """GET: لیست درخواست‌های استرداد/انتقالِ خودِ دانش‌آموز — به همراه وضعیت هرکدام"""
+    permission_classes = [IsAuthenticated]
+    serializer_class = OnlineCourseActionRequestSerializer
+
+    def get_queryset(self):
+        return OnlineCourseActionRequest.objects.filter(student=self.request.user).select_related('online_course', 'requested_target_course')
+
+
+class AdminOnlineCourseActionRequestListView(generics.ListAPIView):
+    """GET: لیست همه‌ی درخواست‌های استرداد/انتقالِ کلاس علمی برای بررسی مدیر — پیش‌فرض فقط در-انتظارها؛ با ?status=all همه"""
+    permission_classes = [IsAuthenticated]
+    serializer_class = OnlineCourseActionRequestSerializer
+
+    def get_queryset(self):
+        if self.request.user.role not in MANAGE_ROLES:
+            return OnlineCourseActionRequest.objects.none()
+        qs = OnlineCourseActionRequest.objects.select_related('student', 'online_course', 'requested_target_course')
+        status_param = self.request.query_params.get('status', 'pending')
+        if status_param != 'all':
+            qs = qs.filter(status=status_param)
+        return qs
+
+
+class ApproveOnlineCourseActionRequestView(APIView):
+    """
+    POST: تایید درخواست دانش‌آموز — همان عملیات واقعیِ استرداد یا انتقال را اجرا می‌کند
+    (دقیقاً همان منطق دکمه‌های دستیِ مدیر) و درخواست را به‌عنوان تاییدشده علامت می‌زند.
+    برای انتقال، اگر مدیر target_course_id متفاوتی بفرستد همان اولویت دارد؛ وگرنه دوره‌ی
+    پیشنهادیِ خودِ دانش‌آموز استفاده می‌شود.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, pk):
+        if request.user.role not in MANAGE_ROLES:
+            return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
+        try:
+            req = OnlineCourseActionRequest.objects.select_related('online_course', 'student', 'requested_target_course').get(pk=pk)
+        except OnlineCourseActionRequest.DoesNotExist:
+            return Response({'error': 'درخواست پیدا نشد'}, status=status.HTTP_404_NOT_FOUND)
+        if req.status != OnlineCourseActionRequest.Status.PENDING:
+            return Response({'error': 'این درخواست قبلاً بررسی شده است'}, status=status.HTTP_400_BAD_REQUEST)
+
+        review = OnlineCourseActionRequestReviewSerializer(data=request.data)
+        review.is_valid(raise_exception=True)
+        review_data = review.validated_data
+
+        try:
+            enrollment = OnlineCourseEnrollment.objects.get(course=req.online_course, student=req.student)
+        except OnlineCourseEnrollment.DoesNotExist:
+            return Response({'error': 'ثبت‌نام مربوطه دیگر وجود ندارد'}, status=status.HTTP_404_NOT_FOUND)
+
+        if req.action_type == OnlineCourseActionRequest.ActionType.REFUND:
+            refund = EnrollmentRefund.objects.create(
+                student=req.student, online_course=req.online_course, amount=enrollment.price_paid,
+                card_number=req.card_number, receiver_name=req.receiver_name, refunded_by=request.user,
+            )
+            enrollment.delete()
+            result_message = f'استرداد {refund.amount:,} تومانی تایید و اجرا شد'
+        else:
+            target_id = review_data.get('target_course_id') or (req.requested_target_course_id)
+            if not target_id:
+                return Response({'error': 'برای تایید انتقال، دوره‌ی مقصد باید مشخص شود'}, status=status.HTTP_400_BAD_REQUEST)
+            try:
+                target = OnlineCourse.objects.get(pk=target_id)
+            except OnlineCourse.DoesNotExist:
+                return Response({'error': 'دوره‌ی مقصد پیدا نشد'}, status=status.HTTP_404_NOT_FOUND)
+            if target.pk == req.online_course_id:
+                return Response({'error': 'دوره‌ی مقصد نمی‌تواند همان دوره‌ی فعلی باشد'}, status=status.HTTP_400_BAD_REQUEST)
+            if target.seats_left <= 0:
+                return Response({'error': 'دوره‌ی مقصد ظرفیت خالی ندارد'}, status=status.HTTP_400_BAD_REQUEST)
+            if OnlineCourseEnrollment.objects.filter(course=target, student=req.student).exists():
+                return Response({'error': 'دانش‌آموز از قبل در دوره‌ی مقصد ثبت‌نام شده'}, status=status.HTTP_400_BAD_REQUEST)
+            OnlineCourseEnrollment.objects.create(
+                course=target, student=req.student, payment_method=enrollment.payment_method,
+                price_paid=enrollment.price_paid, discount_percent=enrollment.discount_percent,
+            )
+            enrollment.delete()
+            result_message = f'انتقال به دوره‌ی «{target.title}» تایید و اجرا شد'
+
+        req.status = OnlineCourseActionRequest.Status.APPROVED
+        req.admin_note = review_data.get('admin_note', '')
+        req.reviewed_by = request.user
+        req.reviewed_at = timezone.now()
+        req.save()
+
+        return Response({'message': result_message, 'request': OnlineCourseActionRequestSerializer(req).data})
+
+
+class RejectOnlineCourseActionRequestView(APIView):
+    """POST: رد درخواست دانش‌آموز — هیچ تغییری در ثبت‌نام ایجاد نمی‌شود، فقط وضعیت و دلیل رد ثبت می‌شود"""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, pk):
+        if request.user.role not in MANAGE_ROLES:
+            return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
+        try:
+            req = OnlineCourseActionRequest.objects.get(pk=pk)
+        except OnlineCourseActionRequest.DoesNotExist:
+            return Response({'error': 'درخواست پیدا نشد'}, status=status.HTTP_404_NOT_FOUND)
+        if req.status != OnlineCourseActionRequest.Status.PENDING:
+            return Response({'error': 'این درخواست قبلاً بررسی شده است'}, status=status.HTTP_400_BAD_REQUEST)
+
+        review = OnlineCourseActionRequestReviewSerializer(data=request.data)
+        review.is_valid(raise_exception=True)
+
+        req.status = OnlineCourseActionRequest.Status.REJECTED
+        req.admin_note = review.validated_data.get('admin_note', '')
+        req.reviewed_by = request.user
+        req.reviewed_at = timezone.now()
+        req.save()
+
+        return Response({'message': 'درخواست رد شد', 'request': OnlineCourseActionRequestSerializer(req).data})
 
 
 class MyOnlineCourseEnrollmentsView(APIView):

@@ -543,3 +543,54 @@ class OnlineCourseEnrollment(models.Model):
 
     def __str__(self):
         return f"{self.student.get_full_name()} — {self.course.title}"
+
+
+class OnlineCourseActionRequest(models.Model):
+    """
+    خواسته‌ی ۱۱: دانش‌آموز از اپ برای یک کلاس علمی/آنلاینی که در آن ثبت‌نام کرده می‌تواند
+    درخواست «استرداد» یا «انتقال کلاس» بدهد. این درخواست فقط پس از تایید مدیر واقعاً اجرا
+    می‌شود (استرداد ثبت و ثبت‌نام حذف، یا ثبت‌نام به دوره‌ی مقصد منتقل). رد شدن درخواست هیچ
+    تغییری در ثبت‌نام ایجاد نمی‌کند.
+    """
+    class ActionType(models.TextChoices):
+        REFUND = 'refund', 'استرداد وجه'
+        TRANSFER = 'transfer', 'انتقال کلاس'
+
+    class Status(models.TextChoices):
+        PENDING = 'pending', 'در انتظار بررسی'
+        APPROVED = 'approved', 'تایید و اجرا شد'
+        REJECTED = 'rejected', 'رد شد'
+
+    student = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='online_course_action_requests')
+    online_course = models.ForeignKey(OnlineCourse, on_delete=models.CASCADE, related_name='action_requests')
+    action_type = models.CharField(max_length=10, choices=ActionType.choices)
+
+    # فقط برای استرداد — شماره کارت و نامی که مبلغ باید به آن واریز شود
+    card_number = models.CharField(max_length=30, blank=True)
+    receiver_name = models.CharField(max_length=150, blank=True)
+
+    # فقط برای انتقال — دوره‌ی پیشنهادی دانش‌آموز (مدیر می‌تواند موقع تایید دوره‌ی دیگری هم انتخاب کند)
+    requested_target_course = models.ForeignKey(
+        OnlineCourse, on_delete=models.SET_NULL, null=True, blank=True, related_name='+',
+    )
+
+    reason = models.CharField(max_length=300, blank=True)
+    status = models.CharField(max_length=10, choices=Status.choices, default=Status.PENDING)
+    admin_note = models.CharField(max_length=300, blank=True)
+    reviewed_by = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL, related_name='+')
+    created_at = models.DateTimeField(auto_now_add=True)
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ['-created_at']
+
+    @property
+    def created_at_jalali(self):
+        return _jalali(self.created_at)
+
+    @property
+    def reviewed_at_jalali(self):
+        return _jalali(self.reviewed_at) if self.reviewed_at else None
+
+    def __str__(self):
+        return f"{self.student.get_full_name()} — {self.get_action_type_display()} — {self.online_course.title} — {self.get_status_display()}"

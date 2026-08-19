@@ -3,6 +3,7 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from django.utils import timezone
+from django.core.exceptions import MultipleObjectsReturned
 from datetime import timedelta
 import random
 from .models import User, OTPCode, PriceSetting
@@ -39,6 +40,11 @@ class ForgotPasswordView(APIView):
                     {'error': 'کاربری با این شماره پیدا نشد'},
                     status=status.HTTP_404_NOT_FOUND
                 )
+            except MultipleObjectsReturned:
+                return Response(
+                    {'error': 'چند حساب کاربری با این شماره موبایل ثبت شده (مثلاً چند خواهر/برادر با شماره‌ی مشترک) — برای بازیابی رمز عبور، لطفاً با نام کاربری وارد شوید یا با آموزشگاه تماس بگیرید'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
             code = str(random.randint(100000, 999999))
             expires_at = timezone.now() + timedelta(minutes=5)
             OTPCode.objects.create(
@@ -74,6 +80,11 @@ class ResetPasswordView(APIView):
             except (User.DoesNotExist, OTPCode.DoesNotExist):
                 return Response(
                     {'error': 'کد نامعتبر یا منقضی شده'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            except MultipleObjectsReturned:
+                return Response(
+                    {'error': 'چند حساب کاربری با این شماره موبایل ثبت شده — برای بازیابی رمز عبور، لطفاً با نام کاربری وارد شوید یا با آموزشگاه تماس بگیرید'},
                     status=status.HTTP_400_BAD_REQUEST
                 )
             user.set_password(new_password)

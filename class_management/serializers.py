@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from .models import ClassSlot, ClassSlotEnrollment, TuitionSetting, DiscountedPerson, LevelRenewalApproval, Term, OnlineCourse, OnlineCourseEnrollment, PaymentSettings, ClassAttendance
+from .models import ClassSlot, ClassSlotEnrollment, TuitionSetting, DiscountedPerson, LevelRenewalApproval, Term, OnlineCourse, OnlineCourseEnrollment, PaymentSettings, ClassAttendance, OnlineCourseActionRequest
 
 
 class TermSerializer(serializers.ModelSerializer):
@@ -294,6 +294,52 @@ class LevelRenewalApprovalSerializer(serializers.ModelSerializer):
 
 class TransferEnrollmentSerializer(serializers.Serializer):
     target_slot_id = serializers.IntegerField()
+
+
+class OnlineCourseTransferSerializer(serializers.Serializer):
+    target_course_id = serializers.IntegerField()
+
+
+class OnlineCourseActionRequestSerializer(serializers.ModelSerializer):
+    student_name = serializers.SerializerMethodField()
+    online_course_title = serializers.CharField(source='online_course.title', read_only=True)
+    requested_target_course_title = serializers.CharField(source='requested_target_course.title', read_only=True, default=None)
+    action_type_display = serializers.CharField(source='get_action_type_display', read_only=True)
+    status_display = serializers.CharField(source='get_status_display', read_only=True)
+    created_at_jalali = serializers.ReadOnlyField()
+    reviewed_at_jalali = serializers.ReadOnlyField()
+
+    class Meta:
+        model = OnlineCourseActionRequest
+        fields = [
+            'id', 'student', 'student_name', 'online_course', 'online_course_title', 'action_type', 'action_type_display',
+            'card_number', 'receiver_name', 'requested_target_course', 'requested_target_course_title', 'reason',
+            'status', 'status_display', 'admin_note', 'created_at', 'created_at_jalali', 'reviewed_at', 'reviewed_at_jalali',
+        ]
+        read_only_fields = ['id', 'status', 'admin_note', 'created_at', 'reviewed_at']
+
+    def get_student_name(self, obj):
+        return obj.student.get_full_name()
+
+
+class OnlineCourseActionRequestCreateSerializer(serializers.Serializer):
+    online_course_id = serializers.IntegerField()
+    action_type = serializers.ChoiceField(choices=OnlineCourseActionRequest.ActionType.choices)
+    card_number = serializers.CharField(max_length=30, required=False, allow_blank=True)
+    receiver_name = serializers.CharField(max_length=150, required=False, allow_blank=True)
+    requested_target_course_id = serializers.IntegerField(required=False)
+    reason = serializers.CharField(max_length=300, required=False, allow_blank=True)
+
+    def validate(self, data):
+        if data['action_type'] == OnlineCourseActionRequest.ActionType.REFUND:
+            if not data.get('card_number') or not data.get('receiver_name'):
+                raise serializers.ValidationError('برای درخواست استرداد، شماره کارت و نام گیرنده الزامی است')
+        return data
+
+
+class OnlineCourseActionRequestReviewSerializer(serializers.Serializer):
+    target_course_id = serializers.IntegerField(required=False)
+    admin_note = serializers.CharField(max_length=300, required=False, allow_blank=True)
 
 
 class SplitClassSerializer(serializers.Serializer):

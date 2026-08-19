@@ -41,7 +41,7 @@ class User(AbstractUser):
     first_name = models.CharField(max_length=150, validators=[persian_only_validator])
     last_name = models.CharField(max_length=150, validators=[persian_only_validator])
     father_name = models.CharField(max_length=150, blank=True, validators=[persian_only_validator])
-    phone = models.CharField(max_length=11, unique=True)
+    phone = models.CharField(max_length=11, help_text='یکتا بودن این فیلد الزامی نیست — چون معمولاً چند خواهر/برادر با یک شماره موبایلِ والدین ثبت‌نام می‌شوند')
     phone2 = models.CharField(max_length=11, blank=True)
     national_code = models.CharField(max_length=10, unique=True, null=True, blank=True)
     birth_date = models.DateField(null=True, blank=True)

@@ -1,5 +1,6 @@
 from rest_framework import serializers
 from django.contrib.auth.password_validation import validate_password
+from django.db import IntegrityError
 from .models import User, PriceSetting
 from .validators import username_validator, password_validator
 
@@ -213,14 +214,28 @@ class StudentSerializer(serializers.ModelSerializer):
 
     def create(self, validated_data):
         password = validated_data.pop('password', '')
-        username = validated_data.pop('username', '') or validated_data.get('phone')
+        username = validated_data.pop('username', '') or validated_data.get('national_code') or validated_data.get('phone')
         validated_data['role'] = User.Role.STUDENT
+        # چون موبایل دیگر یکتا نیست (چند خواهر/برادر می‌توانند شماره‌ی مشترک داشته باشند)،
+        # اگه نام‌کاربریِ پیش‌فرض (کدملی یا موبایل) از قبل برای یک حساب دیگر گرفته شده باشد،
+        # به‌جای خطای خام دیتابیس، خودمان یک پسوند عددی اضافه می‌کنیم تا ثبت‌نام گیر نکند.
+        base_username = username
+        suffix = 2
+        while User.objects.filter(username=username).exists():
+            username = f'{base_username}-{suffix}'
+            suffix += 1
         user = User(username=username, **validated_data)
         if password:
             user.set_password(password)
         else:
             user.set_unusable_password()
-        user.save()
+        try:
+            user.save()
+        except IntegrityError as exc:
+            msg = str(exc)
+            if 'national_code' in msg:
+                raise serializers.ValidationError({'national_code': 'این کد ملی قبلاً برای یک کاربر دیگر ثبت شده است'})
+            raise serializers.ValidationError({'non_field_errors': 'ثبت اطلاعات با خطا مواجه شد؛ لطفاً دوباره تلاش کنید'})
         return user
 
     def update(self, instance, validated_data):

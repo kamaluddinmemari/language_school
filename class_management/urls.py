@@ -15,6 +15,9 @@ from .views import (
     RejectPendingOnlineCourseEnrollmentView, RefundOnlineCourseEnrollmentView, CreditOnlineCourseToWalletView,
     MyOnlineCourseEnrollmentsView, TeacherOnlineCoursesView, GatewayPaymentInitiateView, PaymentSettingsView,
     MarkAttendanceView, ClassAttendanceListView, BulkClassSlotActionView,
+    OnlineCourseRosterView, OnlineCourseUnenrollView, OnlineCourseTransferOptionsView, OnlineCourseTransferView,
+    StudentCreateOnlineCourseActionRequestView, MyOnlineCourseActionRequestsView,
+    AdminOnlineCourseActionRequestListView, ApproveOnlineCourseActionRequestView, RejectOnlineCourseActionRequestView,
 )
 
 urlpatterns = [
@@ -67,6 +70,15 @@ urlpatterns = [
     path('class-management/courses/<int:pk>/enroll/<int:student_id>/reject-pending/', RejectPendingOnlineCourseEnrollmentView.as_view(), name='online_course_reject_pending'),
     path('class-management/courses/<int:pk>/enroll/<int:student_id>/refund/', RefundOnlineCourseEnrollmentView.as_view(), name='online_course_refund'),
     path('class-management/courses/<int:pk>/enroll/<int:student_id>/to-wallet/', CreditOnlineCourseToWalletView.as_view(), name='online_course_to_wallet'),
+    path('class-management/courses/<int:pk>/roster/', OnlineCourseRosterView.as_view(), name='online_course_roster'),
+    path('class-management/courses/<int:pk>/enroll/<int:student_id>/remove/', OnlineCourseUnenrollView.as_view(), name='online_course_unenroll'),
+    path('class-management/courses/<int:pk>/enroll/<int:student_id>/transfer-options/', OnlineCourseTransferOptionsView.as_view(), name='online_course_transfer_options'),
+    path('class-management/courses/<int:pk>/enroll/<int:student_id>/transfer/', OnlineCourseTransferView.as_view(), name='online_course_transfer'),
+    path('class-management/course-action-requests/', StudentCreateOnlineCourseActionRequestView.as_view(), name='online_course_action_request_create'),
+    path('class-management/my-course-action-requests/', MyOnlineCourseActionRequestsView.as_view(), name='my_online_course_action_requests'),
+    path('class-management/admin-course-action-requests/', AdminOnlineCourseActionRequestListView.as_view(), name='admin_online_course_action_requests'),
+    path('class-management/admin-course-action-requests/<int:pk>/approve/', ApproveOnlineCourseActionRequestView.as_view(), name='approve_online_course_action_request'),
+    path('class-management/admin-course-action-requests/<int:pk>/reject/', RejectOnlineCourseActionRequestView.as_view(), name='reject_online_course_action_request'),
     path('class-management/my-course-enrollments/', MyOnlineCourseEnrollmentsView.as_view(), name='my_course_enrollments'),
     path('class-management/my-online-courses/', TeacherOnlineCoursesView.as_view(), name='teacher_online_courses'),
     path('class-management/gateway-payment/initiate/', GatewayPaymentInitiateView.as_view(), name='gateway_payment_initiate'),
