@@ -60,6 +60,14 @@ class LevelTest(models.Model):
         UNPAID = 'unpaid', 'پرداخت نشده'
         PAID = 'paid', 'پرداخت شده'
 
+    class Mode(models.TextChoices):
+        ONLINE = 'online', 'آنلاین'
+        ONSITE = 'onsite', 'حضوری'
+
+    class PaymentMethod(models.TextChoices):
+        CARD_TO_CARD = 'card', 'کارت به کارت'
+        GATEWAY = 'gateway', 'درگاه پرداخت'
+
     # مشخصات اولیه — فقط توسط مدیر/کانتر وارد می‌شود
     first_name = models.CharField(max_length=150, validators=[persian_only_validator])
     last_name = models.CharField(max_length=150, validators=[persian_only_validator])
@@ -76,6 +84,14 @@ class LevelTest(models.Model):
     )
     price = models.PositiveIntegerField(null=True, blank=True, help_text='قیمت این آزمون — پیش‌فرض از تنظیمات، ولی همیشه قابل ویرایش برای هر مورد')
     payment_status = models.CharField(max_length=10, choices=PaymentStatus.choices, default=PaymentStatus.UNPAID)
+
+    # خواسته‌ی «دکمه‌ی درخواست وقت تعیین سطح» در اپ دانش‌آموز — این چهار فیلد فقط برای
+    # درخواست‌هایی پر می‌شوند که خودِ دانش‌آموز (نه مدیر/کانتر) از اپ ثبت کرده باشد
+    mode = models.CharField(max_length=10, choices=Mode.choices, blank=True, help_text='آنلاین/حضوری — انتخاب دانش‌آموز موقع درخواست از اپ')
+    meeting_link = models.CharField(max_length=300, blank=True, help_text='لینک تعیین‌سطح آنلاین — مدیر بعد از هماهنگی وارد می‌کند و برای دانش‌آموز در اپ نمایش داده می‌شود')
+    self_requested = models.BooleanField(default=False, help_text='آیا این رکورد را خودِ دانش‌آموز از اپ درخواست داده (نه مدیر/کانتر)')
+    payment_method = models.CharField(max_length=10, choices=PaymentMethod.choices, blank=True)
+    receipt_image = models.ImageField(upload_to='level_test_receipts/', null=True, blank=True)
 
     status = models.CharField(max_length=10, choices=Status.choices, default=Status.PENDING)
 

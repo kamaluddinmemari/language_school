@@ -3,6 +3,7 @@ from rest_framework import serializers as drf_serializers
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
+from rest_framework.parsers import MultiPartParser, FormParser
 from django.utils import timezone
 from django.db.models import Q
 from .models import LevelTest, LevelTestPriceSetting, StandardLevel
@@ -10,6 +11,7 @@ from .serializers import LevelTestIntakeSerializer, LevelTestSerializer, LevelTe
 from .levels import get_levels_by_age_group, AGE_GROUP_LABELS
 from accounts.models import User
 from accounts.serializers import StudentSerializer
+from notifications.utils import send_notification
 
 MANAGE_LEVEL_ROLES = ('admin', 'evaluator')
 
@@ -82,7 +84,7 @@ class LevelTestListCreateView(APIView):
 
     def get(self, request):
         user = request.user
-        if user.role not in ('admin', 'evaluator'):
+        if user.role not in ('admin', 'evaluator', 'office'):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
 
         qs = LevelTest.objects.all()
@@ -106,6 +108,90 @@ class LevelTestListCreateView(APIView):
         serializer.is_valid(raise_exception=True)
         obj = serializer.save(created_by=request.user, status=LevelTest.Status.PENDING)
         return Response(LevelTestSerializer(obj).data, status=status.HTTP_201_CREATED)
+
+
+class StudentRequestLevelTestView(APIView):
+    """
+    POST: خواسته‌ی «دکمه‌ی درخواست وقت تعیین سطح» در اپ دانش‌آموز — خودِ دانش‌آموز
+    (چه ورودی جدید بدون هیچ سابقه‌ای، چه هر زمان دیگری که نیاز به تعیین سطح داشته باشد)
+    درخواست می‌دهد: نوع (آنلاین/حضوری) + پرداخت الزامی (کارت‌به‌کارت با رسید، یا درگاه).
+    بعد از ثبت، اسم فرد در لیست «در انتظار تعیین سطح» پنل ادمین ظاهر می‌شود و به مدیر/کانتر
+    نوتیف می‌رود.
+    """
+    permission_classes = [IsAuthenticated]
+    parser_classes = [MultiPartParser, FormParser]
+
+    def post(self, request):
+        student = request.user
+        if student.role != 'student':
+            return Response({'error': 'این بخش فقط برای دانش‌آموزان است'}, status=status.HTTP_403_FORBIDDEN)
+
+        if LevelTest.objects.filter(student=student, status=LevelTest.Status.PENDING).exists():
+            return Response({'error': 'شما از قبل یک درخواست تعیین سطحِ در-انتظار دارید'}, status=status.HTTP_400_BAD_REQUEST)
+
+        mode = request.data.get('mode')
+        if mode not in (LevelTest.Mode.ONLINE, LevelTest.Mode.ONSITE):
+            return Response({'error': 'نوع تعیین سطح (آنلاین/حضوری) را مشخص کنید'}, status=status.HTTP_400_BAD_REQUEST)
+
+        payment_method = request.data.get('payment_method')
+        if payment_method not in (LevelTest.PaymentMethod.CARD_TO_CARD, LevelTest.PaymentMethod.GATEWAY):
+            return Response({'error': 'روش پرداخت نامعتبر است'}, status=status.HTTP_400_BAD_REQUEST)
+        if payment_method == LevelTest.PaymentMethod.GATEWAY:
+            return Response(
+                {'error': 'پرداخت از طریق درگاه فعلاً راه‌اندازی نشده — لطفاً کارت‌به‌کارت را انتخاب کنید'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        receipt = request.FILES.get('receipt')
+        if not receipt:
+            return Response({'error': 'تصویر رسید کارت‌به‌کارت الزامی است'}, status=status.HTTP_400_BAD_REQUEST)
+
+        if not student.gender:
+            return Response({'error': 'ابتدا جنسیت خود را در پروفایل تکمیل کنید'}, status=status.HTTP_400_BAD_REQUEST)
+
+        setting = LevelTestPriceSetting.objects.order_by('-updated_at').first()
+        price = setting.price if setting else 0
+
+        obj = LevelTest.objects.create(
+            first_name=student.first_name, last_name=student.last_name, father_name=student.father_name,
+            birth_date=student.birth_date, national_code=student.national_code, phone=student.phone,
+            gender=student.gender, student=student, price=price, payment_status=LevelTest.PaymentStatus.UNPAID,
+            mode=mode, payment_method=payment_method, receipt_image=receipt, self_requested=True,
+            status=LevelTest.Status.PENDING, created_by=student,
+        )
+
+        mode_label = 'حضوری' if mode == LevelTest.Mode.ONSITE else 'آنلاین'
+        admins = list(User.objects.filter(role__in=['admin', 'office']))
+        send_notification(
+            sender=None, recipients=admins,
+            title='درخواست وقت تعیین سطح جدید',
+            body=f'{student.first_name} {student.last_name} درخواست تعیین سطح {mode_label} داد و منتظر تعیین وقت است',
+        )
+
+        return Response(LevelTestSerializer(obj).data, status=status.HTTP_201_CREATED)
+
+
+class MyLevelTestsView(generics.ListAPIView):
+    """GET: سوابق تعیین‌سطح خودِ دانش‌آموز — برای نمایش وضعیت/زمان/لینک/نتیجه در صفحه‌ی اصلی و صفحه‌ی ترمیک/تعیین‌سطح اپ"""
+    permission_classes = [IsAuthenticated]
+    serializer_class = LevelTestSerializer
+
+    def get_queryset(self):
+        return LevelTest.objects.filter(student=self.request.user).order_by('-created_at')
+
+
+class LevelTestPaymentInfoView(APIView):
+    """GET: شماره‌کارت/نام صاحب‌کارت برای پرداخت کارت‌به‌کارتِ تعیین سطح — همان تنظیمات مشترکِ پرداخت پروژه"""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        from class_management.models import PaymentSettings
+        from class_management.serializers import PaymentSettingsSerializer
+        setting = LevelTestPriceSetting.objects.order_by('-updated_at').first()
+        return Response({
+            'price': setting.price if setting else 0,
+            'payment_settings': PaymentSettingsSerializer(PaymentSettings.get_solo()).data,
+        })
 
 
 class LevelTestPriceSettingView(APIView):
@@ -143,7 +229,7 @@ class LevelTestDetailView(APIView):
         return LevelTest.objects.get(pk=pk)
 
     def get(self, request, pk):
-        if request.user.role not in ('admin', 'evaluator'):
+        if request.user.role not in ('admin', 'evaluator', 'office'):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         try:
             obj = self._get_visible(request, pk)
@@ -153,7 +239,7 @@ class LevelTestDetailView(APIView):
 
     def patch(self, request, pk):
         user = request.user
-        if user.role not in ('admin', 'evaluator'):
+        if user.role not in ('admin', 'evaluator', 'office'):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         try:
             obj = self._get_visible(request, pk)
@@ -173,6 +259,11 @@ class LevelTestDetailView(APIView):
                 data['evaluator_name'] = f"{user.first_name} {user.last_name}"
         if data.get('level') and not data.get('test_date') and not obj.test_date:
             data['test_date'] = timezone.now().isoformat()
+
+        # برای تشخیصِ «تازه اضافه شده» (تا فقط همون لحظه نوتیف بفرستیم، نه هر بار ویرایش)
+        had_test_date_before = bool(obj.test_date)
+        had_meeting_link_before = bool(obj.meeting_link)
+        was_completed_before = obj.status == LevelTest.Status.COMPLETED
 
         serializer = LevelTestSerializer(obj, data=data, partial=True)
         serializer.is_valid(raise_exception=True)
@@ -207,6 +298,37 @@ class LevelTestDetailView(APIView):
                 # اگه به هر دلیلی نامعتبر بود (مثلاً کد ملی تکراری با نقش غیردانش‌آموز)، بی‌صدا رد می‌شویم —
                 # مدیر می‌تواند بعداً دستی از پنل مدیریت دانش‌آموزان وصلش کند، بدون اینکه ثبت نتیجه‌ی
                 # تعیین‌سطح به‌خاطر این خطا مسدود شود
+
+        # خواسته‌ی «سطح تخصیص‌داده‌شده به‌عنوان سطح اصلی فرد در نظر گرفته شود» — همین که نتیجه
+        # تکمیل شد و به یک حساب دانش‌آموزی وصل بود، سطح را روی پروفایل کاربر هم می‌نویسیم تا
+        # هرجای دیگر سیستم که «سطح دانش‌آموز» لازم است (ثبت‌نام کلاس، گزارش‌ها، ...) همین مقدار
+        # به‌عنوان مرجع استفاده شود.
+        if updated.status == LevelTest.Status.COMPLETED and updated.level and updated.student:
+            if updated.student.language_level != updated.level:
+                updated.student.language_level = updated.level
+                updated.student.save(update_fields=['language_level'])
+
+        # نوتیف به دانش‌آموز — فقط در همون لحظه‌ای که هرکدوم از این‌ها *تازه* مقداردهی می‌شن،
+        # نه هر بار که مدیر رکورد رو ویرایش می‌کنه
+        if updated.student:
+            if updated.test_date and not had_test_date_before:
+                send_notification(
+                    sender=user, recipients=[updated.student],
+                    title='وقت تعیین سطح شما مشخص شد',
+                    body=f'وقت تعیین سطح شما: {updated.test_date_jalali} ({updated.get_mode_display() or "حضوری"})',
+                )
+            if updated.meeting_link and not had_meeting_link_before:
+                send_notification(
+                    sender=user, recipients=[updated.student],
+                    title='لینک تعیین سطح آنلاین شما آماده شد',
+                    body='لینک تعیین سطح آنلاینِ شما در اپ در دسترس است — سر وقتِ تعیین‌شده وارد شوید',
+                )
+            if updated.status == LevelTest.Status.COMPLETED and not was_completed_before and updated.level:
+                send_notification(
+                    sender=user, recipients=[updated.student],
+                    title='نتیجه‌ی تعیین سطح شما آماده شد',
+                    body=f'سطح نهایی شما: {updated.level}',
+                )
 
         return Response(LevelTestSerializer(updated).data)
 

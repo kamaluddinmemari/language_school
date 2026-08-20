@@ -32,17 +32,22 @@ class LevelTestSerializer(serializers.ModelSerializer):
     age = serializers.ReadOnlyField()
     display_evaluator_name = serializers.ReadOnlyField()
     status_display = serializers.CharField(source='get_status_display', read_only=True)
+    mode_display = serializers.CharField(source='get_mode_display', read_only=True)
+    payment_method_display = serializers.CharField(source='get_payment_method_display', read_only=True)
+    payment_status_display = serializers.CharField(source='get_payment_status_display', read_only=True)
 
     class Meta:
         model = LevelTest
         fields = [
             'id', 'first_name', 'last_name', 'father_name', 'birth_date', 'birth_date_jalali', 'age',
             'national_code', 'phone', 'gender', 'student', 'status', 'status_display', 'price', 'payment_status',
+            'payment_status_display', 'mode', 'mode_display', 'meeting_link', 'self_requested',
+            'payment_method', 'payment_method_display', 'receipt_image',
             'age_group', 'level', 'test_date', 'test_date_jalali',
             'evaluator', 'evaluator_name', 'display_evaluator_name', 'notes', 'created_by',
             'created_at', 'created_at_jalali', 'updated_at',
         ]
-        read_only_fields = ['created_by', 'created_at', 'updated_at', 'status']
+        read_only_fields = ['created_by', 'created_at', 'updated_at', 'status', 'self_requested']
 
     def validate(self, attrs):
         age_group = attrs.get('age_group', getattr(self.instance, 'age_group', None))

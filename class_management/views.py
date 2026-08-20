@@ -2454,6 +2454,9 @@ class BulkClassSlotActionView(APIView):
       time_slots: [...]  (اختیاری — فقط برای زوج/فرد؛ اگه خالی باشه یعنی همه‌ی ساعت‌ها)
       term_id: عدد (اختیاری)
       is_online: true/false (اختیاری — اگه نیاد یعنی فرقی نکنه)
+      slot_ids: [عدد, ...]  (اختیاری — اگه بیاد، فقط همین کلاس‌های مشخص‌شده از بین منطبق‌ها را
+                 هدف می‌گیرد؛ برای وقتی که پنل ادمین لیست منطبق‌ها را نشان می‌دهد و کاربر مشخصاً
+                 بعضی‌ها را تیک می‌زند، نه لزوماً همه‌ی منطبق‌ها)
       fields: {teacher_name, assigned_level, capacity, gender, notes, meeting_link, is_online}  (فقط برای action=edit؛ فقط فیلدهایی که واقعاً می‌خوای عوض کنی رو بفرست)
     """
     permission_classes = [IsAuthenticated]
@@ -2468,6 +2471,7 @@ class BulkClassSlotActionView(APIView):
         time_slots = request.data.get('time_slots') or []
         term_id = request.data.get('term_id')
         is_online_filter = request.data.get('is_online')
+        slot_ids = request.data.get('slot_ids') or []
 
         if action not in ('delete', 'edit'):
             return Response({'error': "action باید 'delete' یا 'edit' باشد"}, status=status.HTTP_400_BAD_REQUEST)
@@ -2481,6 +2485,8 @@ class BulkClassSlotActionView(APIView):
             qs = qs.filter(term_id=term_id)
         if is_online_filter is not None:
             qs = qs.filter(is_online=is_online_filter)
+        if slot_ids:
+            qs = qs.filter(pk__in=slot_ids)
 
         match_count = qs.count()
         if match_count == 0:

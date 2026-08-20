@@ -121,37 +121,94 @@ class BookSalesHistoryView(generics.ListAPIView):
 
 
 class LibraryStatsView(APIView):
-    """GET: آمار تجمیعی لحظه‌ای کل کتابخانه"""
+    """
+    GET: آمار تجمیعی کتابخانه — با پارامترهای اختیاری ?date_from=YYYY-MM-DD و ?date_to=YYYY-MM-DD
+    همه‌ی آمارهای فروش/تأمین موجودی/سود را فقط در همان بازه محاسبه می‌کند (هم در سطح کل کتابخانه
+    هم در سطح هر کتاب، از طریق فیلدهای period_*). موجودی فعلی (current_stock) همیشه لحظه‌ای و
+    مستقل از فیلتر تاریخ است، چون سابقه‌ی روزانه‌ای از موجودی نگه‌داری نمی‌شود.
+    """
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
         if request.user.role not in MANAGE_ROLES:
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
+
+        date_from = request.query_params.get('date_from') or None
+        date_to = request.query_params.get('date_to') or None
+
+        sales_qs = BookSale.objects.all()
+        additions_qs = BookStockAddition.objects.all()
+        if date_from:
+            sales_qs = sales_qs.filter(sold_at__date__gte=date_from)
+            additions_qs = additions_qs.filter(added_at__date__gte=date_from)
+        if date_to:
+            sales_qs = sales_qs.filter(sold_at__date__lte=date_to)
+            additions_qs = additions_qs.filter(added_at__date__lte=date_to)
+
         books = Book.objects.all()
         total_titles = books.count()
         total_stock = sum(b.current_stock for b in books)
         total_stock_value = sum(b.stock_value for b in books)
-        total_sales_revenue = sum(b.total_sales_revenue for b in books)
-        total_sales_quantity = sum(b.total_sales_quantity for b in books)
         total_predicted_need = sum(b.predicted_need for b in books)
-        total_cost = sum(b.total_cost for b in books)
-        total_cost_of_goods_sold = sum(b.cost_of_goods_sold for b in books)
-        total_profit = sum(b.total_profit for b in books)
+
+        books_data = []
+        period_sales_quantity = 0
+        period_sales_revenue = 0
+        period_stock_added = 0
+        period_stock_added_cost = 0
+        period_cost_of_goods_sold = 0
+        period_profit = 0
+
+        for b in books:
+            b_sales = list(sales_qs.filter(book=b))
+            b_additions = list(additions_qs.filter(book=b))
+            b_sales_qty = sum(s.quantity for s in b_sales)
+            b_sales_rev = sum(s.total_price for s in b_sales)
+            b_added_qty = sum(a.quantity for a in b_additions)
+            b_added_cost = b.purchase_price * b_added_qty
+            b_cogs = b.purchase_price * b_sales_qty
+            b_profit = b_sales_rev - b_cogs
+
+            period_sales_quantity += b_sales_qty
+            period_sales_revenue += b_sales_rev
+            period_stock_added += b_added_qty
+            period_stock_added_cost += b_added_cost
+            period_cost_of_goods_sold += b_cogs
+            period_profit += b_profit
+
+            data = BookSerializer(b).data
+            data['period_sales_quantity'] = b_sales_qty
+            data['period_sales_revenue'] = b_sales_rev
+            data['period_stock_added'] = b_added_qty
+            data['period_stock_added_cost'] = b_added_cost
+            data['period_cost_of_goods_sold'] = b_cogs
+            data['period_profit'] = b_profit
+            books_data.append(data)
 
         now_local = timezone.localtime(timezone.now())
         generated_at_jalali = jdatetime.datetime.fromgregorian(datetime=now_local).strftime('%Y/%m/%d - %H:%M:%S')
 
         return Response({
+            'date_from': date_from,
+            'date_to': date_to,
             'total_titles': total_titles,
             'total_stock': total_stock,
             'total_stock_value': total_stock_value,
-            'total_sales_revenue': total_sales_revenue,
-            'total_sales_quantity': total_sales_quantity,
             'total_predicted_need': total_predicted_need,
-            'total_cost': total_cost,
-            'total_cost_of_goods_sold': total_cost_of_goods_sold,
-            'total_profit': total_profit,
+            # آمار درون‌بازه‌ای (اگه تاریخ داده نشه، یعنی از ابتدا تا الان = همون آمار کلی سابق)
+            'period_sales_quantity': period_sales_quantity,
+            'period_sales_revenue': period_sales_revenue,
+            'period_stock_added': period_stock_added,
+            'period_stock_added_cost': period_stock_added_cost,
+            'period_cost_of_goods_sold': period_cost_of_goods_sold,
+            'period_profit': period_profit,
+            # نگه‌داشته‌شده برای سازگاری با هر کد قبلی‌ای که به این اسم‌ها متکی بود (همیشه کل‌عمر، فیلترنشده)
+            'total_sales_revenue': sum(b.total_sales_revenue for b in books),
+            'total_sales_quantity': sum(b.total_sales_quantity for b in books),
+            'total_cost': sum(b.total_cost for b in books),
+            'total_cost_of_goods_sold': sum(b.cost_of_goods_sold for b in books),
+            'total_profit': sum(b.total_profit for b in books),
             'generated_at': now_local.isoformat(),
             'generated_at_jalali': generated_at_jalali,
-            'books': BookSerializer(books, many=True).data,
+            'books': books_data,
         })
