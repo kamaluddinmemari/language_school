@@ -18,6 +18,36 @@ from .serializers import (
 )
 
 
+class PendingPrivateClassRequestsView(generics.ListAPIView):
+    """
+    GET: خواسته‌ی «پاپ‌آپ درخواست کلاس خصوصیِ جدید در صفحه‌ی اصلی پنل ادمین» — فقط
+    درخواست‌های کلاسِ خصوصیِ در-انتظار که هنوز مدیر ندیده/نبسته (seen_by_admin=False).
+    """
+    permission_classes = [IsAuthenticated]
+    serializer_class = ClassRequestAdminSerializer
+
+    def get_queryset(self):
+        if self.request.user.role not in ('admin', 'evaluator', 'office'):
+            return ClassRequest.objects.none()
+        return ClassRequest.objects.filter(
+            class_type=ClassRequest.ClassType.PRIVATE,
+            status=ClassRequest.Status.PENDING,
+            seen_by_admin=False,
+        ).order_by('-created_at')
+
+
+class MarkClassRequestsSeenView(APIView):
+    """POST: با زدن دکمه‌ی «بستن» روی پاپ‌آپ، همین درخواست‌ها seen_by_admin=True می‌شوند تا دیگر خودکار باز نشوند"""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        if request.user.role not in ('admin', 'evaluator', 'office'):
+            return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
+        ids = request.data.get('ids') or []
+        ClassRequest.objects.filter(id__in=ids).update(seen_by_admin=True)
+        return Response({'message': 'علامت‌گذاری شد'})
+
+
 class ClassRequestListCreateView(generics.ListCreateAPIView):
     permission_classes = [IsAuthenticated]
 

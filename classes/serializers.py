@@ -48,7 +48,7 @@ class ClassRequestAdminSerializer(serializers.ModelSerializer):
             'session_duration', 'session_count', 'sessions',
             'total_price', 'teacher_share', 'school_share',
             'teacher_payment_status', 'teacher_payment_date', 'teacher_payment_amount',
-            'receipt', 'amount', 'payment_status', 'status', 'notes',
+            'receipt', 'amount', 'payment_status', 'status', 'seen_by_admin', 'notes',
             'is_completed', 'completed_at', 'completed_at_jalali',
             'satisfaction', 'satisfaction_text', 'satisfaction_approved',
             'created_at', 'created_at_jalali', 'updated_at',

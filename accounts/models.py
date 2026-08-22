@@ -122,6 +122,9 @@ class ClassRequest(models.Model):
     amount = models.PositiveIntegerField(default=0)
     payment_status = models.CharField(max_length=10, choices=PaymentStatus.choices, default=PaymentStatus.UNPAID)
     status = models.CharField(max_length=10, choices=Status.choices, default=Status.PENDING)
+    # خواسته‌ی «پاپ‌آپ درخواست کلاس خصوصیِ جدید در صفحه‌ی اصلی پنل ادمین» — تا وقتی مدیر
+    # پنجره‌ی این درخواست را ندیده/نبسته، این False می‌ماند و باعث باز شدن خودکار پاپ‌آپ می‌شود
+    seen_by_admin = models.BooleanField(default=False)
     notes = models.TextField(blank=True)
     is_completed = models.BooleanField(default=False)
     completed_at = models.DateTimeField(null=True, blank=True)

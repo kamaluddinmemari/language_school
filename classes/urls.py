@@ -16,9 +16,13 @@ from .views import (
     ClassStatsView,
     ClassSessionListView,
     ClassSessionUpdateView,
+    PendingPrivateClassRequestsView,
+    MarkClassRequestsSeenView,
 )
 
 urlpatterns = [
+    path('classes/pending-private-popup/', PendingPrivateClassRequestsView.as_view(), name='class_pending_private_popup'),
+    path('classes/pending-private-popup/mark-seen/', MarkClassRequestsSeenView.as_view(), name='class_pending_private_popup_seen'),
     path('classes/', ClassRequestListCreateView.as_view(), name='class_list'),
     path('classes/stats/', ClassStatsView.as_view(), name='class_stats'),
     path('classes/<int:pk>/', ClassRequestDetailView.as_view(), name='class_detail'),
