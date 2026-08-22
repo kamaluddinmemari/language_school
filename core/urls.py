@@ -21,6 +21,7 @@ urlpatterns = [
     path('api/', include('leads.urls')),
     path('api/', include('class_management.urls')),
     path('api/', include('payroll.urls')),
+    path('api/', include('reports.urls')),
 ]
 
 if settings.DEBUG:

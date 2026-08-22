@@ -50,6 +50,11 @@ class User(AbstractUser):
     teacher_level = models.CharField(max_length=50, blank=True)
     avatar = models.ImageField(upload_to='avatars/', null=True, blank=True)
     wallet_balance = models.PositiveIntegerField(default=0, help_text='موجودی کیف پول دانش‌آموز (تومان) — از طریق «انتقال به کیف پول» یا واریز دستی مدیر شارژ می‌شود')
+    needs_editing = models.BooleanField(
+        default=False,
+        help_text='برای دانش‌آموزی که فقط با اطلاعات حداقلی از «ثبت‌نام مستقیم» ساخته شده (بدون تاریخ تولد/آدرس و...)؛ '
+                   'در «مدیریت دانش‌آموزان» علامت‌گذاری می‌شود تا مدیر یادش بماند اطلاعات را بعداً تکمیل کند.'
+    )
 
     def __str__(self):
         return f"{self.get_full_name()} ({self.role})"
@@ -122,9 +127,6 @@ class ClassRequest(models.Model):
     amount = models.PositiveIntegerField(default=0)
     payment_status = models.CharField(max_length=10, choices=PaymentStatus.choices, default=PaymentStatus.UNPAID)
     status = models.CharField(max_length=10, choices=Status.choices, default=Status.PENDING)
-    # خواسته‌ی «پاپ‌آپ درخواست کلاس خصوصیِ جدید در صفحه‌ی اصلی پنل ادمین» — تا وقتی مدیر
-    # پنجره‌ی این درخواست را ندیده/نبسته، این False می‌ماند و باعث باز شدن خودکار پاپ‌آپ می‌شود
-    seen_by_admin = models.BooleanField(default=False)
     notes = models.TextField(blank=True)
     is_completed = models.BooleanField(default=False)
     completed_at = models.DateTimeField(null=True, blank=True)

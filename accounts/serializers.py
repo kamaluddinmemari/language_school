@@ -195,7 +195,7 @@ class StudentSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'first_name', 'last_name', 'father_name', 'phone', 'phone2',
             'national_code', 'birth_date', 'gender', 'language_level',
-            'username', 'password', 'has_app_account', 'wallet_balance',
+            'username', 'password', 'has_app_account', 'wallet_balance', 'needs_editing',
         ]
         read_only_fields = ['wallet_balance']
 

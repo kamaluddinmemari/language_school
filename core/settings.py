@@ -49,6 +49,7 @@ INSTALLED_APPS = [
     'leads',
     'class_management',
     'payroll',
+    'reports',
     'django_jalali',
 ]
 
