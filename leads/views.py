@@ -26,11 +26,16 @@ class NewLeadListView(generics.ListCreateAPIView):
         return NewLead.objects.all()
 
     def create(self, request, *args, **kwargs):
+        from accounts.services import sync_student_from_lead
         if request.user.role not in ('admin', 'office'):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        serializer.save(created_by=request.user)
+        lead = serializer.save(created_by=request.user)
+        sync_student_from_lead(
+            first_name=lead.first_name, last_name=lead.last_name,
+            phone=lead.phone, national_code=lead.national_code,
+        )
         return Response(serializer.data, status=status.HTTP_201_CREATED)
 
 
@@ -108,11 +113,17 @@ class UnregisteredStudentListView(generics.ListCreateAPIView):
 
     def create(self, request, *args, **kwargs):
         from accounts.models import User
+        from accounts.services import sync_student_from_lead
         if request.user.role not in User.TEACHER_LIKE_ROLES and request.user.role not in ('admin', 'office'):
             return Response({'error': 'فقط استاد یا مدیر می‌تواند ثبت کند'}, status=status.HTTP_403_FORBIDDEN)
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        serializer.save(submitted_by=request.user)
+        lead = serializer.save(submitted_by=request.user)
+        sync_student_from_lead(
+            first_name=lead.first_name, last_name=lead.last_name,
+            phone=lead.phone, national_code=lead.national_code,
+            language_level=lead.class_level,
+        )
         return Response(serializer.data, status=status.HTTP_201_CREATED)
 
 
@@ -201,11 +212,16 @@ class DebtorListView(generics.ListCreateAPIView):
         return Debtor.objects.all()
 
     def create(self, request, *args, **kwargs):
+        from accounts.services import sync_student_from_lead
         if request.user.role not in ('admin', 'office'):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        serializer.save(created_by=request.user)
+        debtor = serializer.save(created_by=request.user)
+        sync_student_from_lead(
+            first_name=debtor.first_name, last_name=debtor.last_name,
+            phone=debtor.phone, language_level=debtor.class_level,
+        )
         return Response(serializer.data, status=status.HTTP_201_CREATED)
 
 
