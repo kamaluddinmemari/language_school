@@ -204,8 +204,12 @@ class PriceSettingView(APIView):
         return price_setting
 
     def get(self, request):
+        from class_management.models import PaymentSettings
+        from class_management.serializers import PaymentSettingsSerializer
         serializer = PriceSettingSerializer(self.get_current())
-        return Response(serializer.data)
+        data = dict(serializer.data)
+        data['payment_settings'] = PaymentSettingsSerializer(PaymentSettings.get_solo()).data
+        return Response(data)
 
     def patch(self, request):
         if request.user.role not in ('admin', 'office'):
