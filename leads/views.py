@@ -109,16 +109,34 @@ class UnregisteredStudentListView(generics.ListCreateAPIView):
     def get_queryset(self):
         if self.request.user.role not in ('admin', 'office'):
             return UnregisteredStudent.objects.none()
-        return UnregisteredStudent.objects.all()
+        qs = UnregisteredStudent.objects.all()
+        term_id = self.request.query_params.get('term_id')
+        if term_id:
+            from class_management.models import Term
+            from django.db.models import Q
+            try:
+                term = Term.objects.get(pk=term_id)
+            except Term.DoesNotExist:
+                return qs.none()
+            earlier_terms = Term.objects.filter(
+                Q(year__lt=term.year) | Q(year=term.year, term_number__lt=term.term_number)
+            )
+            qs = qs.filter(
+                Q(term_id=term_id) |
+                (Q(term__in=earlier_terms) & ~Q(status=UnregisteredStudent.Status.REGISTERED))
+            )
+        return qs
 
     def create(self, request, *args, **kwargs):
         from accounts.models import User
         from accounts.services import sync_student_from_lead
+        from .models import get_current_term
         if request.user.role not in User.TEACHER_LIKE_ROLES and request.user.role not in ('admin', 'office'):
             return Response({'error': 'فقط استاد یا مدیر می‌تواند ثبت کند'}, status=status.HTTP_403_FORBIDDEN)
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        lead = serializer.save(submitted_by=request.user)
+        extra = {} if serializer.validated_data.get('term') else {'term': get_current_term()}
+        lead = serializer.save(submitted_by=request.user, **extra)
         sync_student_from_lead(
             first_name=lead.first_name, last_name=lead.last_name,
             phone=lead.phone, national_code=lead.national_code,
@@ -209,15 +227,33 @@ class DebtorListView(generics.ListCreateAPIView):
     def get_queryset(self):
         if self.request.user.role not in ('admin', 'office'):
             return Debtor.objects.none()
-        return Debtor.objects.all()
+        qs = Debtor.objects.all()
+        term_id = self.request.query_params.get('term_id')
+        if term_id:
+            from class_management.models import Term
+            from django.db.models import Q
+            try:
+                term = Term.objects.get(pk=term_id)
+            except Term.DoesNotExist:
+                return qs.none()
+            earlier_terms = Term.objects.filter(
+                Q(year__lt=term.year) | Q(year=term.year, term_number__lt=term.term_number)
+            )
+            qs = qs.filter(
+                Q(term_id=term_id) |
+                (Q(term__in=earlier_terms) & ~Q(status=Debtor.Status.SETTLED))
+            )
+        return qs
 
     def create(self, request, *args, **kwargs):
         from accounts.services import sync_student_from_lead
+        from .models import get_current_term
         if request.user.role not in ('admin', 'office'):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        debtor = serializer.save(created_by=request.user)
+        extra = {} if serializer.validated_data.get('term') else {'term': get_current_term()}
+        debtor = serializer.save(created_by=request.user, **extra)
         sync_student_from_lead(
             first_name=debtor.first_name, last_name=debtor.last_name,
             phone=debtor.phone, language_level=debtor.class_level,

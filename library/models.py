@@ -23,6 +23,7 @@ class Book(models.Model):
         TEEN = 'teen', 'نوجوانان (Project)'
         ADULT = 'adult', 'بزرگسال (Evolve)'
         OXFORD = 'oxford', 'آکسفورد'
+        STORY = 'story', 'داستان'
         OTHER = 'other', 'سایر'
 
     title = models.CharField(max_length=150, unique=True)

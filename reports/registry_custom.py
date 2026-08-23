@@ -113,7 +113,7 @@ register_source(DataSource(
     fields=[
         SourceField('title', 'عنوان کتاب', 'title'),
         SourceField('category', 'دسته', 'category', 'choice', {
-            'kids': 'کودکان', 'teen': 'نوجوانان', 'adult': 'بزرگسال', 'oxford': 'آکسفورد', 'other': 'سایر'}),
+            'kids': 'کودکان', 'teen': 'نوجوانان', 'adult': 'بزرگسال', 'oxford': 'آکسفورد', 'story': 'داستان', 'other': 'سایر'}),
         SourceField('current_stock', 'موجودی فعلی', 'current_stock', 'number'),
         SourceField('initial_stock', 'موجودی اولیه', 'initial_stock', 'number'),
         SourceField('predicted_students', 'پیش‌بینی نیاز', 'predicted_students', 'number'),
@@ -174,6 +174,7 @@ register_source(DataSource(
     fields=[
         SourceField('first_name', 'نام', 'first_name'),
         SourceField('last_name', 'نام‌خانوادگی', 'last_name'),
+        SourceField('national_code', 'کد ملی', 'national_code'),
         SourceField('phone', 'موبایل', 'phone'),
         SourceField('teacher_level', 'سطح تدریس', 'teacher_level'),
         SourceField('role', 'نقش', 'role', 'choice', {'teacher': 'معلم', 'evaluator': 'مدیر آموزش'}),

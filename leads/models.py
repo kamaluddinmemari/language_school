@@ -11,6 +11,20 @@ def _jalali(dt):
     return jdatetime.datetime.fromgregorian(datetime=local_dt).strftime('%Y/%m/%d - %H:%M')
 
 
+def get_current_term():
+    """
+    ترمی که تاریخ امروز داخل بازه‌ی start_date/end_date آن است؛ اگر هیچ ترمی امروز را
+    پوشش نمی‌دهد (مثلاً بین دو ترم)، جدیدترین ترم (بر اساس سال و شماره‌ترم) برگردانده
+    می‌شود. اگر اصلاً ترمی تعریف نشده باشد، None.
+    """
+    from class_management.models import Term
+    today = timezone.localdate()
+    current = Term.objects.filter(start_date__lte=today, end_date__gte=today).first()
+    if current:
+        return current
+    return sorted(Term.objects.all(), key=lambda t: (t.year, t.term_number))[-1] if Term.objects.exists() else None
+
+
 class NewLead(models.Model):
     """لیست انتظار ورودی‌های جدید — سرنخ‌های تازه که هنوز مشخص نیست ثبت‌نام می‌کنند یا نه"""
 
@@ -94,6 +108,10 @@ class UnregisteredStudent(models.Model):
 
     status = models.CharField(max_length=10, choices=Status.choices, default=Status.TRACKING)
     registered_at = models.DateTimeField(null=True, blank=True)
+    term = models.ForeignKey(
+        'class_management.Term', on_delete=models.SET_NULL, null=True, blank=True, related_name='+',
+        help_text='ترمی که این فرد در آن ثبت شده — برای فیلتر ترمی در صفحه‌ی پیگیری',
+    )
 
     submitted_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='submitted_unregistered_students')
     created_at = models.DateTimeField(auto_now_add=True)
@@ -118,6 +136,10 @@ class UnregisteredStudent(models.Model):
     def last_followup_at_jalali(self):
         last = self.followups.order_by('-followed_up_at').first()
         return _jalali(last.followed_up_at) if last else None
+
+    @property
+    def term_title(self):
+        return self.term.title if self.term else None
 
     def __str__(self):
         return f"{self.first_name} {self.last_name} — {self.class_level}"
@@ -154,6 +176,10 @@ class Debtor(models.Model):
 
     status = models.CharField(max_length=10, choices=Status.choices, default=Status.PENDING)
     settled_at = models.DateTimeField(null=True, blank=True)
+    term = models.ForeignKey(
+        'class_management.Term', on_delete=models.SET_NULL, null=True, blank=True, related_name='+',
+        help_text='ترمی که این فرد در آن ثبت شده — برای فیلتر ترمی در صفحه‌ی پیگیری',
+    )
 
     created_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
     created_at = models.DateTimeField(auto_now_add=True)
@@ -178,6 +204,10 @@ class Debtor(models.Model):
     def last_followup_at_jalali(self):
         last = self.followups.order_by('-followed_up_at').first()
         return _jalali(last.followed_up_at) if last else None
+
+    @property
+    def term_title(self):
+        return self.term.title if self.term else None
 
     def __str__(self):
         return f"{self.first_name} {self.last_name} — {self.debt_amount} تومان"
