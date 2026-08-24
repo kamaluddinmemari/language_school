@@ -227,16 +227,18 @@ class MonthlyPayroll(models.Model):
     @property
     def seniority_base_annual(self):
         """
-        پایه سنوات سالانه = معادل یک ماه حقوق پایه (base_salary، نه کل مزایا)، به ازای هرسال سابقه‌ی
-        همین کارمند — فقط برای کارمندانی با بیش از یک سال سابقه محاسبه می‌شود.
-        مثال: کارمندی با ۳ سال سابقه = ۳ × یک ماه حقوق پایه.
+        پایه سنوات سالانه = معادل یک ماه حقوق پایه (base_salary، نه کل مزایا) — فقط برای
+        کارمندانی با بیش از یک سال سابقه محاسبه می‌شود.
+
+        نکته‌ی مهم: این عدد در تعداد سال‌های سابقه ضرب نمی‌شود، چون سنوات در این سیستم
+        «پاداش پایان خدمت/بازنشستگی» (که یک‌جا و انباشته پرداخت می‌شود) نیست — بلکه هرسال
+        با کارمند تسویه می‌شود: هر سال دوباره یک ماه حقوق پایه محاسبه و طی همان سال به‌صورت
+        ماهانه (seniority_base_monthly) پرداخت و تسویه می‌شود.
         """
         if not self.is_seniority_eligible:
             return 0
         sp = self._salary_profile
-        if not sp:
-            return 0
-        return sp.base_salary * self.tenure_years()
+        return sp.base_salary if sp else 0
 
     @property
     def seniority_base_monthly(self):
