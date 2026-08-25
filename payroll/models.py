@@ -255,10 +255,13 @@ class MonthlyPayroll(models.Model):
 
     @property
     def gross_base_monthly(self):
-        """جمع ناخالص ماهانه‌ی مصوب برای همین کارمند = مبالغ مشترک (سطح کل مجموعه) + سنوات فردیِ خودش"""
+        """جمع ناخالص ماهانه‌ی مصوب برای همین کارمند = مبالغ کاملاً مشترک (پایه+خوار‌وبار+مسکن) +
+        حق تاهل/اولاد فردیِ همین کارمند (مشروط به وضعیت تاهل/تعداد فرزند خودش) + سنوات فردیِ خودش"""
         sp = self._salary_profile
-        shared = sp.gross_base_monthly_shared if sp else 0
-        return shared + self.seniority_base_monthly
+        if not sp:
+            return 0
+        shared_base = sp.base_salary + sp.food_allowance + sp.housing_allowance_monthly
+        return shared_base + self.marriage_allowance_monthly + self.child_allowance_monthly + self.seniority_base_monthly
 
     @property
     def marital_status(self):
@@ -277,6 +280,29 @@ class MonthlyPayroll(models.Model):
             return self.user.employee_profile.children_count
         except Exception:
             return 0
+
+    @property
+    def marriage_allowance_monthly(self):
+        """
+        حق تاهل ماهانه‌ی همین کارمند — فقط اگر خودِ این کارمند (طبق EmployeeProfile.marital_status)
+        متاهل باشد؛ برای کارمند مجرد همیشه صفر است (قبلاً به‌اشتباه برای همه یکسان محاسبه می‌شد).
+        """
+        sp = self._salary_profile
+        if not sp:
+            return 0
+        return sp.marriage_allowance if self.marital_status == 'married' else 0
+
+    @property
+    def child_allowance_monthly(self):
+        """
+        حق اولاد ماهانه‌ی همین کارمند = نرخ هر فرزند (sp.child_allowance) × تعداد فرزندان واقعیِ
+        همین کارمند (EmployeeProfile.children_count)؛ برای کارمند بدون فرزند صفر است (چه مجرد چه
+        متاهل بدون فرزند) — قبلاً به‌اشتباه برای همه یکسان محاسبه می‌شد.
+        """
+        sp = self._salary_profile
+        if not sp or not self.children_count:
+            return 0
+        return sp.child_allowance * self.children_count
 
     @property
     def auto_worked_hours(self):
@@ -298,15 +324,22 @@ class MonthlyPayroll(models.Model):
         """
         معادلِ ریالیِ هرکدام از اجزای حقوق (پایه، خوار و بار، تاهل، اولاد، سنوات، مسکن)، متناسب با
         نسبت ساعات کارکرد واقعیِ این ماه به ساعت استاندارد همین ماه — برای نمایش تفکیکی در فیش حقوقی.
-        سنوات چون فردیه، جدا از مبالغ مشترک محاسبه و اضافه می‌شود.
+        تاهل/اولاد/سنوات چون فردی‌اند (به وضعیت خودِ همین کارمند وابسته‌اند)، اینجا از پراپرتی‌های
+        فردی خودِ MonthlyPayroll گرفته می‌شوند، نه از مقدار یکسانِ SalaryProfile.
         """
         sp = self._salary_profile
         if not sp:
             return {}
         std_hours = self.standard_monthly_hours_this_month
         ratio = (float(self.worked_hours) / std_hours) if std_hours else 0
-        breakdown = dict(sp.components_breakdown)
-        breakdown['seniority_base'] = sp._component_breakdown(self.seniority_base_monthly)
+        breakdown = {
+            'base_salary': sp._component_breakdown(sp.base_salary),
+            'food_allowance': sp._component_breakdown(sp.food_allowance),
+            'marriage_allowance': sp._component_breakdown(self.marriage_allowance_monthly),
+            'child_allowance': sp._component_breakdown(self.child_allowance_monthly),
+            'housing_allowance': sp._component_breakdown(sp.housing_allowance_monthly),
+            'seniority_base': sp._component_breakdown(self.seniority_base_monthly),
+        }
         result = {}
         total = 0
         for key, comp in breakdown.items():
