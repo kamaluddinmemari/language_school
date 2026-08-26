@@ -111,13 +111,13 @@ class TeacherListCreateView(generics.ListCreateAPIView):
     serializer_class = TeacherSerializer
 
     def get_queryset(self):
-        if self.request.user.role not in ('admin', 'office'):
+        if self.request.user.role not in ('admin', 'office', 'evaluator'):
             return User.objects.none()
         return User.objects.filter(role__in=User.TEACHER_LIKE_ROLES)
 
     def create(self, request, *args, **kwargs):
-        if request.user.role not in ('admin', 'office'):
-            return Response({'error': 'فقط مدیر می‌تونه استاد اضافه کنه'}, status=status.HTTP_403_FORBIDDEN)
+        if request.user.role not in ('admin', 'office', 'evaluator'):
+            return Response({'error': 'دسترسی ثبت استاد ندارید'}, status=status.HTTP_403_FORBIDDEN)
         return super().create(request, *args, **kwargs)
 
 
@@ -126,11 +126,13 @@ class TeacherDetailView(generics.RetrieveUpdateDestroyAPIView):
     serializer_class = TeacherSerializer
 
     def get_queryset(self):
+        if self.request.user.role not in ('admin', 'office', 'evaluator'):
+            return User.objects.none()
         return User.objects.filter(role__in=User.TEACHER_LIKE_ROLES)
 
     def check_admin(self, request):
-        if request.user.role not in ('admin', 'office'):
-            return Response({'error': 'فقط مدیر دسترسی دارد'}, status=status.HTTP_403_FORBIDDEN)
+        if request.user.role not in ('admin', 'office', 'evaluator'):
+            return Response({'error': 'دسترسی مدیریت استاد ندارید'}, status=status.HTTP_403_FORBIDDEN)
         return None
 
     def update(self, request, *args, **kwargs):
@@ -155,13 +157,13 @@ class OfficeStaffListCreateView(generics.ListCreateAPIView):
     serializer_class = OfficeStaffSerializer
 
     def get_queryset(self):
-        if self.request.user.role not in ('admin', 'office'):
+        if self.request.user.role != 'admin':
             return User.objects.none()
         return User.objects.filter(role='office')
 
     def create(self, request, *args, **kwargs):
-        if request.user.role not in ('admin', 'office'):
-            return Response({'error': 'فقط مدیر می‌تونه کارمند اداری اضافه کنه'}, status=status.HTTP_403_FORBIDDEN)
+        if request.user.role != 'admin':
+            return Response({'error': 'فقط مدیر می‌تواند کارمند اداری اضافه کند'}, status=status.HTTP_403_FORBIDDEN)
         return super().create(request, *args, **kwargs)
 
 
@@ -170,10 +172,12 @@ class OfficeStaffDetailView(generics.RetrieveUpdateDestroyAPIView):
     serializer_class = OfficeStaffSerializer
 
     def get_queryset(self):
+        if self.request.user.role != 'admin':
+            return User.objects.none()
         return User.objects.filter(role='office')
 
     def check_admin(self, request):
-        if request.user.role not in ('admin', 'office'):
+        if request.user.role != 'admin':
             return Response({'error': 'فقط مدیر دسترسی دارد'}, status=status.HTTP_403_FORBIDDEN)
         return None
 
@@ -228,13 +232,13 @@ class StudentListView(generics.ListCreateAPIView):
     serializer_class = StudentSerializer
 
     def get_queryset(self):
-        if self.request.user.role not in ('admin', 'office'):
+        if self.request.user.role not in ('admin', 'office', 'evaluator'):
             return User.objects.none()
         return User.objects.filter(role='student').order_by('-id')
 
     def create(self, request, *args, **kwargs):
-        if request.user.role not in ('admin', 'office'):
-            return Response({'error': 'فقط مدیر می‌تونه دانش‌آموز اضافه کنه'}, status=status.HTTP_403_FORBIDDEN)
+        if request.user.role not in ('admin', 'office', 'evaluator'):
+            return Response({'error': 'دسترسی ثبت دانش‌آموز ندارید'}, status=status.HTTP_403_FORBIDDEN)
         return super().create(request, *args, **kwargs)
 
 
@@ -244,16 +248,18 @@ class StudentDetailView(generics.RetrieveUpdateDestroyAPIView):
     serializer_class = StudentSerializer
 
     def get_queryset(self):
+        if self.request.user.role not in ('admin', 'office', 'evaluator'):
+            return User.objects.none()
         return User.objects.filter(role='student')
 
     def update(self, request, *args, **kwargs):
-        if request.user.role not in ('admin', 'office'):
-            return Response({'error': 'فقط مدیر می‌تونه ویرایش کنه'}, status=status.HTTP_403_FORBIDDEN)
+        if request.user.role not in ('admin', 'office', 'evaluator'):
+            return Response({'error': 'دسترسی ویرایش دانش‌آموز ندارید'}, status=status.HTTP_403_FORBIDDEN)
         return super().update(request, *args, **kwargs)
 
     def destroy(self, request, *args, **kwargs):
-        if request.user.role not in ('admin', 'office'):
-            return Response({'error': 'فقط مدیر می‌تونه حذف کنه'}, status=status.HTTP_403_FORBIDDEN)
+        if request.user.role not in ('admin', 'office', 'evaluator'):
+            return Response({'error': 'دسترسی حذف دانش‌آموز ندارید'}, status=status.HTTP_403_FORBIDDEN)
         return super().destroy(request, *args, **kwargs)
 
 
@@ -262,8 +268,8 @@ class UserRoleView(APIView):
     permission_classes = [IsAuthenticated]
 
     def patch(self, request, pk):
-        if request.user.role not in ('admin', 'office'):
-            return Response({'error': 'فقط مدیر می‌تونه نقش رو تغییر بده'}, status=status.HTTP_403_FORBIDDEN)
+        if request.user.role != 'admin':
+            return Response({'error': 'فقط مدیر می‌تواند نقش را تغییر دهد'}, status=status.HTTP_403_FORBIDDEN)
         try:
             user = User.objects.get(pk=pk)
         except User.DoesNotExist:

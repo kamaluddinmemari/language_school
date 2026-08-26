@@ -23,7 +23,7 @@ class NewLeadSerializer(serializers.ModelSerializer):
         model = NewLead
         fields = [
             'id', 'first_name', 'last_name', 'father_name', 'national_code', 'birth_date', 'birth_date_jalali', 'phone',
-            'status', 'status_display',
+            'status', 'status_display', 'term', 'term_title',
             'followup1_at', 'followup1_at_jalali', 'followup1_by_name',
             'followup2_at', 'followup2_at_jalali', 'followup2_by_name',
             'registered_at', 'registered_at_jalali', 'cancelled_at', 'cancelled_at_jalali',
@@ -31,7 +31,7 @@ class NewLeadSerializer(serializers.ModelSerializer):
             'created_at', 'created_at_jalali', 'updated_at',
         ]
         read_only_fields = [
-            'status', 'followup1_at', 'followup2_at', 'registered_at', 'cancelled_at',
+            'status', 'term_title', 'followup1_at', 'followup2_at', 'registered_at', 'cancelled_at',
             'deposit_paid_at', 'created_at', 'updated_at',
         ]
 
@@ -65,7 +65,7 @@ class UnregisteredStudentSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'first_name', 'last_name', 'class_level', 'national_code', 'phone', 'tuition_price',
             'status', 'status_display', 'registered_at', 'registered_at_jalali',
-            'followup_count', 'last_followup_at_jalali', 'followups',
+            'followup_count', 'last_followup_at_jalali', 'latest_level', 'followups',
             'submitted_by_name', 'term', 'term_title', 'created_at', 'created_at_jalali', 'updated_at',
         ]
         read_only_fields = ['status', 'registered_at', 'created_at', 'updated_at']

@@ -11,6 +11,21 @@ def _jalali(dt):
     return jdatetime.datetime.fromgregorian(datetime=local_dt).strftime('%Y/%m/%d - %H:%M')
 
 
+def build_person_key(national_code, phone, first_name, last_name):
+    national = ''.join(str(national_code or '').split()).strip()
+    if national:
+        return f'national:{national}'
+    phone_value = ''.join(str(phone or '').split()).strip()
+    name = ' '.join(f"{first_name or ''} {last_name or ''}".split()).casefold()
+    return f'phone:{phone_value}|name:{name}' if phone_value else f'name:{name}'
+
+
+def build_identity_key(national_code, phone, first_name, last_name, level=''):
+    person = build_person_key(national_code, phone, first_name, last_name)
+    normalized_level = ' '.join(str(level or '').split()).casefold()
+    return f'{person}|level:{normalized_level}' if normalized_level else person
+
+
 def get_current_term():
     """
     ترمی که تاریخ امروز داخل بازه‌ی start_date/end_date آن است؛ اگر هیچ ترمی امروز را
@@ -39,6 +54,8 @@ class NewLead(models.Model):
     national_code = models.CharField(max_length=20, blank=True)
     birth_date = models.DateField(null=True, blank=True)
     phone = models.CharField(max_length=20)
+    term = models.ForeignKey('class_management.Term', on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
+    identity_key = models.CharField(max_length=255, blank=True, default='', editable=False)
 
     status = models.CharField(max_length=10, choices=Status.choices, default=Status.PENDING)
     followup1_at = models.DateTimeField(null=True, blank=True)
@@ -57,6 +74,15 @@ class NewLead(models.Model):
 
     class Meta:
         ordering = ['-created_at']
+        constraints = [models.UniqueConstraint(
+            fields=['term', 'identity_key'],
+            condition=models.Q(term__isnull=False) & ~models.Q(identity_key=''),
+            name='uniq_newlead_term_identity',
+        )]
+
+    def save(self, *args, **kwargs):
+        self.identity_key = build_identity_key(self.national_code, self.phone, self.first_name, self.last_name)
+        super().save(*args, **kwargs)
 
     @property
     def created_at_jalali(self):
@@ -88,6 +114,10 @@ class NewLead(models.Model):
     def deposit_paid_at_jalali(self):
         return _jalali(self.deposit_paid_at)
 
+    @property
+    def term_title(self):
+        return self.term.title if self.term else None
+
     def __str__(self):
         return f"{self.first_name} {self.last_name} ({self.get_status_display()})"
 
@@ -104,6 +134,7 @@ class UnregisteredStudent(models.Model):
     class_level = models.CharField(max_length=50)
     national_code = models.CharField(max_length=20, blank=True)
     phone = models.CharField(max_length=20, blank=True)
+    identity_key = models.CharField(max_length=255, blank=True, default='', editable=False)
     tuition_price = models.PositiveIntegerField(null=True, blank=True, help_text='قیمت شهریه‌ی پیشنهادی')
 
     status = models.CharField(max_length=10, choices=Status.choices, default=Status.TRACKING)
@@ -119,6 +150,23 @@ class UnregisteredStudent(models.Model):
 
     class Meta:
         ordering = ['-created_at']
+        constraints = [models.UniqueConstraint(
+            fields=['term', 'identity_key'],
+            condition=models.Q(term__isnull=False) & ~models.Q(identity_key=''),
+            name='uniq_unregistered_term_identity',
+        )]
+
+    def save(self, *args, **kwargs):
+        self.identity_key = build_identity_key(self.national_code, self.phone, self.first_name, self.last_name, self.class_level)
+        super().save(*args, **kwargs)
+
+    @property
+    def latest_level(self):
+        person_key = build_person_key(self.national_code, self.phone, self.first_name, self.last_name)
+        return type(self).objects.filter(
+            term=self.term,
+            identity_key__startswith=person_key + '|level:',
+        ).order_by('-created_at', '-id').values_list('class_level', flat=True).first() or self.class_level
 
     @property
     def created_at_jalali(self):
@@ -170,6 +218,7 @@ class Debtor(models.Model):
     first_name = models.CharField(max_length=150)
     last_name = models.CharField(max_length=150)
     phone = models.CharField(max_length=20)
+    identity_key = models.CharField(max_length=255, blank=True, default='', editable=False)
     class_level = models.CharField(max_length=50, blank=True)
     debt_amount = models.PositiveIntegerField()
     description = models.TextField(blank=True)
@@ -187,6 +236,15 @@ class Debtor(models.Model):
 
     class Meta:
         ordering = ['-created_at']
+        constraints = [models.UniqueConstraint(
+            fields=['term', 'identity_key'],
+            condition=models.Q(term__isnull=False) & ~models.Q(identity_key=''),
+            name='uniq_debtor_term_identity',
+        )]
+
+    def save(self, *args, **kwargs):
+        self.identity_key = build_identity_key('', self.phone, self.first_name, self.last_name)
+        super().save(*args, **kwargs)
 
     @property
     def created_at_jalali(self):

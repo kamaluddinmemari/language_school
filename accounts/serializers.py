@@ -162,7 +162,7 @@ class UserProfileSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'username', 'first_name', 'last_name',
             'phone', 'phone2', 'national_code', 'birth_date',
-            'language_level', 'teacher_level', 'avatar', 'role',
+            'language_level', 'teacher_level', 'avatar', 'role', 'last_login',
             'average_rating'
         ]
         read_only_fields = ['username', 'role']

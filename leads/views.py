@@ -3,13 +3,25 @@ from rest_framework import generics, status
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
-from .models import NewLead, UnregisteredStudent, UnregisteredStudentFollowup, Debtor, DebtorFollowup, DiscountedPerson
+from .models import NewLead, UnregisteredStudent, UnregisteredStudentFollowup, Debtor, DebtorFollowup, DiscountedPerson, build_identity_key, build_person_key, get_current_term
 from .serializers import (
     NewLeadSerializer,
     UnregisteredStudentSerializer,
     DebtorSerializer,
     DiscountedPersonSerializer,
 )
+
+
+def duplicate_warning(queryset, identity_key, term):
+    if not term or not identity_key:
+        return None
+    same = queryset.filter(term=term, identity_key=identity_key).first()
+    if same:
+        return {'error': 'این شخص در ترم انتخاب‌شده قبلاً ثبت شده است و ثبت تکراری مجاز نیست.', 'duplicate_in_term': True, 'existing_record_id': same.id, 'existing_term': getattr(same.term, 'title', None)}
+    history = queryset.filter(identity_key=identity_key).exclude(term=term).select_related('term').order_by('-created_at')
+    if history.exists():
+        return {'warning': 'این شخص در ترم دیگری سابقه دارد. آیا می‌خواهید برای ترم فعلی هم ثبت شود؟', 'existing_in_other_terms': True, 'history': [{'id': row.id, 'term': getattr(row.term, 'title', None)} for row in history[:10]]}
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -29,9 +41,19 @@ class NewLeadListView(generics.ListCreateAPIView):
         from accounts.services import sync_student_from_lead
         if request.user.role not in ('admin', 'office'):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
-        serializer = self.get_serializer(data=request.data)
+        data = request.data.copy()
+        confirmed = str(data.pop('confirm_new_term', '')).lower() in ('1', 'true', 'yes')
+        term = data.get('term') or get_current_term()
+        data['term'] = getattr(term, 'pk', term) if term else None
+        identity = build_identity_key(data.get('national_code'), data.get('phone'), data.get('first_name'), data.get('last_name'))
+        warning = duplicate_warning(NewLead.objects, identity, term)
+        if warning and warning.get('duplicate_in_term'):
+            return Response(warning, status=status.HTTP_409_CONFLICT)
+        if warning and warning.get('existing_in_other_terms') and not confirmed:
+            return Response(warning, status=status.HTTP_409_CONFLICT)
+        serializer = self.get_serializer(data=data)
         serializer.is_valid(raise_exception=True)
-        lead = serializer.save(created_by=request.user)
+        lead = serializer.save(created_by=request.user, term=term)
         sync_student_from_lead(
             first_name=lead.first_name, last_name=lead.last_name,
             phone=lead.phone, national_code=lead.national_code,
@@ -133,10 +155,40 @@ class UnregisteredStudentListView(generics.ListCreateAPIView):
         from .models import get_current_term
         if request.user.role not in User.TEACHER_LIKE_ROLES and request.user.role not in ('admin', 'office'):
             return Response({'error': 'فقط استاد یا مدیر می‌تواند ثبت کند'}, status=status.HTTP_403_FORBIDDEN)
-        serializer = self.get_serializer(data=request.data)
+        data = request.data.copy()
+        confirmed = str(data.pop('confirm_new_term', '')).lower() in ('1', 'true', 'yes')
+        term = data.get('term') or get_current_term()
+        data['term'] = getattr(term, 'pk', term) if term else None
+        identity = build_identity_key(data.get('national_code'), data.get('phone'), data.get('first_name'), data.get('last_name'), data.get('class_level'))
+        person_prefix = build_person_key(data.get('national_code'), data.get('phone'), data.get('first_name'), data.get('last_name')) + '|level:'
+        exact_person = UnregisteredStudent.objects.filter(term=term, identity_key__startswith=person_prefix).order_by('-created_at', '-id')
+        if exact_person.exists():
+            return Response({'error': 'این شخص در ترم انتخاب‌شده قبلاً ثبت شده است؛ ثبت دوباره حتی با سطح متفاوت مجاز نیست.', 'duplicate_in_term': True, 'existing_record_id': exact_person.first().id}, status=status.HTTP_409_CONFLICT)
+
+        normalized_level = ' '.join(str(data.get('class_level') or '').split()).casefold()
+        same_name = UnregisteredStudent.objects.filter(
+            term=term, first_name__iexact=data.get('first_name', ''), last_name__iexact=data.get('last_name', '')
+        ).order_by('-created_at', '-id')
+        if same_name.exists():
+            same_level = same_name.filter(identity_key__endswith=f'|level:{normalized_level}').first()
+            if same_level:
+                return Response({'error': 'فردی با همین نام و همین سطح در این ترم قبلاً ثبت شده است.', 'duplicate_in_term': True, 'existing_record_id': same_level.id}, status=status.HTTP_409_CONFLICT)
+            if not confirmed:
+                return Response({'warning': 'فردی با نام و نام‌خانوادگی مشابه در این ترم وجود دارد، اما شناسهٔ فرد متفاوت و سطح متفاوت است. آیا ثبت شود؟', 'same_name_different_person': True, 'existing_levels': list(same_name.values_list('class_level', flat=True))}, status=status.HTTP_409_CONFLICT)
+
+        other_term = UnregisteredStudent.objects.filter(identity_key__startswith=person_prefix).exclude(term=term).select_related('term').order_by('-created_at', '-id').first()
+        warning = None
+        if other_term and not confirmed:
+            warning = {
+                'warning': 'این شخص در ترم دیگری سابقه دارد. آیا می‌خواهید برای ترم فعلی و سطح جدید هم ثبت شود؟',
+                'existing_in_other_terms': True,
+                'history': [{'id': other_term.id, 'term': other_term.term.title if other_term.term else None}],
+                'same_person_latest_level': UnregisteredStudent.objects.filter(term=term, identity_key__startswith=person_prefix).order_by('-created_at', '-id').values_list('class_level', flat=True).first(),
+            }
+            return Response(warning, status=status.HTTP_409_CONFLICT)
+        serializer = self.get_serializer(data=data)
         serializer.is_valid(raise_exception=True)
-        extra = {} if serializer.validated_data.get('term') else {'term': get_current_term()}
-        lead = serializer.save(submitted_by=request.user, **extra)
+        lead = serializer.save(submitted_by=request.user, term=term)
         sync_student_from_lead(
             first_name=lead.first_name, last_name=lead.last_name,
             phone=lead.phone, national_code=lead.national_code,
@@ -250,10 +302,19 @@ class DebtorListView(generics.ListCreateAPIView):
         from .models import get_current_term
         if request.user.role not in ('admin', 'office'):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
-        serializer = self.get_serializer(data=request.data)
+        data = request.data.copy()
+        confirmed = str(data.pop('confirm_new_term', '')).lower() in ('1', 'true', 'yes')
+        term = data.get('term') or get_current_term()
+        data['term'] = getattr(term, 'pk', term) if term else None
+        identity = build_identity_key('', data.get('phone'), data.get('first_name'), data.get('last_name'))
+        warning = duplicate_warning(Debtor.objects, identity, term)
+        if warning and warning.get('duplicate_in_term'):
+            return Response(warning, status=status.HTTP_409_CONFLICT)
+        if warning and warning.get('existing_in_other_terms') and not confirmed:
+            return Response(warning, status=status.HTTP_409_CONFLICT)
+        serializer = self.get_serializer(data=data)
         serializer.is_valid(raise_exception=True)
-        extra = {} if serializer.validated_data.get('term') else {'term': get_current_term()}
-        debtor = serializer.save(created_by=request.user, **extra)
+        debtor = serializer.save(created_by=request.user, term=term)
         sync_student_from_lead(
             first_name=debtor.first_name, last_name=debtor.last_name,
             phone=debtor.phone, language_level=debtor.class_level,

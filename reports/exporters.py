@@ -13,7 +13,7 @@ def _now_jalali_str():
 # ---------------------------------------------------------------------------
 # اکسل
 # ---------------------------------------------------------------------------
-def build_excel(spec, rows, totals):
+def build_excel(spec, rows, totals, report_meta=None):
     from openpyxl import Workbook
     from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 
@@ -33,7 +33,10 @@ def build_excel(spec, rows, totals):
     ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=max(len(spec.columns), 1))
     title_cell.alignment = center
 
-    meta_cell = ws.cell(row=2, column=1, value=f"تاریخ تهیه گزارش: {_now_jalali_str()}    |    تعداد ردیف: {len(rows)}")
+    report_meta = report_meta or {}
+    generated_by = report_meta.get('generated_by', 'کاربر سامانه')
+    generated_at = report_meta.get('generated_at_jalali', _now_jalali_str())
+    meta_cell = ws.cell(row=2, column=1, value=f"گزارش‌گیرنده: {generated_by}    |    تاریخ و ساعت تولید: {generated_at}    |    تعداد ردیف: {len(rows)}")
     ws.merge_cells(start_row=2, start_column=1, end_row=2, end_column=max(len(spec.columns), 1))
 
     header_row = 4
@@ -94,7 +97,7 @@ def _set_rtl_table(table):
     tblPr.append(bidi)
 
 
-def build_docx(spec, rows, totals):
+def build_docx(spec, rows, totals, report_meta=None):
     from docx import Document
     from docx.shared import Pt
     from docx.enum.text import WD_ALIGN_PARAGRAPH
@@ -114,9 +117,12 @@ def build_docx(spec, rows, totals):
     run.font.size = Pt(16)
     _set_rtl_paragraph(title)
 
+    report_meta = report_meta or {}
+    generated_by = report_meta.get('generated_by', 'کاربر سامانه')
+    generated_at = report_meta.get('generated_at_jalali', _now_jalali_str())
     meta = doc.add_paragraph()
     meta.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    meta.add_run(f"تاریخ تهیه گزارش: {_now_jalali_str()}    |    تعداد ردیف: {len(rows)}")
+    meta.add_run(f"گزارش‌گیرنده: {generated_by}    |    تاریخ و ساعت تولید: {generated_at}    |    تعداد ردیف: {len(rows)}")
     _set_rtl_paragraph(meta)
 
     table = doc.add_table(rows=1, cols=len(spec.columns))
@@ -163,7 +169,7 @@ def build_docx(spec, rows, totals):
 # ---------------------------------------------------------------------------
 # HTML چاپی
 # ---------------------------------------------------------------------------
-def build_print_html(spec, rows, totals):
+def build_print_html(spec, rows, totals, report_meta=None):
     head_cells = ''.join(f"<th>{c.header}</th>" for c in spec.columns)
     body_rows = ''
     for row in rows:
@@ -181,6 +187,9 @@ def build_print_html(spec, rows, totals):
                 cells.append("<td></td>")
         totals_row = f"<tr class='totals'>{''.join(cells)}</tr>"
 
+    report_meta = report_meta or {}
+    generated_by = report_meta.get('generated_by', 'کاربر سامانه')
+    generated_at = report_meta.get('generated_at_jalali', _now_jalali_str())
     return f"""<!DOCTYPE html>
 <html dir="rtl" lang="fa">
 <head>
@@ -200,7 +209,7 @@ def build_print_html(spec, rows, totals):
 </head>
 <body>
   <h1>{spec.name}</h1>
-  <div class="meta">تاریخ تهیه گزارش: {_now_jalali_str()} &nbsp;|&nbsp; تعداد ردیف: {len(rows)}</div>
+  <div class="meta">گزارش‌گیرنده: {generated_by} &nbsp;|&nbsp; تاریخ و ساعت تولید: {generated_at} &nbsp;|&nbsp; تعداد ردیف: {len(rows)}</div>
   <table>
     <thead><tr>{head_cells}</tr></thead>
     <tbody>{body_rows}{totals_row}</tbody>

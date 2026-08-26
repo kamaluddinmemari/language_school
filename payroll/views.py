@@ -381,6 +381,10 @@ class AttendanceSummaryView(APIView):
         today = timezone.localtime(timezone.now()).date()
         today_jalali = __import__('jdatetime').date.fromgregorian(date=today)
 
+        def hours_minutes(value):
+            total_minutes = max(0, round(float(value or 0) * 60))
+            return f'{total_minutes // 60} ساعت و {total_minutes % 60:02d} دقیقه'
+
         logs = AttendanceLog.objects.filter(user=target_user).order_by('-date')
 
         # امروز
@@ -402,13 +406,17 @@ class AttendanceSummaryView(APIView):
                 daily_breakdown.append({
                     'date_jalali': l.date_jalali, 'check_in': l.check_in_time_jalali,
                     'check_out': l.check_out_time_jalali, 'worked_hours': l.worked_hours,
+                    'worked_hours_label': hours_minutes(l.worked_hours),
                 })
 
         return Response({
             'user': target_user.id, 'user_full_name': target_user.get_full_name(),
             'today_hours': today_hours,
+            'today_hours_label': hours_minutes(today_hours),
             'week_hours': round(week_hours, 2),
+            'week_hours_label': hours_minutes(week_hours),
             'month_hours': round(month_hours, 2),
+            'month_hours_label': hours_minutes(month_hours),
             'jalali_year': today_jalali.year, 'jalali_month': today_jalali.month,
             'daily_breakdown': sorted(daily_breakdown, key=lambda x: x['date_jalali']),
         })
