@@ -266,6 +266,10 @@ class MonthlyPayrollAcknowledgeView(APIView):
         return Response(MonthlyPayrollSerializer(payroll).data)
 
 
+
+def approved_daily_leave(user, day):
+    return LeaveRequest.objects.filter(user=user, status=LeaveRequest.Status.APPROVED, leave_type=LeaveRequest.LeaveType.DAILY, start_date__lte=day).filter(Q(end_date__gte=day) | Q(end_date__isnull=True)).first()
+
 # ==================== ثبت ساعت ورود و خروج (AttendanceLog) ====================
 
 class MyAttendanceTodayView(APIView):
@@ -274,10 +278,14 @@ class MyAttendanceTodayView(APIView):
 
     def get(self, request):
         today = timezone.localtime(timezone.now()).date()
+        leave = approved_daily_leave(request.user, today)
+        if leave:
+            return Response({'error': 'کارمند در مرخصی می‌باشد', 'on_leave': True, 'leave_shift': leave.leave_shift, 'leave_credited_hours': leave.credited_hours_label}, status=status.HTTP_400_BAD_REQUEST)
         log = AttendanceLog.objects.filter(user=request.user, date=today).first()
-        return Response(AttendanceLogSerializer(log).data if log else {
-            'date': today.isoformat(), 'check_in': None, 'check_out': None,
-        })
+        leave = approved_daily_leave(request.user, today)
+        payload = AttendanceLogSerializer(log).data if log else {'date': today.isoformat(), 'check_in': None, 'check_out': None}
+        payload.update({'on_leave': bool(leave), 'leave_message': 'کارمند در مرخصی می‌باشد' if leave else None, 'leave_shift': leave.leave_shift if leave else None, 'leave_credited_hours': leave.credited_hours_label if leave else None})
+        return Response(payload)
 
 
 class CheckInView(APIView):
@@ -286,6 +294,9 @@ class CheckInView(APIView):
 
     def post(self, request):
         today = timezone.localtime(timezone.now()).date()
+        leave = approved_daily_leave(request.user, today)
+        if leave:
+            return Response({'error': 'کارمند در مرخصی می‌باشد', 'on_leave': True, 'leave_shift': leave.leave_shift, 'leave_credited_hours': leave.credited_hours_label}, status=status.HTTP_400_BAD_REQUEST)
         log, created = AttendanceLog.objects.get_or_create(user=request.user, date=today)
         if log.check_in:
             return Response({'error': f'شما امروز ساعت {log.check_in_time_jalali} ورودتان ثبت شده — هر روز فقط یک‌بار قابل ثبت است'}, status=status.HTTP_400_BAD_REQUEST)

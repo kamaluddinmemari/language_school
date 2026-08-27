@@ -66,6 +66,22 @@ class User(AbstractUser):
         return round(result['satisfaction__avg'] or 0, 1)
 
 
+class AppearanceSettings(models.Model):
+    """تنظیمات ظاهری مشترک سامانه؛ فقط یک رکورد برای کل پنل نگه‌داری می‌شود."""
+    key = models.CharField(max_length=32, unique=True, default='default')
+    settings = models.JSONField(default=dict, blank=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    updated_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='appearance_updates')
+
+    @classmethod
+    def get_current(cls):
+        obj, _ = cls.objects.get_or_create(key='default')
+        return obj
+
+    def __str__(self):
+        return 'تنظیمات ظاهر سامانه'
+
+
 class PriceSetting(models.Model):
     one_hour_price = models.PositiveIntegerField(default=400000)
     one_half_hour_price = models.PositiveIntegerField(default=550000)

@@ -8,7 +8,7 @@ class EmployeeProfileSerializer(serializers.ModelSerializer):
     class Meta:
         model = EmployeeProfile
         fields = ['id', 'user', 'education_degree', 'education_field', 'hire_date', 'hire_date_jalali',
-                   'address', 'marital_status', 'children_count', 'minimum_monthly_hours', 'sheba_number', 'bank_account_number',
+                   'address', 'marital_status', 'children_count', 'sheba_number', 'bank_account_number',
                    'card_number', 'updated_at']
         read_only_fields = ['id', 'updated_at']
 
@@ -23,19 +23,10 @@ class SalaryProfileSerializer(serializers.ModelSerializer):
         fields = ['id', 'work_year', 'base_salary', 'food_allowance',
                    'marriage_allowance', 'child_allowance',
                    'housing_allowance', 'housing_allowance_monthly',
-                   'hourly_shortfall_threshold', 'leave_day_threshold',
                    'insurance_base_single', 'insurance_base_married',
+                   'morning_leave_hours', 'evening_leave_hours',
                    'gross_base_monthly_shared', 'components_breakdown', 'updated_at']
         read_only_fields = ['id', 'updated_at']
-
-    def validate(self, attrs):
-        leave_threshold = attrs.get('leave_day_threshold', getattr(self.instance, 'leave_day_threshold', 5))
-        hourly_threshold = attrs.get('hourly_shortfall_threshold', getattr(self.instance, 'hourly_shortfall_threshold', 2.5))
-        if leave_threshold <= 0:
-            raise serializers.ValidationError({'leave_day_threshold': 'آستانهٔ مرخصی باید بیشتر از صفر باشد'})
-        if hourly_threshold < 0:
-            raise serializers.ValidationError({'hourly_shortfall_threshold': 'سقف کسر ساعتی نمی‌تواند منفی باشد'})
-        return attrs
 
 
 class MonthlyPayrollSerializer(serializers.ModelSerializer):
@@ -54,23 +45,10 @@ class MonthlyPayrollSerializer(serializers.ModelSerializer):
     net_pay_words = serializers.ReadOnlyField()
     approved_leave_days_this_month = serializers.ReadOnlyField()
     approved_leave_hours_this_month = serializers.ReadOnlyField()
+    leave_credit_explanation = serializers.ReadOnlyField()
     jalali_label = serializers.ReadOnlyField()
     acknowledged_at_jalali = serializers.ReadOnlyField()
     auto_worked_hours = serializers.ReadOnlyField()
-    minimum_hours_for_month = serializers.ReadOnlyField()
-    credited_worked_hours = serializers.ReadOnlyField()
-    automatic_shortfall_hours = serializers.ReadOnlyField()
-    automatic_undertime_hours = serializers.ReadOnlyField()
-    automatic_leave_days_deducted = serializers.ReadOnlyField()
-    automatic_overtime_hours = serializers.ReadOnlyField()
-    effective_undertime_hours = serializers.ReadOnlyField()
-    effective_overtime_hours = serializers.ReadOnlyField()
-    adjustment_explanation = serializers.ReadOnlyField()
-    automatic_leave_days = serializers.ReadOnlyField()
-    automatic_carryover_hours = serializers.ReadOnlyField()
-    automatic_adjustment_note = serializers.ReadOnlyField()
-    hourly_shortfall_threshold = serializers.ReadOnlyField()
-    leave_day_threshold = serializers.ReadOnlyField()
     marital_status_display = serializers.ReadOnlyField()
     children_count = serializers.ReadOnlyField()
     seniority_base_monthly = serializers.ReadOnlyField()
@@ -85,18 +63,13 @@ class MonthlyPayrollSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'user', 'user_full_name', 'jalali_year', 'jalali_month', 'jalali_label',
             'marital_status_display', 'children_count',
-            'worked_hours', 'auto_worked_hours', 'minimum_hours_for_month', 'credited_worked_hours',
-            'automatic_shortfall_hours', 'automatic_undertime_hours', 'automatic_leave_days_deducted',
-            'automatic_overtime_hours', 'effective_undertime_hours', 'effective_overtime_hours', 'adjustment_explanation',
-            'automatic_leave_days', 'automatic_carryover_hours', 'automatic_adjustment_note',
-            'hourly_shortfall_threshold', 'leave_day_threshold',
-                               'insurance_days', 'absence_days', 'absence_hours', 'undertime_hours', 'auto_adjustments_enabled',
-
+            'worked_hours', 'auto_worked_hours',
+            'insurance_days', 'absence_days', 'absence_hours', 'undertime_hours',
             'overtime_hours', 'bonus_amount', 'extra_payment', 'notes',
             'days_in_month', 'standard_monthly_hours_this_month',
             'hourly_wage', 'daily_wage', 'insurance_base_30days', 'insurance_amount', 'overtime_pay',
             'absence_deduction', 'undertime_deduction', 'total_deductions', 'gross_pay', 'net_pay',
-            'net_pay_words', 'approved_leave_days_this_month', 'approved_leave_hours_this_month',
+            'net_pay_words', 'approved_leave_days_this_month', 'approved_leave_hours_this_month', 'leave_credit_explanation',
             'is_seniority_eligible', 'seniority_base_monthly', 'seniority_base_daily', 'seniority_base_hourly',
             'component_amounts_this_month',
             'acknowledged_at', 'acknowledged_at_jalali', 'created_at', 'updated_at',
@@ -156,11 +129,13 @@ class LeaveRequestSerializer(serializers.ModelSerializer):
     decided_at_jalali = serializers.ReadOnlyField()
     user_full_name = serializers.SerializerMethodField()
     decided_by_name = serializers.SerializerMethodField()
+    credited_hours = serializers.ReadOnlyField()
+    credited_hours_label = serializers.ReadOnlyField()
 
     class Meta:
         model = LeaveRequest
-        fields = ['id', 'user', 'user_full_name', 'leave_type', 'leave_category', 'start_date', 'start_date_jalali',
-                   'end_date', 'end_date_jalali', 'hours', 'days_count', 'reason', 'status',
+        fields = ['id', 'user', 'user_full_name', 'leave_type', 'leave_category', 'leave_shift', 'start_date', 'start_date_jalali',
+                   'end_date', 'end_date_jalali', 'hours', 'credited_hours', 'credited_hours_label', 'days_count', 'reason', 'status',
                    'requested_at', 'requested_at_jalali', 'decided_at', 'decided_at_jalali', 'decided_by_name']
         read_only_fields = ['id', 'status', 'requested_at', 'decided_at', 'decided_by_name']
 
@@ -172,6 +147,8 @@ class LeaveRequestSerializer(serializers.ModelSerializer):
 
     def validate(self, data):
         leave_type = data.get('leave_type', getattr(self.instance, 'leave_type', 'daily'))
+        if leave_type == 'daily' and not data.get('leave_shift', getattr(self.instance, 'leave_shift', '')):
+            raise serializers.ValidationError({'leave_shift': 'برای مرخصی روزانه، صبح یا عصر را انتخاب کنید'})
         if leave_type == 'hourly' and not data.get('hours') and not getattr(self.instance, 'hours', None):
             raise serializers.ValidationError({'hours': 'برای مرخصی ساعتی، تعداد ساعت الزامی است'})
 

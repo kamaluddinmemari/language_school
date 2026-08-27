@@ -8,6 +8,8 @@ PERSIAN_MONTHS = ['فروردین', 'اردیبهشت', 'خرداد', 'تیر', 
 
 STANDARD_MONTHLY_HOURS = 220
 STANDARD_DAILY_HOURS = 7.33
+DEFAULT_MORNING_LEAVE_HOURS = 3
+DEFAULT_EVENING_LEAVE_HOURS = 5
 OVERTIME_MULTIPLIER = 1.4  # نرخ اضافه‌کاری طبق عرف رایج (۱٫۴ برابر نرخ ساعتی عادی)
 EMPLOYEE_INSURANCE_RATE = 0.07  # سهم بیمه‌ی کارمند (۷٪ مزد مبنای بیمه)
 
@@ -93,10 +95,6 @@ class EmployeeProfile(models.Model):
     bank_account_number = models.CharField(max_length=30, blank=True, help_text='شماره حساب بانکی')
     card_number = models.CharField(max_length=16, blank=True, help_text='شماره کارت بانکی')
     updated_at = models.DateTimeField(auto_now=True)
-    minimum_monthly_hours = models.DecimalField(
-        max_digits=6, decimal_places=2, null=True, blank=True,
-        help_text='حداقل ساعت کارکرد ماهانهٔ اختصاصی این کارمند؛ در صورت خالی‌بودن، ساعت استاندارد ماه استفاده می‌شود'
-    )
 
     @property
     def hire_date_jalali(self):
@@ -128,8 +126,8 @@ class SalaryProfile(models.Model):
     # (چون اجزای تشکیل‌دهنده‌ی مزد مبنای بیمه‌ی متاهل معمولاً حق تاهل/اولاد را هم شامل می‌شود)
     insurance_base_single = models.PositiveIntegerField(default=0, help_text='مزد مبنای بیمه برای کارمند مجرد (۳۰ روز کامل، تومان)')
     insurance_base_married = models.PositiveIntegerField(default=0, help_text='مزد مبنای بیمه برای کارمند متاهل (۳۰ روز کامل، تومان)')
-    hourly_shortfall_threshold = models.DecimalField(max_digits=5, decimal_places=2, default=2.5, help_text='سقف کسر ساعتی بابت کسری کارکرد')
-    leave_day_threshold = models.DecimalField(max_digits=5, decimal_places=2, default=5, help_text='تعداد ساعت کسری برای کسر یک روز مرخصی استحقاقی')
+    morning_leave_hours = models.DecimalField(max_digits=4, decimal_places=2, default=3, help_text='ساعت کارکرد مرخصی صبح')
+    evening_leave_hours = models.DecimalField(max_digits=4, decimal_places=2, default=5, help_text='ساعت کارکرد مرخصی عصر')
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
@@ -198,12 +196,6 @@ class MonthlyPayroll(models.Model):
     extra_payment = models.PositiveIntegerField(default=0, help_text='اضافه‌پرداخت این ماه (تومان) — مستقیم به ناخالص اضافه می‌شود')
 
     notes = models.TextField(blank=True)
-    auto_adjustments_enabled = models.BooleanField(default=True, help_text='اعمال خودکار کسری، مرخصی و اضافه‌کاری بر اساس حداقل ساعت')
-    hourly_shortfall_threshold = models.DecimalField(max_digits=5, decimal_places=2, default=2.5, help_text='سقف کسر ساعتی ثبت‌شده برای این فیش')
-    leave_day_threshold = models.DecimalField(max_digits=5, decimal_places=2, default=5, help_text='آستانهٔ کسر یک روز مرخصی ثبت‌شده برای این فیش')
-    automatic_leave_days = models.PositiveIntegerField(default=0, editable=False, help_text='روزهای استحقاقی کسرشدهٔ خودکار بابت کسری کارکرد')
-    automatic_carryover_hours = models.DecimalField(max_digits=6, decimal_places=2, default=0, editable=False, help_text='کسری ساعت منتقلشده به ماه بعد')
-    automatic_adjustment_note = models.TextField(blank=True, editable=False, help_text='توضیح خودکار تعدیل کارکرد')
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -325,10 +317,14 @@ class MonthlyPayroll(models.Model):
         """
         logs = AttendanceLog.objects.filter(user=self.user)
         total = 0.0
+        approved_daily = list(self.user.leave_requests.filter(status='approved', leave_type='daily').values_list('start_date', 'end_date'))
         for log in logs:
             jd = jdatetime.date.fromgregorian(date=log.date)
             if jd.year == self.jalali_year and jd.month == self.jalali_month:
-                total += log.worked_hours
+                covered_by_leave = any(start <= log.date <= (end or start) for start, end in approved_daily)
+                if not covered_by_leave:
+                    total += log.worked_hours
+        total += self.approved_leave_hours_this_month
         return round(total, 2)
 
     @property
@@ -343,7 +339,7 @@ class MonthlyPayroll(models.Model):
         if not sp:
             return {}
         std_hours = self.standard_monthly_hours_this_month
-        ratio = (self.credited_worked_hours / std_hours) if std_hours else 0
+        ratio = (float(self.worked_hours) / std_hours) if std_hours else 0
         breakdown = {
             'base_salary': sp._component_breakdown(sp.base_salary),
             'food_allowance': sp._component_breakdown(sp.food_allowance),
@@ -403,108 +399,8 @@ class MonthlyPayroll(models.Model):
         return round(prorated_base * EMPLOYEE_INSURANCE_RATE)
 
     @property
-    def raw_shortfall_hours(self):
-        return round(max(0.0, self.minimum_hours_for_month - self.credited_worked_hours), 2)
-
-    @property
-    def prior_carryover_hours(self):
-        current_key = (self.jalali_year, self.jalali_month)
-        previous = MonthlyPayroll.objects.filter(user=self.user).exclude(pk=self.pk).order_by('jalali_year', 'jalali_month')
-        prior = [record for record in previous if (record.jalali_year, record.jalali_month) < current_key]
-        return float(prior[-1].automatic_carryover_hours) if prior else 0.0
-
-    @property
-    def combined_shortfall_hours(self):
-        return round(self.raw_shortfall_hours + self.prior_carryover_hours, 2)
-
-    @property
-    def available_entitled_leave_days(self):
-        balance = LeaveBalance.objects.filter(user=self.user, jalali_year=self.jalali_year).first()
-        if not balance:
-            return 0
-        used_without_current = balance.used_days
-        if self.pk:
-            used_without_current -= self.automatic_leave_days
-        return max(0, balance.annual_days - used_without_current)
-
-    @property
-    def computed_automatic_leave_days(self):
-        if not self.auto_adjustments_enabled:
-            return 0
-        return min(int(self.combined_shortfall_hours // float(self.leave_day_threshold)), self.available_entitled_leave_days)
-
-    @property
-    def minimum_hours_for_month(self):
-        try:
-            configured = self.user.employee_profile.minimum_monthly_hours
-        except Exception:
-            configured = None
-        return float(configured) if configured is not None else float(self.standard_monthly_hours_this_month)
-
-    @property
-    def credited_worked_hours(self):
-        """کارکرد مؤثر = حضور ثبت‌شده + مرخصی تأییدشده؛ مرخصی جزو ساعت کار محسوب می‌شود."""
-        return round(float(self.worked_hours) + float(self.approved_leave_hours_this_month) + (float(self.approved_leave_days_this_month) * STANDARD_DAILY_HOURS), 2)
-
-    @property
-    def automatic_shortfall_hours(self):
-        return self.combined_shortfall_hours
-
-    @property
-    def automatic_leave_days_deducted(self):
-        """به‌ازای هر ۵ ساعت کسری، یک روز استحقاقی؛ در این حالت کسر ساعتی همان کسری حذف می‌شود."""
-        return self.computed_automatic_leave_days
-
-    @property
-    def automatic_undertime_hours(self):
-        shortage = self.automatic_shortfall_hours
-        return 0 if self.automatic_leave_days_deducted else round(min(shortage, float(self.hourly_shortfall_threshold)), 2)
-
-    @property
-    def automatic_overtime_hours(self):
-        return round(max(0.0, self.credited_worked_hours - self.minimum_hours_for_month), 2)
-
-    @property
-    def effective_undertime_hours(self):
-        return self.automatic_undertime_hours if self.auto_adjustments_enabled else float(self.undertime_hours)
-
-    @property
-    def effective_overtime_hours(self):
-        return self.automatic_overtime_hours if self.auto_adjustments_enabled else float(self.overtime_hours)
-
-    @property
-    def adjustment_explanation(self):
-        shortage = self.automatic_shortfall_hours
-        overtime = self.automatic_overtime_hours
-        carry = self.prior_carryover_hours
-        if shortage and self.automatic_leave_days_deducted:
-            suffix = f'؛ {self.automatic_carryover_hours:.2f} ساعت به ماه بعد منتقل شد' if self.automatic_carryover_hours else ''
-            return f'کسری مؤثر {shortage:.2f} ساعت است؛ {self.automatic_leave_days_deducted} روز از مرخصی استحقاقی کسر شد و کسر ساعتی اعمال نشد{suffix}.'
-        if shortage:
-            suffix = f'؛ {self.automatic_carryover_hours:.2f} ساعت به ماه بعد منتقل شد' if self.automatic_carryover_hours else ''
-            prefix = f'با احتساب {carry:.2f} ساعت انتقالی از ماه قبل، ' if carry else ''
-            return f'{prefix}کسری کارکرد {shortage:.2f} ساعت است؛ {self.automatic_undertime_hours:.2f} ساعت از مبلغ ساعتی کسر شد{suffix}.'
-        if overtime:
-            return f'کارکرد {overtime:.2f} ساعت بیش از حداقل تعیین‌شده است؛ اضافه‌کاری با نرخ مصوب محاسبه شد.'
-        return 'کارکرد این ماه مطابق حداقل ساعت تعیین‌شده است.'
-
-    def save(self, *args, **kwargs):
-        if self.auto_adjustments_enabled:
-            self.automatic_leave_days = self.computed_automatic_leave_days
-            total = self.combined_shortfall_hours
-            used_for_leave = self.automatic_leave_days * float(self.leave_day_threshold)
-            used_hourly = 0 if self.automatic_leave_days else min(total, float(self.hourly_shortfall_threshold))
-            self.automatic_carryover_hours = round(max(0.0, total - used_for_leave - used_hourly), 2)
-            self.automatic_adjustment_note = self.adjustment_explanation
-        else:
-            self.automatic_leave_days = 0
-            self.automatic_carryover_hours = 0
-            self.automatic_adjustment_note = 'محاسبهٔ خودکار تعدیل غیرفعال است؛ مقادیر دستی فیش ملاک هستند.'
-        super().save(*args, **kwargs)
-
-    @property
     def overtime_pay(self):
-        return round(self.hourly_wage * OVERTIME_MULTIPLIER * self.effective_overtime_hours)
+        return round(self.hourly_wage * OVERTIME_MULTIPLIER * float(self.overtime_hours))
 
     @property
     def absence_deduction(self):
@@ -512,7 +408,7 @@ class MonthlyPayroll(models.Model):
 
     @property
     def undertime_deduction(self):
-        return round(self.hourly_wage * self.effective_undertime_hours)
+        return round(self.hourly_wage * float(self.undertime_hours))
 
     @property
     def approved_leave_days_this_month(self):
@@ -529,16 +425,22 @@ class MonthlyPayroll(models.Model):
     def approved_leave_hours_this_month(self):
         """جمع مرخصی ساعتی تاییدشده در همین ماه — این هم جزو ساعات کاری حساب می‌شود."""
         total = 0
-        for r in self.user.leave_requests.filter(status='approved', leave_type='hourly'):
+        for r in self.user.leave_requests.filter(status='approved'):
             jd = jdatetime.date.fromgregorian(date=r.start_date)
             if jd.year == self.jalali_year and jd.month == self.jalali_month:
-                total += float(r.hours or 0)
-        return total
+                total += float(r.credited_hours)
+        return round(total, 2)
+
+    @property
+    def leave_credit_explanation(self):
+        if not self.approved_leave_hours_this_month:
+            return ''
+        return f'ساعات مرخصی تاییدشده به‌عنوان کارکرد محاسبه شد: {self.approved_leave_hours_this_month:g} ساعت (مرخصی روزانه بر اساس نوع صبح/عصر و تنظیمات سالانه).'
 
     @property
     def gross_pay(self):
         """حقوق ناخالص = (حقوق ساعتی × ساعت کارکرد) + اضافه‌کاری + پاداش + اضافه‌پرداخت"""
-        base = round(self.hourly_wage * self.credited_worked_hours)
+        base = round(self.hourly_wage * float(self.worked_hours))
         return base + self.overtime_pay + self.bonus_amount + self.extra_payment
 
     @property
@@ -641,7 +543,6 @@ class LeaveBalance(models.Model):
             jy = jdatetime.date.fromgregorian(date=r.start_date).year
             if jy == self.jalali_year:
                 total += r.days_count
-        total += sum(p.automatic_leave_days for p in self.user.payroll_records.filter(jalali_year=self.jalali_year))
         return total
 
     @property
@@ -696,6 +597,10 @@ class LeaveRequest(models.Model):
     start_date = models.DateField()
     end_date = models.DateField(null=True, blank=True, help_text='برای مرخصی روزانه‌ی چندروزه')
     hours = models.DecimalField(max_digits=5, decimal_places=2, null=True, blank=True, help_text='برای مرخصی ساعتی')
+    class LeaveShift(models.TextChoices):
+        MORNING = 'morning', 'مرخصی صبح'
+        EVENING = 'evening', 'مرخصی عصر'
+    leave_shift = models.CharField(max_length=10, choices=LeaveShift.choices, default=LeaveShift.MORNING, help_text='برای مرخصی روزانه')
     reason = models.CharField(max_length=255, blank=True, help_text='برای دسته‌ی «سایر» الزامی است')
     status = models.CharField(max_length=10, choices=Status.choices, default=Status.PENDING)
     requested_at = models.DateTimeField(auto_now_add=True)
@@ -704,6 +609,24 @@ class LeaveRequest(models.Model):
 
     class Meta:
         ordering = ['-requested_at']
+
+    @property
+    def credited_hours(self):
+        if self.leave_type == self.LeaveType.HOURLY:
+            return float(self.hours or 0)
+        try:
+            jd = jdatetime.date.fromgregorian(date=self.start_date)
+            profile = SalaryProfile.objects.filter(work_year=jd.year).first() or SalaryProfile.objects.order_by('-work_year').first()
+            morning = float(profile.morning_leave_hours if profile else DEFAULT_MORNING_LEAVE_HOURS)
+            evening = float(profile.evening_leave_hours if profile else DEFAULT_EVENING_LEAVE_HOURS)
+            return self.days_count * (evening if self.leave_shift == self.LeaveShift.EVENING else morning)
+        except Exception:
+            return 0
+
+    @property
+    def credited_hours_label(self):
+        total_minutes = round(float(self.credited_hours) * 60)
+        return f'{total_minutes // 60} ساعت و {total_minutes % 60:02d} دقیقه'
 
     @property
     def days_count(self):

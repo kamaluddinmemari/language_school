@@ -1,7 +1,7 @@
 from rest_framework import serializers
 from django.contrib.auth.password_validation import validate_password
 from django.db import IntegrityError
-from .models import User, PriceSetting
+from .models import User, PriceSetting, AppearanceSettings
 from .validators import username_validator, password_validator
 
 
@@ -166,6 +166,13 @@ class UserProfileSerializer(serializers.ModelSerializer):
             'average_rating'
         ]
         read_only_fields = ['username', 'role']
+
+
+class AppearanceSettingsSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = AppearanceSettings
+        fields = ['id', 'key', 'settings', 'updated_at']
+        read_only_fields = ['id', 'key', 'updated_at']
 
 
 class PriceSettingSerializer(serializers.ModelSerializer):
