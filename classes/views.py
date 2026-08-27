@@ -213,6 +213,59 @@ class TeacherDeclineView(APIView):
         return Response({'message': 'ارجاع رد شد'})
 
 
+class DirectAssignClassView(APIView):
+    """ارجاع نهایی مستقیم توسط مدیر؛ بدون نیاز به تایید اولیه استاد."""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, pk):
+        if request.user.role != 'admin':
+            return Response({'error': 'فقط مدیر می‌تواند ارجاع نهایی مستقیم انجام دهد'}, status=status.HTTP_403_FORBIDDEN)
+        try:
+            class_request = ClassRequest.objects.get(pk=pk)
+        except ClassRequest.DoesNotExist:
+            return Response({'error': 'درخواست پیدا نشد'}, status=status.HTTP_404_NOT_FOUND)
+        if class_request.status in [ClassRequest.Status.COMPLETED, ClassRequest.Status.CANCELLED, ClassRequest.Status.REJECTED]:
+            return Response({'error': 'این درخواست دیگر قابل ارجاع نیست'}, status=status.HTTP_400_BAD_REQUEST)
+
+        teacher_id = request.data.get('teacher_id')
+        try:
+            chosen_teacher = User.objects.get(pk=teacher_id, role__in=User.TEACHER_LIKE_ROLES)
+        except (User.DoesNotExist, TypeError, ValueError):
+            return Response({'error': 'استاد معتبر انتخاب نشده است'}, status=status.HTTP_400_BAD_REQUEST)
+
+        previous_teachers = list(class_request.assigned_teachers.exclude(pk=chosen_teacher.pk))
+        class_request.assigned_teachers.add(chosen_teacher)
+        class_request.accepted_teachers.add(chosen_teacher)
+        class_request.teacher = chosen_teacher
+        class_request.status = ClassRequest.Status.CONFIRMED
+        class_request.save()
+        ensure_sessions(class_request)
+
+        if previous_teachers:
+            send_notification(
+                sender=request.user,
+                recipients=previous_teachers,
+                title='ارجاع کلاس تغییر کرد',
+                body='این کلاس توسط مدیر به استاد دیگری ارجاع نهایی شد',
+                notif_type='class_rejected'
+            )
+        send_notification(
+            sender=request.user,
+            recipients=[chosen_teacher],
+            title='ارجاع نهایی کلاس توسط مدیر',
+            body=f'این کلاس مستقیماً توسط مدیر به شما ارجاع شد. سهم شما: {class_request.teacher_share:,} تومان',
+            notif_type='class_accepted'
+        )
+        send_notification(
+            sender=request.user,
+            recipients=[class_request.student],
+            title='استاد کلاس شما مشخص شد',
+            body=f'کلاس شما با استاد {chosen_teacher.get_full_name()} نهایی شد',
+            notif_type='class_accepted'
+        )
+        return Response({'message': 'کلاس مستقیماً به استاد انتخاب‌شده ارجاع نهایی شد'})
+
+
 class FinalizeClassView(APIView):
     """
     مرحله ۳: مدیر از بین استادهایی که تایید اولیه کرده‌اند، یک نفر را به صورت نهایی انتخاب می‌کند.
