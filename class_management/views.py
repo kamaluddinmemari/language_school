@@ -1,6 +1,7 @@
 from django.utils import timezone
 import random
-from django.db import models as django_models
+import re
+from django.db import models as django_models, transaction
 from django.db.models import Count, Max, Q
 from rest_framework import generics, status
 from rest_framework.views import APIView
@@ -24,6 +25,45 @@ from level_tests.models import LevelTest
 from .allocation import allocate_classes
 
 MANAGE_ROLES = ('admin', 'evaluator', 'office')
+
+
+def _next_level_for_carryover(level_code):
+    """Return (next_level, terminal_warning). Prefer configured StandardLevel order; use the project defaults as fallback."""
+    raw = str(level_code or '').strip()
+    if not raw:
+        return '', ''
+    try:
+        from level_tests.models import StandardLevel
+        current = StandardLevel.objects.filter(code__iexact=raw).first()
+        if current:
+            siblings = list(StandardLevel.objects.filter(age_group=current.age_group).order_by('order', 'code').values_list('code', flat=True))
+            idx = next((i for i, code in enumerate(siblings) if str(code).lower() == raw.lower()), -1)
+            if idx >= 0 and idx + 1 < len(siblings):
+                return siblings[idx + 1], ''
+            return raw, f'سطح «{raw}» آخرین سطح گروه «{current.get_age_group_display()}» است و برای ترم بعد سطح بالاتری ندارد.'
+    except Exception:
+        pass
+    normalized = raw.lower().replace(' ', '')
+    m = re.fullmatch(r'e([1-5])', normalized)
+    if m:
+        n = int(m.group(1))
+        return (f'e{n + 1}', '') if n < 5 else (raw, f'سطح «{raw}» آخرین سطح کودک است و برای ترم بعد سطح بالاتری ندارد.')
+    m = re.fullmatch(r'teen(?:([0-9]{1,2}))', normalized)
+    if m:
+        n = int(m.group(1))
+        return (f'teen {n + 1}', '') if n < 15 else (raw, f'سطح «{raw}» آخرین سطح نوجوان است و برای ترم بعد سطح بالاتری ندارد.')
+    m = re.fullmatch(r'(10[1-6]|[2-6]0[1-6])', normalized)
+    if m:
+        n = int(m.group(1))
+        block, step = divmod(n, 100)
+        if 101 <= n <= 106:
+            return ('201', '') if n == 106 else (str(n + 1), '')
+        if 201 <= n <= 606 and n % 100 < 6:
+            return str(n + 1), ''
+        if n in (206, 306, 406, 506):
+            return str(n + 95), ''
+        return raw, f'سطح «{raw}» آخرین سطح بزرگسال تعریف‌شده است و برای ترم بعد سطح بالاتری ندارد.'
+    return raw, f'برای سطح «{raw}» ترتیب ارتقا پیدا نشد؛ سطح ترم جدید را دستی بررسی کنید.'
 
 
 def _auto_distribute_surplus(source, remainder):
@@ -72,8 +112,10 @@ class ClassSlotListView(generics.ListCreateAPIView):
             return ClassSlot.objects.none()
         qs = ClassSlot.objects.all()
         term_id = self.request.query_params.get('term')
-        if term_id:
-            qs = qs.filter(term_id=term_id)
+        if term_id in ('legacy', 'unassigned', 'null'):
+            qs = qs.filter(term__isnull=True)
+        elif term_id and str(term_id).isdigit():
+            qs = qs.filter(term_id=int(term_id))
         return qs
 
     def create(self, request, *args, **kwargs):
@@ -96,6 +138,59 @@ class TermListView(generics.ListCreateAPIView):
         if request.user.role not in MANAGE_ROLES:
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         return super().create(request, *args, **kwargs)
+
+
+class CarryClassesToNextTermView(APIView):
+    """انتقال انتخابی کلاس‌های یک ترم به ترم مقصد بدون انتقال ثبت‌نام دانش‌آموزان."""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        if request.user.role != 'admin':
+            return Response({'error': 'فقط مدیر می‌تواند کلاس‌ها را به ترم بعد منتقل کند'}, status=status.HTTP_403_FORBIDDEN)
+        source_term_id = request.data.get('source_term_id')
+        target_term_id = request.data.get('target_term_id')
+        day_types = request.data.get('day_types') or []
+        time_slots = request.data.get('time_slots') or []
+        assignments = request.data.get('classes') or []
+        try:
+            source_term = Term.objects.get(pk=source_term_id)
+            target_term = Term.objects.get(pk=target_term_id)
+        except Term.DoesNotExist:
+            return Response({'error': 'ترم مبدا یا مقصد پیدا نشد'}, status=status.HTTP_404_NOT_FOUND)
+        if source_term.id == target_term.id:
+            return Response({'error': 'ترم مقصد باید با ترم مبدا متفاوت باشد'}, status=status.HTTP_400_BAD_REQUEST)
+
+        qs = ClassSlot.objects.filter(term=source_term)
+        if day_types:
+            qs = qs.filter(day_type__in=day_types)
+        if time_slots:
+            qs = qs.filter(time_slot__in=time_slots)
+        assignment_by_id = {str(row.get('source_id')): row for row in assignments if row.get('source_id')}
+        created, skipped, warnings = [], [], []
+        with transaction.atomic():
+            for source in qs.select_for_update().order_by('number', 'day_type', 'time_slot'):
+                row = assignment_by_id.get(str(source.id), {})
+                number = int(row.get('number') or source.number)
+                teacher_name = str(row.get('teacher_name') or '').strip()
+                next_level, level_warning = _next_level_for_carryover(source.assigned_level)
+                if level_warning:
+                    warnings.append({'source_id': source.id, 'number': source.number, 'level': source.assigned_level or '', 'message': level_warning})
+                if number < 1 or number > 11:
+                    skipped.append({'source_id': source.id, 'reason': 'شماره محل باید بین ۱ تا ۱۱ باشد'})
+                    continue
+                if ClassSlot.objects.filter(term=target_term, number=number, day_type=source.day_type, time_slot=source.time_slot, is_online=source.is_online).exists():
+                    skipped.append({'source_id': source.id, 'reason': f'محل {number} در ترم مقصد برای همین روز و ساعت قبلاً وجود دارد'})
+                    continue
+                target = ClassSlot.objects.create(
+                    term=target_term, number=number, title=source.title, day_type=source.day_type,
+                    time_slot=source.time_slot, gender=source.gender, is_online=source.is_online,
+                    meeting_link='', notes=source.notes, capacity=source.capacity, teacher_name=teacher_name,
+                    previous_teacher_name=source.teacher_name or '', assigned_level=next_level,
+                    schedule_kind=source.schedule_kind, schedule_days=source.schedule_days or [],
+                    delivery_pattern=source.delivery_pattern or [], rotation_group='', current_count=0,
+                )
+                created.append({'source_id': source.id, 'target': ClassSlotSerializer(target).data})
+        return Response({'message': f'{len(created)} کلاس به ترم مقصد منتقل شد', 'created': created, 'skipped': skipped, 'warnings': warnings})
 
 
 class TermDetailView(generics.RetrieveUpdateDestroyAPIView):
@@ -145,6 +240,118 @@ class ClassSlotDetailView(generics.RetrieveUpdateDestroyAPIView):
         if request.user.role not in MANAGE_ROLES:
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         return super().destroy(request, *args, **kwargs)
+
+
+THREE_DAY_TYPES = {ClassSlot.DayType.EVEN, ClassSlot.DayType.ODD}
+ONE_DAY_TYPES = {ClassSlot.DayType.THURSDAY_MORNING, ClassSlot.DayType.THURSDAY_EVENING, ClassSlot.DayType.FRIDAY}
+
+
+def _location_types_compatible(source, target):
+    """قواعد انتقال: سه‌روزه ↔ یک‌روزه ممکن است؛ زوج/فرد و جنسیت معمولاً باید سازگار باشند."""
+    if source.is_online != target.is_online:
+        return False
+    if source.gender != target.gender:
+        return False
+    if source.day_type in THREE_DAY_TYPES and target.day_type in THREE_DAY_TYPES:
+        return source.day_type == target.day_type
+    if source.day_type in ONE_DAY_TYPES and target.day_type in ONE_DAY_TYPES:
+        return source.day_type == target.day_type
+    if (source.day_type in THREE_DAY_TYPES and target.day_type in ONE_DAY_TYPES) or (source.day_type in ONE_DAY_TYPES and target.day_type in THREE_DAY_TYPES):
+        return True
+    return source.day_type == target.day_type
+
+
+def _swap_locations_compatible(source, target):
+    """جابجایی فیزیکی فقط بین دو کلاس دقیقاً هم‌روز و هم‌ساعت انجام می‌شود."""
+    return (
+        source.term_id == target.term_id
+        and source.number != target.number
+        and source.day_type == target.day_type
+        and source.time_slot == target.time_slot
+        and source.gender == target.gender
+        and source.is_online == target.is_online
+    )
+
+
+class SwapClassLocationView(APIView):
+    """جابجایی محل دو کلاس سازگار؛ هر رکورد کلاس تمام اطلاعات خودش را حفظ می‌کند."""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, pk):
+        if request.user.role != 'admin':
+            return Response({'error': 'فقط مدیر می‌تواند محل کلاس‌ها را جابجا کند'}, status=status.HTTP_403_FORBIDDEN)
+        target_id = request.data.get('target_slot_id')
+        if not target_id or str(target_id) == str(pk):
+            return Response({'error': 'یک کلاس مقصد متفاوت انتخاب کنید'}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            with transaction.atomic():
+                source = ClassSlot.objects.select_for_update().get(pk=pk)
+                target = ClassSlot.objects.select_for_update().get(pk=target_id)
+                if source.term_id != target.term_id:
+                    return Response({'error': 'کلاس مقصد باید متعلق به همان ترم کلاس مبدا باشد'}, status=status.HTTP_400_BAD_REQUEST)
+                if source.number < 1 or source.number > 11 or target.number < 1 or target.number > 11:
+                    return Response({'error': 'شمارهٔ محل هر دو کلاس باید بین ۱ تا ۱۱ باشد'}, status=status.HTTP_400_BAD_REQUEST)
+                if not _swap_locations_compatible(source, target):
+                    return Response({'error': 'برای جابجایی، کلاس مقصد باید دقیقاً در همان روز، همان ساعت، همان ترم، با جنسیت و حالت برگزاری یکسان باشد'}, status=status.HTTP_400_BAD_REQUEST)
+                source_number, target_number = source.number, target.number
+                temporary_number = (ClassSlot.objects.order_by('-number').values_list('number', flat=True).first() or 0) + 1000000
+                source.number = temporary_number
+                source.save(update_fields=['number', 'updated_at'])
+                target.number = source_number
+                target.save(update_fields=['number', 'updated_at'])
+                source.number = target_number
+                source.save(update_fields=['number', 'updated_at'])
+        except ClassSlot.DoesNotExist:
+            return Response({'error': 'کلاس مبدا یا مقصد پیدا نشد'}, status=status.HTTP_404_NOT_FOUND)
+        return Response({'message': f'محل کلاس {source_number} و کلاس {target_number} با موفقیت جابجا شد', 'source': ClassSlotSerializer(source).data, 'target': ClassSlotSerializer(target).data})
+
+
+class TransferClassLocationView(APIView):
+    """انتقال یک کلاس به محل خالی مقصد؛ اطلاعات آموزشی کلاس مبدا همراه خود کلاس می‌ماند."""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, pk):
+        if request.user.role != 'admin':
+            return Response({'error': 'فقط مدیر می‌تواند کلاس را منتقل کند'}, status=status.HTTP_403_FORBIDDEN)
+        target_id = request.data.get('target_slot_id')
+        force_compatibility = request.data.get('force_compatibility') is True
+        try:
+            with transaction.atomic():
+                source = ClassSlot.objects.select_for_update().get(pk=pk)
+                target = ClassSlot.objects.select_for_update().get(pk=target_id)
+                if source.term_id != target.term_id:
+                    return Response({'error': 'کلاس مقصد باید متعلق به همان ترم کلاس مبدا باشد'}, status=status.HTTP_400_BAD_REQUEST)
+                if not _location_types_compatible(source, target):
+                    # مدیر می‌تواند بعد از دیدن هشدار، فقط استثنای روز/جنسیت/ساعت را تایید کند؛
+                    # حالت آنلاین/حضوری و خالی بودن مقصد همچنان اجباری است.
+                    if not force_compatibility or source.is_online != target.is_online:
+                        return Response({'error': 'روز/نوع روز یا جنسیت مقصد با کلاس مبدا سازگار نیست؛ برای ادامه باید یکی از گزینه‌های جایگزین را با تایید مدیر انتخاب کنید'}, status=status.HTTP_400_BAD_REQUEST)
+                if target.number < 1 or target.number > 11 or target.number == source.number:
+                    return Response({'error': 'شمارهٔ محل مقصد باید از ۱ تا ۱۱ و متفاوت از مبدا باشد'}, status=status.HTTP_400_BAD_REQUEST)
+                if target.real_enrolled_count or target.current_count or target.assigned_level or target.teacher_name:
+                    return Response({'error': 'محل مقصد خالی نیست؛ برای جابه‌جایی دو کلاس از دکمهٔ «جابجایی محل کلاس» استفاده کنید'}, status=status.HTTP_409_CONFLICT)
+                old_location = {'number': source.number, 'day_type': source.day_type, 'time_slot': source.time_slot}
+                destination_location = {'number': target.number, 'day_type': target.day_type, 'time_slot': target.time_slot}
+
+                # انتقال واقعی: اطلاعات آموزشی/اجرایی و ثبت‌نام‌ها به رکورد مقصد می‌روند؛
+                # رکورد مبدا به یک محل خالی با برنامهٔ قبلی خودش تبدیل می‌شود.
+                class_fields = ['title', 'meeting_link', 'notes', 'capacity', 'teacher_name', 'assigned_level', 'current_count', 'gender', 'is_online', 'schedule_kind', 'schedule_days', 'delivery_pattern', 'rotation_group']
+                for field in class_fields:
+                    setattr(target, field, getattr(source, field))
+                target.save(update_fields=class_fields + ['updated_at'])
+                source.enrollments.update(class_slot=target)
+                source.title = ''
+                source.meeting_link = ''
+                source.notes = ''
+                source.capacity = 10
+                source.teacher_name = ''
+                source.assigned_level = ''
+                source.current_count = 0
+                source.save(update_fields=['title', 'meeting_link', 'notes', 'capacity', 'teacher_name', 'assigned_level', 'current_count', 'updated_at'])
+        except ClassSlot.DoesNotExist:
+            return Response({'error': 'کلاس مبدا یا مقصد پیدا نشد'}, status=status.HTTP_404_NOT_FOUND)
+        suffix = ' با تایید استثناهای مدیر' if force_compatibility else ''
+        return Response({'message': f'کلاس از محل {old_location["number"]} به محل {destination_location["number"]} منتقل شد{suffix}', 'source': ClassSlotSerializer(source).data, 'target': ClassSlotSerializer(target).data})
 
 
 class AllocateClassesView(APIView):
@@ -467,31 +674,52 @@ class BulkCreatePhysicalClassesView(APIView):
         include_thu_evening = serializer.validated_data.get('include_thursday_evening', True)
         include_friday = serializer.validated_data.get('include_friday', True)
         is_online = serializer.validated_data.get('is_online', False)
+        schedule_kind = serializer.validated_data.get('schedule_kind', ClassSlot.ScheduleKind.STANDARD)
+        two_day_days = serializer.validated_data.get('two_day_days') or []
+        delivery_pattern = serializer.validated_data.get('delivery_pattern') or []
+        rotating_morning_time = serializer.validated_data.get('rotating_morning_time') or '09:45-11:15'
+        rotating_evening_time = serializer.validated_data.get('rotating_evening_time') or '17:30-19:00'
 
         for room in rooms:
             number = room['number']
             capacity = room['capacity']
 
             combos = []
-            for slot in THREE_DAY_TIME_SLOTS:
-                if slot in include_slots:
-                    combos.append((ClassSlot.DayType.EVEN, slot, ClassSlot.Gender.GIRLS))
-            for slot in THREE_DAY_TIME_SLOTS:
-                if slot in include_slots:
-                    combos.append((ClassSlot.DayType.ODD, slot, ClassSlot.Gender.BOYS))
-            if include_thu_morning:
-                combos.append((ClassSlot.DayType.THURSDAY_MORNING, THURSDAY_MORNING_SLOT, room['thursday_morning_gender']))
-            if include_thu_evening:
-                combos.append((ClassSlot.DayType.THURSDAY_EVENING, THURSDAY_EVENING_SLOT, room['thursday_evening_gender']))
-            if include_friday:
-                combos.append((ClassSlot.DayType.FRIDAY, FRIDAY_SLOT, room['friday_gender']))
+            if schedule_kind == ClassSlot.ScheduleKind.TWO_DAY:
+                if len(two_day_days) != 2 or len(set(two_day_days)) != 2:
+                    return Response({'error': 'برای کلاس دو روز در هفته دقیقاً دو روز متفاوت انتخاب کنید'}, status=status.HTTP_400_BAD_REQUEST)
+                combos.append((ClassSlot.DayType.TWO_DAY, '، '.join(two_day_days), room.get('thursday_morning_gender') or ClassSlot.Gender.MIXED, two_day_days, delivery_pattern, ''))
+            elif schedule_kind == ClassSlot.ScheduleKind.ROTATING:
+                rotation_key = f'rotating-{term.id}-{number}'
+                combos.append((ClassSlot.DayType.ROTATING, f'{rotating_morning_time} / {rotating_evening_time}', ClassSlot.Gender.MIXED, ['صبح', 'عصر'], delivery_pattern, rotation_key))
+            elif schedule_kind == ClassSlot.ScheduleKind.HYBRID:
+                if not delivery_pattern:
+                    return Response({'error': 'برای کلاس ترکیبی، ترکیب جلسه‌های حضوری و مجازی را مشخص کنید'}, status=status.HTTP_400_BAD_REQUEST)
+                combos.append((ClassSlot.DayType.HYBRID, 'ترکیبی', room.get('thursday_morning_gender') or ClassSlot.Gender.MIXED, [], delivery_pattern, ''))
+            else:
+                for slot in THREE_DAY_TIME_SLOTS:
+                    if slot in include_slots:
+                        combos.append((ClassSlot.DayType.EVEN, slot, ClassSlot.Gender.GIRLS, [], [], ''))
+                for slot in THREE_DAY_TIME_SLOTS:
+                    if slot in include_slots:
+                        combos.append((ClassSlot.DayType.ODD, slot, ClassSlot.Gender.BOYS, [], [], ''))
+                if include_thu_morning:
+                    combos.append((ClassSlot.DayType.THURSDAY_MORNING, THURSDAY_MORNING_SLOT, room['thursday_morning_gender'], [], [], ''))
+                if include_thu_evening:
+                    combos.append((ClassSlot.DayType.THURSDAY_EVENING, THURSDAY_EVENING_SLOT, room['thursday_evening_gender'], [], [], ''))
+                if include_friday:
+                    combos.append((ClassSlot.DayType.FRIDAY, FRIDAY_SLOT, room['friday_gender'], [], [], ''))
 
-            for day_type, time_slot, gender in combos:
+            for day_type, time_slot, gender, schedule_days, row_delivery_pattern, rotation_group in combos:
                 # get_or_create با term و is_online در ورودی جستجو، یعنی هر ترم و هر حالت
                 # (آنلاین/حضوری) مجموعه‌ی کاملاً مستقل خودش از کلاس‌ها را دارد
                 obj, was_created = ClassSlot.objects.get_or_create(
                     number=number, day_type=day_type, time_slot=time_slot, term=term, is_online=is_online,
-                    defaults={'capacity': capacity, 'gender': gender},
+                    defaults={
+                        'capacity': capacity, 'gender': gender, 'schedule_kind': schedule_kind,
+                        'schedule_days': schedule_days, 'delivery_pattern': row_delivery_pattern,
+                        'rotation_group': rotation_group,
+                    },
                 )
                 if was_created:
                     created.append(obj.id)

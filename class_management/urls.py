@@ -1,6 +1,6 @@
 from django.urls import path
 from .views import (
-    ClassSlotListView, ClassSlotDetailView, AllocateClassesView,
+    ClassSlotListView, ClassSlotDetailView, SwapClassLocationView, TransferClassLocationView, AllocateClassesView,
     ConfirmOverflowView, TransferSurplusView, SpinOffSurplusView, ClassStatsView,
     BulkCreatePhysicalClassesView, ClassSlotEnrollView, ClassSlotUnenrollView, ClassSlotRosterView,
     TuitionSuggestionView, TuitionSettingListView, TuitionSettingDetailView, DiscountedPersonListView, DiscountedPersonDetailView,
@@ -9,7 +9,7 @@ from .views import (
     MyDirectEnrollSuggestionsView, SelfEnrollView, VerifyEnrollmentPaymentView, MyEnrollmentsView,
     LevelRenewalApprovalListView, LevelRenewalApprovalDecideView,
     PendingSelfEnrollmentsView, RejectPendingEnrollmentView, StudentEducationHistoryView,
-    TermListView, TermDetailView, TeacherEducationHistoryView, TeacherTermClassesView,
+    TermListView, TermDetailView, CarryClassesToNextTermView, TeacherEducationHistoryView, TeacherTermClassesView,
     OnlineCourseListView, OnlineCourseDetailView, OnlineCourseCatalogView, OnlineCourseEnrollView,
     OnlineCourseSelfEnrollView, PendingOnlineCourseEnrollmentsView, VerifyOnlineCourseEnrollmentPaymentView,
     RejectPendingOnlineCourseEnrollmentView, RefundOnlineCourseEnrollmentView, CreditOnlineCourseToWalletView,
@@ -23,6 +23,8 @@ from .views import (
 urlpatterns = [
     path('class-management/slots/', ClassSlotListView.as_view(), name='class_slot_list'),
     path('class-management/slots/<int:pk>/', ClassSlotDetailView.as_view(), name='class_slot_detail'),
+    path('class-management/slots/<int:pk>/swap-location/', SwapClassLocationView.as_view(), name='class_slot_swap_location'),
+    path('class-management/slots/<int:pk>/transfer-location/', TransferClassLocationView.as_view(), name='class_slot_transfer_location'),
     path('class-management/slots/<int:pk>/transfer-surplus/', TransferSurplusView.as_view(), name='class_transfer_surplus'),
     path('class-management/slots/<int:pk>/spin-off-surplus/', SpinOffSurplusView.as_view(), name='class_spin_off_surplus'),
     path('class-management/slots/<int:pk>/enroll/', ClassSlotEnrollView.as_view(), name='class_slot_enroll'),
@@ -56,6 +58,7 @@ urlpatterns = [
     path('class-management/enrollment-report/', EnrollmentReportView.as_view(), name='enrollment_report'),
     path('class-management/terms/', TermListView.as_view(), name='term_list'),
     path('class-management/terms/<int:pk>/', TermDetailView.as_view(), name='term_detail'),
+    path('class-management/terms/carry-classes/', CarryClassesToNextTermView.as_view(), name='carry_classes_to_next_term'),
     path('class-management/teachers/<int:teacher_id>/education-history/', TeacherEducationHistoryView.as_view(), name='teacher_education_history'),
     path('class-management/my-term-classes/', TeacherTermClassesView.as_view(), name='my_term_classes'),
 

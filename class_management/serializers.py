@@ -33,12 +33,14 @@ class ClassSlotSerializer(serializers.ModelSerializer):
     real_surplus = serializers.ReadOnlyField()
     updated_at_jalali = serializers.ReadOnlyField()
     term_title = serializers.SerializerMethodField()
+    schedule_days_display = serializers.ReadOnlyField()
+    delivery_pattern_display = serializers.ReadOnlyField()
 
     class Meta:
         model = ClassSlot
         fields = [
             'id', 'number', 'term', 'term_title', 'title', 'day_type', 'day_type_display', 'gender', 'gender_display',
-            'capacity', 'teacher_name', 'time_slot', 'notes', 'is_three_day', 'is_online', 'meeting_link',
+            'capacity', 'teacher_name', 'previous_teacher_name', 'time_slot', 'schedule_kind', 'schedule_days', 'schedule_days_display', 'delivery_pattern', 'delivery_pattern_display', 'rotation_group', 'notes', 'is_three_day', 'is_online', 'meeting_link',
             'assigned_level', 'current_count', 'capacity_status', 'seats_left', 'surplus',
             'real_enrolled_count', 'real_capacity_status', 'real_seats_left', 'real_surplus',
             'updated_at', 'updated_at_jalali',
@@ -119,6 +121,11 @@ class BulkCreatePhysicalClassesSerializer(serializers.Serializer):
     include_thursday_evening = serializers.BooleanField(required=False, default=True)
     include_friday = serializers.BooleanField(required=False, default=True)
     is_online = serializers.BooleanField(required=False, default=False)
+    schedule_kind = serializers.ChoiceField(choices=ClassSlot.ScheduleKind.choices, required=False, default=ClassSlot.ScheduleKind.STANDARD)
+    two_day_days = serializers.ListField(child=serializers.CharField(), required=False, default=list)
+    delivery_pattern = serializers.ListField(child=serializers.CharField(), required=False, default=list)
+    rotating_morning_time = serializers.CharField(required=False, allow_blank=True, default='')
+    rotating_evening_time = serializers.CharField(required=False, allow_blank=True, default='')
 
 
 class EnrollStudentSerializer(serializers.Serializer):

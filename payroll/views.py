@@ -4,6 +4,7 @@ from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from django.utils import timezone
 from django.contrib.auth import get_user_model
+from django.db.models import Q
 
 from .models import EmployeeProfile, SalaryProfile, MonthlyPayroll, LeaveBalance, LeaveRequest, AttendanceLog
 from .serializers import (
@@ -268,7 +269,11 @@ class MonthlyPayrollAcknowledgeView(APIView):
 
 
 def approved_daily_leave(user, day):
-    return LeaveRequest.objects.filter(user=user, status=LeaveRequest.Status.APPROVED, leave_type=LeaveRequest.LeaveType.DAILY, start_date__lte=day).filter(Q(end_date__gte=day) | Q(end_date__isnull=True)).first()
+    # فقط ستون‌هایی را بخوان که در migration اولیه وجود دارند تا قبل از اجرای migrationهای
+    # جدید (leave_shift/credited_hours) ثبت ورود کارمند با خطای ستون ناشناخته متوقف نشود.
+    return LeaveRequest.objects.only('id', 'user', 'status', 'leave_type', 'start_date', 'end_date').filter(
+        user=user, status=LeaveRequest.Status.APPROVED, leave_type=LeaveRequest.LeaveType.DAILY, start_date__lte=day
+    ).filter(Q(end_date__gte=day) | Q(end_date__isnull=True)).first()
 
 # ==================== ثبت ساعت ورود و خروج (AttendanceLog) ====================
 
@@ -280,11 +285,11 @@ class MyAttendanceTodayView(APIView):
         today = timezone.localtime(timezone.now()).date()
         leave = approved_daily_leave(request.user, today)
         if leave:
-            return Response({'error': 'کارمند در مرخصی می‌باشد', 'on_leave': True, 'leave_shift': leave.leave_shift, 'leave_credited_hours': leave.credited_hours_label}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({'error': 'کارمند در مرخصی می‌باشد', 'on_leave': True, 'leave_shift': getattr(leave, 'leave_shift', 'full_day'), 'leave_credited_hours': getattr(leave, 'credited_hours_label', ''),}, status=status.HTTP_400_BAD_REQUEST)
         log = AttendanceLog.objects.filter(user=request.user, date=today).first()
         leave = approved_daily_leave(request.user, today)
         payload = AttendanceLogSerializer(log).data if log else {'date': today.isoformat(), 'check_in': None, 'check_out': None}
-        payload.update({'on_leave': bool(leave), 'leave_message': 'کارمند در مرخصی می‌باشد' if leave else None, 'leave_shift': leave.leave_shift if leave else None, 'leave_credited_hours': leave.credited_hours_label if leave else None})
+        payload.update({'on_leave': bool(leave), 'leave_message': 'کارمند در مرخصی می‌باشد' if leave else None, 'leave_shift': getattr(leave, 'leave_shift', 'full_day') if leave else None, 'leave_credited_hours': getattr(leave, 'credited_hours_label', '') if leave else None})
         return Response(payload)
 
 
@@ -296,7 +301,7 @@ class CheckInView(APIView):
         today = timezone.localtime(timezone.now()).date()
         leave = approved_daily_leave(request.user, today)
         if leave:
-            return Response({'error': 'کارمند در مرخصی می‌باشد', 'on_leave': True, 'leave_shift': leave.leave_shift, 'leave_credited_hours': leave.credited_hours_label}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({'error': 'کارمند در مرخصی می‌باشد', 'on_leave': True, 'leave_shift': getattr(leave, 'leave_shift', 'full_day'), 'leave_credited_hours': getattr(leave, 'credited_hours_label', ''),}, status=status.HTTP_400_BAD_REQUEST)
         log, created = AttendanceLog.objects.get_or_create(user=request.user, date=today)
         if log.check_in:
             return Response({'error': f'شما امروز ساعت {log.check_in_time_jalali} ورودتان ثبت شده — هر روز فقط یک‌بار قابل ثبت است'}, status=status.HTTP_400_BAD_REQUEST)

@@ -38,7 +38,7 @@ def allocate_classes(levels, tolerance=0, thursday_only_count=0, friday_only_cou
     thursday_slots = [s for s in slots if s.day_type in (ClassSlot.DayType.THURSDAY_MORNING, ClassSlot.DayType.THURSDAY_EVENING)]
     friday_slots = [s for s in slots if s.day_type == ClassSlot.DayType.FRIDAY]
     category_slots = [s for s in slots if s.day_type in (
-        ClassSlot.DayType.EVEN, ClassSlot.DayType.ODD, ClassSlot.DayType.ONLINE, ClassSlot.DayType.HYBRID)]
+        ClassSlot.DayType.EVEN, ClassSlot.DayType.ODD, ClassSlot.DayType.TWO_DAY, ClassSlot.DayType.ROTATING, ClassSlot.DayType.ONLINE, ClassSlot.DayType.HYBRID)]
 
     demand = sorted([dict(l) for l in levels if l.get('count', 0) > 0], key=lambda x: -x['count'])
     warnings = []

@@ -56,7 +56,7 @@ class ClassRequestListCreateView(generics.ListCreateAPIView):
             if self.request.user.role in ('admin', 'office'):
                 return ClassRequestAdminCreateSerializer
             return ClassRequestCreateSerializer
-        if self.request.user.role in ('admin', 'evaluator'):
+        if self.request.user.role in ('admin', 'evaluator', 'office'):
             return ClassRequestAdminSerializer
         if self.request.user.role in User.TEACHER_LIKE_ROLES:
             return ClassRequestTeacherSerializer
@@ -64,7 +64,7 @@ class ClassRequestListCreateView(generics.ListCreateAPIView):
 
     def get_queryset(self):
         user = self.request.user
-        if user.role in ('admin', 'evaluator'):
+        if user.role in ('admin', 'evaluator', 'office'):
             return ClassRequest.objects.all().order_by('-created_at')
         elif user.role in User.TEACHER_LIKE_ROLES:
             from django.db.models import Q
@@ -107,7 +107,7 @@ class ClassRequestDetailView(generics.RetrieveUpdateDestroyAPIView):
 
     def get_queryset(self):
         user = self.request.user
-        if user.role in ('admin', 'evaluator'):
+        if user.role in ('admin', 'evaluator', 'office'):
             return ClassRequest.objects.all()
         elif user.role in User.TEACHER_LIKE_ROLES:
             from django.db.models import Q

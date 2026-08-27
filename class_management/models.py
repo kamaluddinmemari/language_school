@@ -95,12 +95,20 @@ class ClassSlot(models.Model):
 
     class DayType(models.TextChoices):
         EVEN = 'even', 'روز زوج (سه روز در هفته)'
+        TWO_DAY = 'two_day', 'دو روز در هفته'
+        ROTATING = 'rotating', 'چرخشی صبح/عصر'
         ODD = 'odd', 'روز فرد (سه روز در هفته)'
         THURSDAY_MORNING = 'thursday_morning', 'یک روز در هفته - پنجشنبه صبح'
         THURSDAY_EVENING = 'thursday_evening', 'یک روز در هفته - پنجشنبه عصر'
         FRIDAY = 'friday', 'یک روز در هفته - جمعه'
         ONLINE = 'online', 'آنلاین'
         HYBRID = 'hybrid', 'ترکیبی (آنلاین و حضوری)'
+
+    class ScheduleKind(models.TextChoices):
+        STANDARD = 'standard', 'کلاس عادی'
+        TWO_DAY = 'two_day', 'دو روز در هفته'
+        HYBRID = 'hybrid', 'ترکیبی حضوری/مجازی'
+        ROTATING = 'rotating', 'چرخشی صبح/عصر'
 
     class Gender(models.TextChoices):
         GIRLS = 'girls', 'دخترانه'
@@ -115,6 +123,10 @@ class ClassSlot(models.Model):
     title = models.CharField(max_length=100, blank=True)
     day_type = models.CharField(max_length=20, choices=DayType.choices)
     time_slot = models.CharField(max_length=20, blank=True, help_text='ساعت جاری کلاس — ترجیحاً از لیست استاندارد')
+    schedule_kind = models.CharField(max_length=20, choices=ScheduleKind.choices, default=ScheduleKind.STANDARD)
+    schedule_days = models.JSONField(default=list, blank=True, help_text='روزهای انتخاب‌شده برای کلاس‌های دو روزه یا چرخشی')
+    delivery_pattern = models.JSONField(default=list, blank=True, help_text='ترکیب جلسه‌ها؛ مثلاً دو جلسه آنلاین و یک جلسه حضوری')
+    rotation_group = models.CharField(max_length=64, blank=True, help_text='کلید مشترک کلاس چرخشی صبح/عصر؛ دانش‌آموز و استاد یکسان می‌ماند')
     gender = models.CharField(max_length=10, choices=Gender.choices, default=Gender.MIXED, help_text='دخترانه/پسرانه/مختلط — برای جایگذاری صحیح دانش‌آموزان')
     is_online = models.BooleanField(default=False, help_text='کلاس آنلاین است — دقیقاً همان قواعد تشکیل/ثبت‌نام کلاس‌های ترمیک حضوری را دارد، فقط با لینک ورود آنلاین')
     meeting_link = models.URLField(max_length=500, blank=True, help_text='لینک کلاس آنلاین (مثلاً Google Meet/Zoom) — بعد از تایید ثبت‌نام، هم به استاد هم به دانش‌آموز در اپ نمایش داده می‌شود')
@@ -122,6 +134,7 @@ class ClassSlot(models.Model):
 
     capacity = models.PositiveIntegerField(default=10)
     teacher_name = models.CharField(max_length=150, blank=True)
+    previous_teacher_name = models.CharField(max_length=150, blank=True, help_text='نام استاد کلاس متناظر در ترم قبل برای نمایش راهنما')
 
     assigned_level = models.CharField(max_length=50, blank=True)
     current_count = models.PositiveIntegerField(default=0)
@@ -141,6 +154,14 @@ class ClassSlot(models.Model):
     @property
     def day_type_display(self):
         return self.get_day_type_display()
+
+    @property
+    def schedule_days_display(self):
+        return '، '.join(self.schedule_days or [])
+
+    @property
+    def delivery_pattern_display(self):
+        return '، '.join(self.delivery_pattern or [])
 
     @property
     def is_three_day(self):
@@ -212,6 +233,8 @@ class ClassSlot(models.Model):
         دسته‌ی ساعتی کلاس بر اساس ساعت فعلی‌اش (نه روزش) — برای تطبیق با نیاز سطح‌ها در تخصیص.
         فقط برای کلاس‌های زوج/فرد/آنلاین/ترکیبی معنی دارد (پنجشنبه/جمعه جدا و بر اساس day_type مدیریت می‌شوند).
         """
+        if self.schedule_kind == self.ScheduleKind.ROTATING or self.day_type == self.DayType.ROTATING:
+            return {'morning', 'evening_any', 'evening_late'}
         if not self.time_slot or '-' not in self.time_slot:
             return set()
         start = self.time_slot.split('-')[0]
