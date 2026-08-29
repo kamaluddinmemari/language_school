@@ -18,6 +18,7 @@ from .views import (
     OnlineCourseRosterView, OnlineCourseUnenrollView, OnlineCourseTransferOptionsView, OnlineCourseTransferView,
     StudentCreateOnlineCourseActionRequestView, MyOnlineCourseActionRequestsView,
     AdminOnlineCourseActionRequestListView, ApproveOnlineCourseActionRequestView, RejectOnlineCourseActionRequestView,
+    TeacherTermReportView, TeacherSessionEventListCreateView, TeacherSessionEventDetailView,
 )
 
 urlpatterns = [
@@ -61,6 +62,9 @@ urlpatterns = [
     path('class-management/terms/carry-classes/', CarryClassesToNextTermView.as_view(), name='carry_classes_to_next_term'),
     path('class-management/teachers/<int:teacher_id>/education-history/', TeacherEducationHistoryView.as_view(), name='teacher_education_history'),
     path('class-management/my-term-classes/', TeacherTermClassesView.as_view(), name='my_term_classes'),
+    path('class-management/teacher-term-report/', TeacherTermReportView.as_view(), name='teacher_term_report'),
+    path('class-management/teacher-session-events/', TeacherSessionEventListCreateView.as_view(), name='teacher_session_event_list_create'),
+    path('class-management/teacher-session-events/<int:pk>/', TeacherSessionEventDetailView.as_view(), name='teacher_session_event_detail'),
 
     # --- سایر دوره‌ها / کلاس‌های علمی (OnlineCourse) ---
     path('class-management/courses/', OnlineCourseListView.as_view(), name='online_course_list'),

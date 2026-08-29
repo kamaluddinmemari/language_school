@@ -1,8 +1,11 @@
 from django.utils import timezone
 import random
 import re
+import math
+from datetime import datetime, timedelta
 from django.db import models as django_models, transaction
 from django.db.models import Count, Max, Q
+from django.shortcuts import get_object_or_404
 from rest_framework import generics, status
 from rest_framework.views import APIView
 from rest_framework.response import Response
@@ -11,6 +14,15 @@ from rest_framework.permissions import IsAuthenticated
 import jdatetime
 from .models import ClassSlot, ClassSlotEnrollment, TuitionSetting, DiscountedPerson, EnrollmentRefund, WalletTransaction, infer_age_group_from_level, _jalali, LevelRenewalApproval, Term, OnlineCourse, OnlineCourseEnrollment, PaymentSettings, ClassAttendance, OnlineCourseActionRequest
 from .models import THREE_DAY_TIME_SLOTS, THURSDAY_MORNING_SLOT, THURSDAY_EVENING_SLOT, FRIDAY_SLOT
+
+# QR و جلسات استادان فعلاً غیرفعال هستند؛ نبودن مدل‌های این بخش‌ها نباید مانع اجرای ترم و کلاس شود.
+try:
+    from .models import RoomQrToken, TeacherSessionEvent, TeacherSessionAttendance, TeacherCompensationSetting
+except ImportError:
+    RoomQrToken = None
+    TeacherSessionEvent = None
+    TeacherSessionAttendance = None
+    TeacherCompensationSetting = None
 from .serializers import (
     ClassSlotSerializer, AllocateClassesSerializer, ConfirmOverflowSerializer,
     TransferSurplusSerializer, SpinOffSurplusSerializer,
@@ -135,22 +147,28 @@ class CarryClassesToNextTermView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
-        if request.user.role != 'admin':
-            return Response({'error': 'فقط مدیر می‌تواند کلاس‌ها را به ترم بعد منتقل کند'}, status=status.HTTP_403_FORBIDDEN)
+        if request.user.role not in MANAGE_ROLES:
+            return Response({'error': 'دسترسی به انتقال کلاس‌ها ندارید'}, status=status.HTTP_403_FORBIDDEN)
         source_term_id = request.data.get('source_term_id')
         target_term_id = request.data.get('target_term_id')
         day_types = request.data.get('day_types') or []
         time_slots = request.data.get('time_slots') or []
         assignments = request.data.get('classes') or []
         try:
-            source_term = Term.objects.get(pk=source_term_id)
             target_term = Term.objects.get(pk=target_term_id)
-        except Term.DoesNotExist:
-            return Response({'error': 'ترم مبدا یا مقصد پیدا نشد'}, status=status.HTTP_404_NOT_FOUND)
-        if source_term.id == target_term.id:
-            return Response({'error': 'ترم مقصد باید با ترم مبدا متفاوت باشد'}, status=status.HTTP_400_BAD_REQUEST)
-
-        qs = ClassSlot.objects.filter(term=source_term)
+        except (Term.DoesNotExist, TypeError, ValueError):
+            return Response({'error': 'ترم مقصد پیدا نشد'}, status=status.HTTP_404_NOT_FOUND)
+        legacy_source = str(source_term_id).lower() in {'legacy', 'unassigned', 'null', 'none'}
+        if legacy_source:
+            qs = ClassSlot.objects.filter(term__isnull=True)
+        else:
+            try:
+                source_term = Term.objects.get(pk=source_term_id)
+            except (Term.DoesNotExist, TypeError, ValueError):
+                return Response({'error': 'ترم مبدا پیدا نشد'}, status=status.HTTP_404_NOT_FOUND)
+            if source_term.id == target_term.id:
+                return Response({'error': 'ترم مقصد باید با ترم مبدا متفاوت باشد'}, status=status.HTTP_400_BAD_REQUEST)
+            qs = ClassSlot.objects.filter(term=source_term)
         if day_types:
             qs = qs.filter(day_type__in=day_types)
         if time_slots:
@@ -162,22 +180,42 @@ class CarryClassesToNextTermView(APIView):
                 row = assignment_by_id.get(str(source.id), {})
                 number = int(row.get('number') or source.number)
                 teacher_name = str(row.get('teacher_name') or '').strip()
-                next_level, level_warning = _next_level_for_carryover(source.assigned_level)
-                if level_warning:
+                day_type = str(row.get('day_type') or source.day_type).strip()
+                schedule_kind = str(row.get('schedule_kind') or source.schedule_kind).strip()
+                time_slot = str(row.get('time_slot') or source.time_slot or '').strip()
+                schedule_days = row.get('schedule_days') if isinstance(row.get('schedule_days'), list) else (source.schedule_days or [])
+                delivery_pattern = row.get('delivery_pattern') if isinstance(row.get('delivery_pattern'), list) else (source.delivery_pattern or [])
+                gender = str(row.get('gender') or source.gender).strip()
+                is_online = row.get('is_online') if 'is_online' in row else source.is_online
+                if day_type not in ClassSlot.DayType.values:
+                    skipped.append({'source_id': source.id, 'reason': 'نوع روز کلاس مقصد معتبر نیست'})
+                    continue
+                if schedule_kind not in ClassSlot.ScheduleKind.values:
+                    skipped.append({'source_id': source.id, 'reason': 'نوع برنامه کلاس مقصد معتبر نیست'})
+                    continue
+                if gender not in ClassSlot.Gender.values:
+                    skipped.append({'source_id': source.id, 'reason': 'جنسیت کلاس مقصد معتبر نیست'})
+                    continue
+                fixed_time = {ClassSlot.DayType.THURSDAY_MORNING: THURSDAY_MORNING_SLOT, ClassSlot.DayType.THURSDAY_EVENING: THURSDAY_EVENING_SLOT, ClassSlot.DayType.FRIDAY: FRIDAY_SLOT}.get(day_type)
+                if fixed_time:
+                    time_slot = fixed_time
+                automatic_level, level_warning = _next_level_for_carryover(source.assigned_level)
+                assigned_level = str(row['assigned_level']).strip() if 'assigned_level' in row else automatic_level
+                if assigned_level == automatic_level and level_warning:
                     warnings.append({'source_id': source.id, 'number': source.number, 'level': source.assigned_level or '', 'message': level_warning})
                 if number < 1 or number > 11:
                     skipped.append({'source_id': source.id, 'reason': 'شماره محل باید بین ۱ تا ۱۱ باشد'})
                     continue
-                if ClassSlot.objects.filter(term=target_term, number=number, day_type=source.day_type, time_slot=source.time_slot, is_online=source.is_online).exists():
-                    skipped.append({'source_id': source.id, 'reason': f'محل {number} در ترم مقصد برای همین روز و ساعت قبلاً وجود دارد'})
+                if ClassSlot.objects.filter(term=target_term, number=number, day_type=day_type, time_slot=time_slot, is_online=is_online).exists():
+                    skipped.append({'source_id': source.id, 'reason': f'محل {number} در ترم مقصد برای روز و ساعت انتخاب‌شده قبلاً وجود دارد'})
                     continue
                 target = ClassSlot.objects.create(
-                    term=target_term, number=number, title=source.title, day_type=source.day_type,
-                    time_slot=source.time_slot, gender=source.gender, is_online=source.is_online,
-                    meeting_link='', notes=source.notes, capacity=source.capacity, teacher_name=teacher_name,
-                    previous_teacher_name=source.teacher_name or '', assigned_level=next_level,
-                    schedule_kind=source.schedule_kind, schedule_days=source.schedule_days or [],
-                    delivery_pattern=source.delivery_pattern or [], rotation_group='', current_count=0,
+                    term=target_term, number=number, title=source.title, day_type=day_type,
+                    time_slot=time_slot, gender=gender, is_online=is_online,
+                    meeting_link=str(row.get('meeting_link') or ''), notes=source.notes, capacity=source.capacity, teacher_name=teacher_name,
+                    previous_teacher_name=source.teacher_name or '', assigned_level=assigned_level,
+                    schedule_kind=schedule_kind, schedule_days=schedule_days,
+                    delivery_pattern=delivery_pattern, rotation_group='', current_count=0,
                 )
                 created.append({'source_id': source.id, 'target': ClassSlotSerializer(target).data})
         return Response({'message': f'{len(created)} کلاس به ترم مقصد منتقل شد', 'created': created, 'skipped': skipped, 'warnings': warnings})
@@ -268,8 +306,8 @@ class SwapClassLocationView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request, pk):
-        if request.user.role != 'admin':
-            return Response({'error': 'فقط مدیر می‌تواند محل کلاس‌ها را جابجا کند'}, status=status.HTTP_403_FORBIDDEN)
+        if request.user.role not in MANAGE_ROLES:
+            return Response({'error': 'دسترسی به جابجایی محل کلاس‌ها ندارید'}, status=status.HTTP_403_FORBIDDEN)
         target_id = request.data.get('target_slot_id')
         if not target_id or str(target_id) == str(pk):
             return Response({'error': 'یک کلاس مقصد متفاوت انتخاب کنید'}, status=status.HTTP_400_BAD_REQUEST)
@@ -301,8 +339,8 @@ class TransferClassLocationView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request, pk):
-        if request.user.role != 'admin':
-            return Response({'error': 'فقط مدیر می‌تواند کلاس را منتقل کند'}, status=status.HTTP_403_FORBIDDEN)
+        if request.user.role not in MANAGE_ROLES:
+            return Response({'error': 'دسترسی به انتقال کلاس ندارید'}, status=status.HTTP_403_FORBIDDEN)
         target_id = request.data.get('target_slot_id')
         force_compatibility = request.data.get('force_compatibility') is True
         try:
@@ -2657,6 +2695,355 @@ class ClassAttendanceListView(generics.ListAPIView):
         if date_str:
             qs = qs.filter(date=date_str)
         return qs
+
+
+def _teacher_event_payload(event):
+    slot = event.class_slot
+    return {
+        'id': event.id, 'term': event.term_id, 'term_title': event.term.title,
+        'class_slot': slot.id, 'class_number': slot.number, 'class_title': slot.title,
+        'day_type': slot.day_type, 'day_type_display': slot.get_day_type_display(),
+        'time_slot': slot.time_slot, 'gender': slot.gender, 'gender_display': slot.get_gender_display(),
+        'level': slot.assigned_level, 'event_type': event.event_type,
+        'event_type_display': event.get_event_type_display(), 'class_date': event.class_date,
+        'class_date_jalali': event.class_date_jalali, 'session_number': event.session_number,
+        'requested_teacher_name': event.requested_teacher_name,
+        'replacement_teacher_name': event.replacement_teacher_name,
+        'status': event.status, 'status_display': event.get_status_display(),
+        'requested_by': event.requested_by.get_full_name() if event.requested_by else '',
+        'approved_by': event.approved_by.get_full_name() if event.approved_by else '',
+        'requested_at_jalali': event.requested_at_jalali, 'approved_at_jalali': event.approved_at_jalali,
+        'makeup_required': event.makeup_required, 'makeup_session_count': event.makeup_session_count,
+        'notes': event.notes,
+    }
+
+
+def _teacher_report_payload(slot, events):
+    approved = [e for e in events if e.status == TeacherSessionEvent.ApprovalStatus.APPROVED]
+    source = slot.teacher_name or ''
+    source_count = 15
+    replacement_counts = {}
+    status_rows = []
+    for e in approved:
+        if e.event_type == TeacherSessionEvent.EventType.SUBSTITUTION:
+            source_count -= 1
+            replacement_counts[e.replacement_teacher_name] = replacement_counts.get(e.replacement_teacher_name, 0) + 1
+            status_rows.append({'session_number': e.session_number, 'date': e.class_date_jalali, 'status': 'substitution', 'label': 'ساب', 'teacher': e.replacement_teacher_name})
+        elif e.event_type == TeacherSessionEvent.EventType.ABSENCE:
+            source_count -= 1
+            status_rows.append({'session_number': e.session_number, 'date': e.class_date_jalali, 'status': 'absence', 'label': 'غیبت/کنسلی', 'teacher': source})
+        elif e.event_type == TeacherSessionEvent.EventType.MAKEUP:
+            status_rows.append({'session_number': e.session_number, 'date': e.class_date_jalali, 'status': 'makeup', 'label': 'جبرانی', 'teacher': source})
+    participants = [{'teacher_name': source, 'role': 'استاد اصلی', 'scheduled_sessions': 15, 'effective_sessions': max(0, source_count)}]
+    for name, count in sorted(replacement_counts.items()):
+        if name:
+            participants.append({'teacher_name': name, 'role': 'استاد پذیرنده ساب', 'scheduled_sessions': 0, 'effective_sessions': count})
+    return {
+        'class_slot': slot.id, 'class_number': slot.number, 'class_title': slot.title,
+        'teacher_name': source, 'day_type': slot.day_type, 'day_type_display': slot.get_day_type_display(),
+        'time_slot': slot.time_slot, 'gender': slot.gender, 'gender_display': slot.get_gender_display(),
+        'level': slot.assigned_level, 'capacity': slot.capacity, 'total_sessions': 15,
+        'held_sessions': max(0, 15 - sum(1 for e in approved if e.event_type == TeacherSessionEvent.EventType.ABSENCE)),
+        'participants': participants, 'session_statuses': status_rows,
+    }
+
+
+def _teacher_attendance_data(record):
+    setting = getattr(record.teacher, 'teacher_compensation_setting', None)
+    multiplier = 1.0
+    if setting:
+        if record.class_slot.day_type == ClassSlot.DayType.FRIDAY: multiplier = float(setting.friday_multiplier)
+        elif record.class_slot.day_type in (ClassSlot.DayType.THURSDAY_MORNING, ClassSlot.DayType.THURSDAY_EVENING): multiplier = float(setting.thursday_multiplier)
+    base = (setting.session_price if setting and record.check_out_at else 0) * multiplier
+    allowed = max(1, int(setting.allowed_minutes_per_session)) if setting else 90
+    rate = (int(setting.adjustment_per_minute) if setting and setting.adjustment_per_minute else ((setting.session_price / allowed) if setting else 0)) * multiplier
+    shortage = max(0, allowed - record.minutes_worked) if setting and record.check_out_at else 0
+    overtime = max(0, record.minutes_worked - allowed) if setting and record.check_out_at else 0
+    gross = round(base + (overtime * rate) - (shortage * rate))
+    insurance = setting.insurance_deduction if setting and record.check_out_at else 0
+    return {
+        'id': record.id, 'class_slot': record.class_slot_id, 'class_number': record.class_slot.number,
+        'teacher': record.teacher_id, 'teacher_name': record.teacher.get_full_name(),
+        'day_type': record.class_slot.day_type, 'day_type_display': record.class_slot.get_day_type_display(),
+        'time_slot': record.class_slot.time_slot, 'gender': record.class_slot.get_gender_display(),
+        'level': record.class_slot.assigned_level, 'class_date': record.class_date,
+        'session_number': record.session_number, 'check_in_at': record.check_in_at,
+        'check_out_at': record.check_out_at, 'minutes_worked': record.minutes_worked,
+        'status': record.status, 'notes': record.notes,
+        'session_price': setting.session_price if setting else 0, 'multiplier': multiplier,
+        'allowed_minutes': allowed, 'shortage_minutes': shortage, 'overtime_minutes': overtime,
+        'gross_amount': gross, 'insurance_deduction': insurance, 'net_amount': max(0, gross - insurance),
+    }
+
+
+def _distance_meters(lat1, lon1, lat2, lon2):
+    try:
+        r = 6371000
+        p1, p2 = math.radians(float(lat1)), math.radians(float(lat2))
+        dp = math.radians(float(lat2) - float(lat1)); dl = math.radians(float(lon2) - float(lon1))
+        a = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
+        return 2 * r * math.asin(math.sqrt(a))
+    except (TypeError, ValueError):
+        return None
+
+
+class RoomQrManageView(APIView):
+    """مدیریت QR محل کلاس؛ فقط مدیر/اداری/مدیرآموزش."""
+    permission_classes = [IsAuthenticated]
+
+    def _allowed(self, request): return request.user.role in MANAGE_ROLES
+
+    def get(self, request, pk):
+        if not self._allowed(request): return Response({'error': 'دسترسی ندارید'}, status=403)
+        slot = get_object_or_404(ClassSlot, pk=pk)
+        qr, _ = RoomQrToken.objects.get_or_create(class_slot=slot)
+        return Response({'class_slot': slot.id, 'token': qr.token, 'payload': f'LSCHOOL-ROOM:{slot.id}:{qr.token}', 'is_active': qr.is_active, 'latitude': qr.latitude, 'longitude': qr.longitude, 'allowed_radius_m': qr.allowed_radius_m})
+
+    def post(self, request, pk):
+        if not self._allowed(request): return Response({'error': 'دسترسی ندارید'}, status=403)
+        slot = get_object_or_404(ClassSlot, pk=pk)
+        qr, _ = RoomQrToken.objects.get_or_create(class_slot=slot)
+        if request.data.get('action') == 'rotate': qr.rotate()
+        if 'is_active' in request.data: qr.is_active = bool(request.data.get('is_active'))
+        if 'latitude' in request.data: qr.latitude = request.data.get('latitude') or None
+        if 'longitude' in request.data: qr.longitude = request.data.get('longitude') or None
+        if 'allowed_radius_m' in request.data: qr.allowed_radius_m = max(20, min(1000, int(request.data.get('allowed_radius_m'))))
+        qr.save()
+        return Response({'class_slot': slot.id, 'token': qr.token, 'payload': f'LSCHOOL-ROOM:{slot.id}:{qr.token}', 'is_active': qr.is_active, 'latitude': qr.latitude, 'longitude': qr.longitude, 'allowed_radius_m': qr.allowed_radius_m})
+
+
+class TeacherQrAttendanceView(APIView):
+    """ثبت ورود/خروج استاد با توکن QR و موقعیت مکانی؛ گالری هیچ نقشی ندارد چون payload فقط از دوربین اپ دریافت می‌شود."""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        from django.contrib.auth import get_user_model
+        User = get_user_model()
+        if request.user.role not in User.TEACHER_LIKE_ROLES and request.user.role not in MANAGE_ROLES:
+            return Response({'error': 'این بخش فقط برای استاد یا مدیر است'}, status=403)
+        raw = str(request.data.get('qr_token') or '').strip()
+        parts = raw.split(':')
+        token = parts[-1] if len(parts) >= 3 and parts[0] == 'LSCHOOL-ROOM' else raw
+        qr = RoomQrToken.objects.select_related('class_slot').filter(token=token, is_active=True).first()
+        if not qr: return Response({'error': 'QR نامعتبر، غیرفعال یا متعلق به محل دیگری است'}, status=400)
+        slot = qr.class_slot
+        today = timezone.localtime().date()
+        class_date = request.data.get('class_date') or today.isoformat()
+        if request.user.role not in MANAGE_ROLES and str(class_date) != today.isoformat():
+            return Response({'error': 'ثبت حضور فقط برای جلسه امروز مجاز است'}, status=400)
+        try: session_number = int(request.data.get('session_number', 1))
+        except (TypeError, ValueError): session_number = 0
+        if not 1 <= session_number <= 15: return Response({'error': 'شماره جلسه باید بین ۱ تا ۱۵ باشد'}, status=400)
+        teacher_name = request.user.get_full_name().strip()
+        if request.user.role in User.TEACHER_LIKE_ROLES:
+            owns = slot.teacher_name.strip().casefold() == teacher_name.casefold()
+            replacement = TeacherSessionEvent.objects.filter(term=slot.term, class_slot=slot, class_date=class_date, session_number=session_number, event_type=TeacherSessionEvent.EventType.SUBSTITUTION, status=TeacherSessionEvent.ApprovalStatus.APPROVED, replacement_teacher_name__iexact=teacher_name).exists()
+            if replacement: return Response({'error': 'برای این جلسه ساب تایید شده ثبت شده است؛ QR استاد اصلی نباید ثبت شود'}, status=400)
+            if not owns: return Response({'error': 'این QR برای کلاس‌های شما نیست'}, status=403)
+        if TeacherSessionEvent.objects.filter(term=slot.term, class_slot=slot, class_date=class_date, session_number=session_number, event_type=TeacherSessionEvent.EventType.ABSENCE, status=TeacherSessionEvent.ApprovalStatus.APPROVED).exists():
+            return Response({'error': 'این جلسه به‌عنوان غیبت/کنسلی ثبت شده و نباید QR بخورد'}, status=400)
+        lat, lon = request.data.get('latitude'), request.data.get('longitude')
+        if qr.latitude is not None and qr.longitude is not None:
+            distance = _distance_meters(qr.latitude, qr.longitude, lat, lon)
+            if distance is None or distance > qr.allowed_radius_m:
+                return Response({'error': f'شما خارج از محدوده کلاس هستید (فاصله: {round(distance) if distance else "نامشخص"} متر)'}, status=400)
+        action = request.data.get('action', 'check_in')
+        record, _ = TeacherSessionAttendance.objects.get_or_create(class_slot=slot, teacher=request.user, class_date=class_date, session_number=session_number)
+        now = timezone.now()
+        if action == 'check_in':
+            if record.check_in_at: return Response({'error': 'ورود این جلسه قبلاً ثبت شده است', 'record': _teacher_attendance_data(record)}, status=400)
+            record.check_in_at = now; record.check_in_latitude = lat or None; record.check_in_longitude = lon or None; record.check_in_accuracy_m = request.data.get('accuracy') or None; record.status = 'present'
+        elif action == 'check_out':
+            if not record.check_in_at: return Response({'error': 'ابتدا ورود را ثبت کنید'}, status=400)
+            if record.check_out_at: return Response({'error': 'خروج این جلسه قبلاً ثبت شده است', 'record': _teacher_attendance_data(record)}, status=400)
+            record.check_out_at = now; record.minutes_worked = max(0, int((now - record.check_in_at).total_seconds() // 60))
+        else: return Response({'error': 'عملیات ورود یا خروج معتبر نیست'}, status=400)
+        record.save()
+        return Response({'message': 'ورود با موفقیت ثبت شد' if action == 'check_in' else 'خروج با موفقیت ثبت شد', 'record': _teacher_attendance_data(record)})
+
+
+class TeacherSessionAttendanceListView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        if request.user.role not in MANAGE_ROLES: return Response({'error': 'فقط مدیر می‌تواند گزارش حضور استادان را ببیند'}, status=403)
+        if TeacherSessionAttendance is None:
+            return Response({'records': []})
+        qs = TeacherSessionAttendance.objects.select_related('class_slot', 'teacher').all()
+        if request.query_params.get('term'): qs = qs.filter(class_slot__term_id=request.query_params['term'])
+        if request.query_params.get('teacher'): qs = qs.filter(teacher_id=request.query_params['teacher'])
+        if request.query_params.get('class_slot'): qs = qs.filter(class_slot_id=request.query_params['class_slot'])
+        records = [_teacher_attendance_data(x) for x in qs]
+        totals = {}
+        for row in records:
+            key = str(row['teacher'])
+            bucket = totals.setdefault(key, {'teacher': row['teacher'], 'teacher_name': row['teacher_name'], 'sessions': 0, 'minutes': 0, 'gross_amount': 0, 'insurance_deduction': 0, 'net_amount': 0})
+            bucket['sessions'] += 1; bucket['minutes'] += row['minutes_worked']; bucket['gross_amount'] += row['gross_amount']; bucket['insurance_deduction'] += row['insurance_deduction']; bucket['net_amount'] += row['net_amount']
+        return Response({'records': records, 'totals': list(totals.values())})
+
+
+class TeacherCompensationSettingsView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def _allowed(self, request): return request.user.role in MANAGE_ROLES
+
+    def get(self, request):
+        if not self._allowed(request): return Response({'error': 'فقط مدیر می‌تواند تنظیمات دستمزد استادان را ببیند'}, status=403)
+        qs = TeacherCompensationSetting.objects.select_related('teacher').all()
+        if request.query_params.get('teacher_id'): qs = qs.filter(teacher_id=request.query_params['teacher_id'])
+        return Response({'settings': [{'id': x.id, 'teacher_id': x.teacher_id, 'teacher_name': x.teacher.get_full_name(), 'session_price': x.session_price, 'thursday_multiplier': x.thursday_multiplier, 'friday_multiplier': x.friday_multiplier, 'insurance_deduction': x.insurance_deduction} for x in qs]})
+
+    def post(self, request):
+        if not self._allowed(request): return Response({'error': 'فقط مدیر می‌تواند تنظیمات دستمزد را تغییر دهد'}, status=403)
+        teacher_id = request.data.get('teacher_id')
+        if not teacher_id: return Response({'error': 'استاد الزامی است'}, status=400)
+        from django.contrib.auth import get_user_model
+        teacher = get_user_model().objects.filter(pk=teacher_id, role__in=get_user_model().TEACHER_LIKE_ROLES).first()
+        if not teacher: return Response({'error': 'استاد معتبر پیدا نشد'}, status=400)
+        obj, _ = TeacherCompensationSetting.objects.get_or_create(teacher=teacher)
+        for field in ('session_price', 'thursday_multiplier', 'friday_multiplier', 'insurance_deduction', 'allowed_minutes_per_session', 'adjustment_per_minute'):
+            if field in request.data: setattr(obj, field, request.data[field])
+        obj.save()
+        return Response({'id': obj.id, 'teacher_id': teacher.id, 'teacher_name': teacher.get_full_name(), 'session_price': obj.session_price, 'thursday_multiplier': obj.thursday_multiplier, 'friday_multiplier': obj.friday_multiplier, 'insurance_deduction': obj.insurance_deduction, 'allowed_minutes_per_session': obj.allowed_minutes_per_session, 'adjustment_per_minute': obj.adjustment_per_minute})
+
+
+class TeacherTermReportView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        if request.user.role not in MANAGE_ROLES:
+            return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
+        term_id = request.query_params.get('term') or request.query_params.get('term_id')
+        if not term_id or (not str(term_id).isdigit() and str(term_id).lower() not in {'legacy', 'unassigned', 'null', 'all'}):
+            return Response({'error': 'انتخاب ترم برای گزارش استادان الزامی است'}, status=status.HTTP_400_BAD_REQUEST)
+        term_key = str(term_id).lower()
+        if term_key == 'all':
+            qs = ClassSlot.objects.all()
+        elif term_key in {'legacy', 'unassigned', 'null'}:
+            qs = ClassSlot.objects.filter(term__isnull=True)
+        else:
+            qs = ClassSlot.objects.filter(term_id=int(term_id))
+        teacher_values = [x.strip() for x in request.query_params.getlist('teacher') if x.strip()]
+        if not teacher_values and request.query_params.get('teacher'):
+            teacher_values = [x.strip() for x in request.query_params.get('teacher').split(',') if x.strip()]
+        search = (request.query_params.get('search') or '').strip().lower()
+        if teacher_values:
+            teacher_query = Q()
+            for teacher_value in teacher_values:
+                teacher_query |= Q(teacher_name__icontains=teacher_value)
+            qs = qs.filter(teacher_query)
+        slots = list(qs.order_by('teacher_name', 'number', 'time_slot'))
+        if TeacherSessionEvent is None:
+            events = []
+        else:
+            events = TeacherSessionEvent.objects.filter(status=TeacherSessionEvent.ApprovalStatus.APPROVED).select_related('class_slot', 'term', 'requested_by', 'approved_by')
+            if term_key != 'all':
+                events = events.filter(term_id=int(term_id)) if term_key.isdigit() else events.none()
+        grouped = {}
+        for event in events:
+            grouped.setdefault(event.class_slot_id, []).append(event)
+        rows = [_teacher_report_payload(slot, grouped.get(slot.id, [])) for slot in slots]
+        if search:
+            rows = [r for r in rows if search in f"{r['teacher_name']} {r['class_number']} {r['level']} {r['day_type_display']}".lower()]
+        teacher_names = sorted({r['teacher_name'] for r in rows if r['teacher_name']})
+        return Response({'term': term_id, 'teachers': teacher_names, 'rows': rows, 'total_held_sessions': sum(r['held_sessions'] for r in rows)})
+
+
+class TeacherSessionEventListCreateView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        if request.user.role not in MANAGE_ROLES:
+            return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
+        term_id = request.query_params.get('term') or request.query_params.get('term_id')
+        if not term_id or (not str(term_id).isdigit() and str(term_id).lower() not in {'legacy', 'unassigned', 'null', 'all'}):
+            return Response({'error': 'انتخاب ترم برای مشاهده ساب و غیبت الزامی است'}, status=status.HTTP_400_BAD_REQUEST)
+        term_key = str(term_id).lower()
+        if TeacherSessionEvent is None:
+            return Response([])
+        qs = TeacherSessionEvent.objects.all().select_related('class_slot', 'term', 'requested_by', 'approved_by')
+        if term_key == 'all':
+            pass
+        elif term_key.isdigit():
+            qs = qs.filter(term_id=int(term_id))
+        else:
+            qs = qs.none()
+        event_type = request.query_params.get('event_type')
+        teacher_values = [x.strip() for x in request.query_params.getlist('teacher') if x.strip()]
+        if not teacher_values and request.query_params.get('teacher'):
+            teacher_values = [x.strip() for x in request.query_params.get('teacher').split(',') if x.strip()]
+        search = (request.query_params.get('search') or '').strip().lower()
+        if event_type in dict(TeacherSessionEvent.EventType.choices): qs = qs.filter(event_type=event_type)
+        if teacher_values:
+            teacher_query = Q()
+            for teacher_value in teacher_values:
+                teacher_query |= Q(requested_teacher_name__icontains=teacher_value) | Q(replacement_teacher_name__icontains=teacher_value)
+            qs = qs.filter(teacher_query)
+        data = [_teacher_event_payload(e) for e in qs]
+        if search:
+            data = [e for e in data if search in f"{e['class_number']} {e['level']} {e['requested_teacher_name']} {e['replacement_teacher_name']} {e['day_type_display']}".lower()]
+        return Response(data)
+
+    def post(self, request):
+        if request.user.role not in MANAGE_ROLES:
+            return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
+        term_id = request.data.get('term_id') or request.data.get('term')
+        slot_id = request.data.get('class_slot_id') or request.data.get('class_slot')
+        event_type = request.data.get('event_type')
+        if not str(term_id).isdigit() or not str(slot_id).isdigit() or event_type not in dict(TeacherSessionEvent.EventType.choices):
+            return Response({'error': 'ترم، کلاس و نوع رویداد را کامل انتخاب کنید'}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            term = Term.objects.get(pk=int(term_id)); slot = ClassSlot.objects.get(pk=int(slot_id), term=term)
+        except (Term.DoesNotExist, ClassSlot.DoesNotExist):
+            return Response({'error': 'کلاس با ترم انتخاب‌شده مطابقت ندارد'}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            class_date = datetime.strptime(str(request.data.get('class_date')), '%Y-%m-%d').date()
+        except (TypeError, ValueError):
+            return Response({'error': 'تاریخ جلسه را به‌صورت معتبر وارد کنید'}, status=status.HTTP_400_BAD_REQUEST)
+        session_number = int(request.data.get('session_number') or 0)
+        if not 1 <= session_number <= 15:
+            return Response({'error': 'شماره جلسه باید بین ۱ تا ۱۵ باشد'}, status=status.HTTP_400_BAD_REQUEST)
+        requested_name = str(request.data.get('requested_teacher_name') or slot.teacher_name or '').strip()
+        replacement_name = str(request.data.get('replacement_teacher_name') or '').strip()
+        if event_type == 'substitution' and not replacement_name:
+            return Response({'error': 'استاد جایگزین را انتخاب یا وارد کنید'}, status=status.HTTP_400_BAD_REQUEST)
+        event = TeacherSessionEvent.objects.create(term=term, class_slot=slot, event_type=event_type, class_date=class_date, session_number=session_number, requested_teacher_name=requested_name, replacement_teacher_name=replacement_name if event_type == 'substitution' else '', requested_by=request.user, makeup_required=event_type == 'absence', makeup_session_count=1 if event_type == 'absence' else 0, notes=str(request.data.get('notes') or '').strip(), status=TeacherSessionEvent.ApprovalStatus.PENDING)
+        return Response(_teacher_event_payload(event), status=status.HTTP_201_CREATED)
+
+
+class TeacherSessionEventDetailView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def patch(self, request, pk):
+        if request.user.role not in MANAGE_ROLES:
+            return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
+        try: event = TeacherSessionEvent.objects.select_related('class_slot', 'term').get(pk=pk)
+        except TeacherSessionEvent.DoesNotExist: return Response({'error': 'رویداد پیدا نشد'}, status=404)
+        for field in ('requested_teacher_name', 'replacement_teacher_name', 'notes'):
+            if field in request.data: setattr(event, field, str(request.data.get(field) or '').strip())
+        if 'session_number' in request.data:
+            n = int(request.data['session_number'])
+            if not 1 <= n <= 15: return Response({'error': 'شماره جلسه باید بین ۱ تا ۱۵ باشد'}, status=400)
+            event.session_number = n
+        if 'class_date' in request.data:
+            try: event.class_date = datetime.strptime(str(request.data['class_date']), '%Y-%m-%d').date()
+            except ValueError: return Response({'error': 'تاریخ جلسه معتبر نیست'}, status=400)
+        event.save(); return Response(_teacher_event_payload(event))
+
+    def delete(self, request, pk):
+        if request.user.role not in MANAGE_ROLES: return Response({'error': 'دسترسی ندارید'}, status=403)
+        deleted, _ = TeacherSessionEvent.objects.filter(pk=pk).delete()
+        return Response(status=204 if deleted else 404)
+
+    def post(self, request, pk):
+        if request.user.role not in MANAGE_ROLES: return Response({'error': 'دسترسی ندارید'}, status=403)
+        try: event = TeacherSessionEvent.objects.get(pk=pk)
+        except TeacherSessionEvent.DoesNotExist: return Response({'error': 'رویداد پیدا نشد'}, status=404)
+        decision = request.data.get('decision')
+        if decision not in ('approve', 'reject'): return Response({'error': 'تصمیم تایید یا رد را مشخص کنید'}, status=400)
+        event.status = TeacherSessionEvent.ApprovalStatus.APPROVED if decision == 'approve' else TeacherSessionEvent.ApprovalStatus.REJECTED
+        event.approved_by = request.user; event.approved_at = timezone.now(); event.save()
+        return Response(_teacher_event_payload(event))
 
 
 class BulkClassSlotActionView(APIView):

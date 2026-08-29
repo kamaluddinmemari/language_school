@@ -617,3 +617,56 @@ class OnlineCourseActionRequest(models.Model):
 
     def __str__(self):
         return f"{self.student.get_full_name()} — {self.get_action_type_display()} — {self.online_course.title} — {self.get_status_display()}"
+
+
+class TeacherSessionEvent(models.Model):
+    """رویداد هر جلسه کلاس: ساب، غیبت/کنسلی یا جبرانی؛ مستقل از اطلاعات اصلی کلاس نگهداری می‌شود."""
+    class EventType(models.TextChoices):
+        SUBSTITUTION = 'substitution', 'ساب استاد'
+        ABSENCE = 'absence', 'غیبت و کنسلی'
+        MAKEUP = 'makeup', 'جلسه جبرانی'
+
+    class ApprovalStatus(models.TextChoices):
+        PENDING = 'pending', 'در انتظار تایید'
+        APPROVED = 'approved', 'تایید شده'
+        REJECTED = 'rejected', 'رد شده'
+
+    term = models.ForeignKey(Term, on_delete=models.PROTECT, related_name='teacher_session_events')
+    class_slot = models.ForeignKey(ClassSlot, on_delete=models.CASCADE, related_name='teacher_session_events')
+    event_type = models.CharField(max_length=20, choices=EventType.choices)
+    class_date = models.DateField(help_text='تاریخ واقعی جلسه؛ به میلادی ذخیره و در پنل شمسی نمایش داده می‌شود')
+    session_number = models.PositiveSmallIntegerField(default=1, help_text='شماره جلسه از ۱ تا ۱۵')
+    requested_teacher_name = models.CharField(max_length=150, blank=True)
+    replacement_teacher_name = models.CharField(max_length=150, blank=True)
+    requested_by = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL, related_name='requested_teacher_session_events')
+    approved_by = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL, related_name='approved_teacher_session_events')
+    status = models.CharField(max_length=15, choices=ApprovalStatus.choices, default=ApprovalStatus.PENDING)
+    requested_at = models.DateTimeField(auto_now_add=True)
+    approved_at = models.DateTimeField(null=True, blank=True)
+    makeup_required = models.BooleanField(default=False)
+    makeup_session_count = models.PositiveSmallIntegerField(default=0)
+    notes = models.TextField(blank=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-class_date', '-requested_at']
+        indexes = [
+            models.Index(fields=['term', 'event_type', 'class_date']),
+            models.Index(fields=['term', 'requested_teacher_name']),
+            models.Index(fields=['term', 'replacement_teacher_name']),
+        ]
+
+    @property
+    def class_date_jalali(self):
+        return jdatetime.date.fromgregorian(date=self.class_date).strftime('%Y/%m/%d')
+
+    @property
+    def requested_at_jalali(self):
+        return _jalali(self.requested_at)
+
+    @property
+    def approved_at_jalali(self):
+        return _jalali(self.approved_at)
+
+    def __str__(self):
+        return f'{self.get_event_type_display()} — {self.class_date_jalali} — کلاس {self.class_slot.number}'
