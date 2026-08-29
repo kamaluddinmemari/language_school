@@ -3,6 +3,7 @@ from .views import (
     NewLeadListView, NewLeadDetailView, NewLeadActionView,
     UnregisteredStudentListView, UnregisteredStudentDetailView,
     UnregisteredStudentFollowupView, UnregisteredStudentRegisterView, UnregisteredStudentStatsView,
+    DropoutStudentListView, DropoutStudentFollowupView,
     DebtorListView, DebtorDetailView, DebtorFollowupView, DebtorSettleView, DebtorStatsView,
     DiscountedPersonListView, DiscountedPersonDetailView,
 )
@@ -17,6 +18,8 @@ urlpatterns = [
     path('leads/unregistered-students/<int:pk>/followup/', UnregisteredStudentFollowupView.as_view(), name='unregistered_student_followup'),
     path('leads/unregistered-students/<int:pk>/register/', UnregisteredStudentRegisterView.as_view(), name='unregistered_student_register'),
     path('leads/unregistered-students/stats/', UnregisteredStudentStatsView.as_view(), name='unregistered_student_stats'),
+    path('leads/dropout-students/', DropoutStudentListView.as_view(), name='dropout_student_list'),
+    path('leads/dropout-students/<int:student_id>/followup/', DropoutStudentFollowupView.as_view(), name='dropout_student_followup'),
 
     path('leads/debtors/', DebtorListView.as_view(), name='debtor_list'),
     path('leads/debtors/<int:pk>/', DebtorDetailView.as_view(), name='debtor_detail'),

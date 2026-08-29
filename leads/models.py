@@ -322,3 +322,24 @@ class DiscountedPerson(models.Model):
 
     def __str__(self):
         return f"{self.first_name} {self.last_name} — {self.discount_percent}%"
+
+
+class DropoutFollowup(models.Model):
+    """پیگیری نامحدود دانش‌آموزی که از یک ترم به ترم بعد ثبت‌نام نکرده است."""
+    student = models.ForeignKey(User, on_delete=models.CASCADE, related_name='dropout_followups')
+    from_term = models.ForeignKey('class_management.Term', on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
+    to_term = models.ForeignKey('class_management.Term', on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
+    followed_up_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
+    followed_up_at = models.DateTimeField(auto_now_add=True)
+    note = models.CharField(max_length=500, blank=True)
+
+    class Meta:
+        ordering = ['-followed_up_at']
+
+    @property
+    def followed_up_at_jalali(self):
+        return _jalali(self.followed_up_at)
+
+    @property
+    def followed_up_by_name(self):
+        return self.followed_up_by.get_full_name() if self.followed_up_by else ''

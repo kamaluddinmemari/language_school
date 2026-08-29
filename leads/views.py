@@ -3,7 +3,9 @@ from rest_framework import generics, status
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
-from .models import NewLead, UnregisteredStudent, UnregisteredStudentFollowup, Debtor, DebtorFollowup, DiscountedPerson, build_identity_key, build_person_key, get_current_term
+from django.utils import timezone
+from django.db.models import Q
+from .models import NewLead, UnregisteredStudent, UnregisteredStudentFollowup, DropoutFollowup, Debtor, DebtorFollowup, DiscountedPerson, build_identity_key, build_person_key, get_current_term
 from .serializers import (
     NewLeadSerializer,
     UnregisteredStudentSerializer,
@@ -266,6 +268,87 @@ class UnregisteredStudentStatsView(APIView):
             'total_tuition_registered': sum(s.tuition_price or 0 for s in registered),
             'generated_at_jalali': jdatetime.datetime.fromgregorian(datetime=now_local).strftime('%Y/%m/%d - %H:%M:%S'),
         })
+
+
+# ---------------------------------------------------------------------------
+# دانشجویان ریزشی — دانش‌آموز ترم مبدأ که در ترم مقصد ثبت‌نام ندارد
+# ---------------------------------------------------------------------------
+
+class DropoutStudentListView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        if request.user.role not in ('admin', 'office'):
+            return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
+        from class_management.models import Term, ClassSlotEnrollment
+        from accounts.models import User
+        from django.utils.dateparse import parse_date
+        from datetime import date
+        from_term_id = request.query_params.get('from_term_id')
+        to_term_id = request.query_params.get('to_term_id')
+        date_from = parse_date(request.query_params.get('date_from', '')) if request.query_params.get('date_from') else None
+        date_to = parse_date(request.query_params.get('date_to', '')) if request.query_params.get('date_to') else None
+        try:
+            from_term = Term.objects.get(pk=from_term_id) if from_term_id else None
+            to_term = Term.objects.get(pk=to_term_id) if to_term_id else None
+        except Term.DoesNotExist:
+            return Response({'error': 'ترم انتخاب‌شده پیدا نشد'}, status=status.HTTP_400_BAD_REQUEST)
+        if from_term and to_term and from_term.id == to_term.id:
+            return Response({'error': 'ترم مبدأ و مقصد باید متفاوت باشند'}, status=status.HTTP_400_BAD_REQUEST)
+
+        source_qs = ClassSlotEnrollment.objects.filter(student__role='student').select_related('student', 'class_slot', 'class_slot__term')
+        if from_term:
+            source_qs = source_qs.filter(class_slot__term=from_term)
+        if date_from:
+            source_qs = source_qs.filter(created_at__date__gte=date_from)
+        if date_to:
+            source_qs = source_qs.filter(created_at__date__lte=date_to)
+        source_rows = list(source_qs.order_by('student_id', '-created_at'))
+        latest_by_student = {}
+        for row in source_rows:
+            latest_by_student.setdefault(row.student_id, row)
+        target_ids = set()
+        if to_term:
+            target_ids = set(ClassSlotEnrollment.objects.filter(class_slot__term=to_term, student_id__in=latest_by_student).values_list('student_id', flat=True))
+        rows = []
+        today = timezone.localdate()
+        for student_id, last in latest_by_student.items():
+            if to_term and student_id in target_ids:
+                continue
+            student = last.student
+            last_date = timezone.localtime(last.created_at).date()
+            days_missing = max(0, (today - last_date).days)
+            missing_terms = 1
+            if from_term and to_term:
+                terms = list(Term.objects.order_by('year', 'term_number'))
+                positions = {t.id: i for i, t in enumerate(terms)}
+                missing_terms = max(1, positions.get(to_term.id, positions.get(from_term.id, 0)) - positions.get(from_term.id, 0))
+            followups = DropoutFollowup.objects.filter(student=student, from_term=from_term, to_term=to_term).select_related('followed_up_by').order_by('-followed_up_at')
+            rows.append({
+                'student_id': student.id, 'first_name': student.first_name, 'last_name': student.last_name,
+                'father_name': getattr(student, 'father_name', ''), 'national_code': getattr(student, 'national_code', ''),
+                'phone': getattr(student, 'phone', ''), 'gender': getattr(student, 'gender', ''),
+                'last_level': last.class_slot.assigned_level or getattr(student, 'language_level', ''),
+                'last_enrollment_date': last.created_at.date().isoformat(),
+                'last_enrollment_date_jalali': getattr(last, 'created_at_jalali', None),
+                'days_since_last_registration': days_missing, 'missing_terms': missing_terms,
+                'needs_retest': days_missing > 60,
+                'followups': [{'id': f.id, 'date': f.followed_up_at_jalali, 'by': f.followed_up_by_name, 'note': f.note} for f in followups],
+            })
+        return Response(rows)
+
+
+class DropoutStudentFollowupView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, student_id):
+        if request.user.role not in ('admin', 'office'):
+            return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
+        from class_management.models import Term
+        from_term = Term.objects.filter(pk=request.data.get('from_term_id')).first() if request.data.get('from_term_id') else None
+        to_term = Term.objects.filter(pk=request.data.get('to_term_id')).first() if request.data.get('to_term_id') else None
+        item = DropoutFollowup.objects.create(student_id=student_id, from_term=from_term, to_term=to_term, followed_up_by=request.user, note=request.data.get('note', ''))
+        return Response({'id': item.id, 'date': item.followed_up_at_jalali, 'by': item.followed_up_by_name, 'note': item.note}, status=status.HTTP_201_CREATED)
 
 
 # ---------------------------------------------------------------------------

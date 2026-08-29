@@ -88,6 +88,7 @@ class EmployeeProfile(models.Model):
     education_degree = models.CharField(max_length=50, blank=True, help_text='مدرک تحصیلی')
     education_field = models.CharField(max_length=100, blank=True, help_text='رشته تحصیلی')
     hire_date = models.DateField(null=True, blank=True, help_text='تاریخ استخدام')
+    minimum_monthly_hours = models.DecimalField(max_digits=6, decimal_places=2, default=0, help_text='حداقل ساعات کارکرد ماهانه این کارمند؛ صفر یعنی ساعت استاندارد ماه')
     address = models.TextField(blank=True, help_text='آدرس محل سکونت')
     marital_status = models.CharField(max_length=10, choices=MaritalStatus.choices, blank=True)
     children_count = models.PositiveIntegerField(default=0, help_text='تعداد فرزندان (در صورت تاهل)')
@@ -128,6 +129,8 @@ class SalaryProfile(models.Model):
     insurance_base_married = models.PositiveIntegerField(default=0, help_text='مزد مبنای بیمه برای کارمند متاهل (۳۰ روز کامل، تومان)')
     morning_leave_hours = models.DecimalField(max_digits=4, decimal_places=2, default=3, help_text='ساعت کارکرد مرخصی صبح')
     evening_leave_hours = models.DecimalField(max_digits=4, decimal_places=2, default=5, help_text='ساعت کارکرد مرخصی عصر')
+    shortfall_hourly_threshold = models.DecimalField(max_digits=4, decimal_places=2, default=2.5, help_text='حداکثر کسری‌ساعت برای کسر ساعتی')
+    shortfall_leave_day_threshold = models.DecimalField(max_digits=4, decimal_places=2, default=5, help_text='از این مقدار کسری به بعد یک روز مرخصی کسر می‌شود')
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
@@ -317,15 +320,75 @@ class MonthlyPayroll(models.Model):
         """
         logs = AttendanceLog.objects.filter(user=self.user)
         total = 0.0
+        holiday_dates = {a.holiday.date for a in _holiday_work_for_payroll(self)}
         approved_daily = list(self.user.leave_requests.filter(status='approved', leave_type='daily').values_list('start_date', 'end_date'))
         for log in logs:
             jd = jdatetime.date.fromgregorian(date=log.date)
             if jd.year == self.jalali_year and jd.month == self.jalali_month:
                 covered_by_leave = any(start <= log.date <= (end or start) for start, end in approved_daily)
-                if not covered_by_leave:
+                if not covered_by_leave and log.date not in holiday_dates:
                     total += log.worked_hours
         total += self.approved_leave_hours_this_month
+        total += self.holiday_work_hours
         return round(total, 2)
+
+    @property
+    def minimum_monthly_hours(self):
+        try:
+            configured = float(self.user.employee_profile.minimum_monthly_hours or 0)
+        except Exception:
+            configured = 0
+        return round(configured or self.standard_monthly_hours_this_month, 2)
+
+    @property
+    def automatic_shortfall_hours(self):
+        return round(max(0.0, self.minimum_monthly_hours - float(self.worked_hours or 0)), 2)
+
+    @property
+    def automatic_overtime_hours(self):
+        return round(max(0.0, float(self.worked_hours or 0) - self.minimum_monthly_hours), 2)
+
+    @property
+    def effective_undertime_hours(self):
+        if float(self.undertime_hours or 0) > 0:
+            return round(float(self.undertime_hours), 2)
+        sp = self._salary_profile
+        shortfall = self.automatic_shortfall_hours
+        if not sp or not shortfall:
+            return 0
+        if shortfall >= float(sp.shortfall_leave_day_threshold):
+            return 0
+        return round(min(shortfall, float(sp.shortfall_hourly_threshold)), 2)
+
+    @property
+    def automatic_absence_days(self):
+        sp = self._salary_profile
+        if not sp:
+            return 0
+        return 1 if self.automatic_shortfall_hours >= float(sp.shortfall_leave_day_threshold) else 0
+
+    @property
+    def effective_overtime_hours(self):
+        return round(float(self.overtime_hours), 2) if float(self.overtime_hours or 0) > 0 else self.automatic_overtime_hours
+
+    @property
+    def work_adjustment_explanation(self):
+        shortfall = self.automatic_shortfall_hours
+        overtime = self.automatic_overtime_hours
+        if shortfall:
+            sp = self._salary_profile
+            threshold = float(sp.shortfall_leave_day_threshold) if sp else 5
+            if shortfall >= threshold:
+                return f'کسری کارکرد: {shortfall:g} ساعت؛ به‌دلیل رسیدن کسری به حد {threshold:g} ساعت، یک روز از مرخصی استحقاقی کسر می‌شود و کسر ساعتی اعمال نمی‌شود.'
+            return f'کسری کارکرد: {shortfall:g} ساعت؛ کسر حقوق متناسب با {self.effective_undertime_hours:g} ساعت کم‌کاری اعمال می‌شود.'
+        if overtime or self.holiday_work_hours:
+            parts = []
+            if overtime:
+                parts.append(f'اضافه‌کاری: {overtime:g} ساعت؛ مبلغ آن با ضریب اضافه‌کاری محاسبه می‌شود.')
+            if self.holiday_work_hours:
+                parts.append(self.holiday_work_explanation)
+            return ' '.join(parts)
+        return 'کارکرد ماهانه مطابق حداقل ساعات تعیین‌شده است و تعدیل خودکار ندارد.'
 
     @property
     def component_amounts_this_month(self):
@@ -400,15 +463,15 @@ class MonthlyPayroll(models.Model):
 
     @property
     def overtime_pay(self):
-        return round(self.hourly_wage * OVERTIME_MULTIPLIER * float(self.overtime_hours))
+        return round(self.hourly_wage * OVERTIME_MULTIPLIER * self.effective_overtime_hours)
 
     @property
     def absence_deduction(self):
-        return round(self.daily_wage * float(self.absence_days) + self.hourly_wage * float(self.absence_hours))
+        return round(self.daily_wage * (float(self.absence_days) + self.automatic_absence_days) + self.hourly_wage * float(self.absence_hours))
 
     @property
     def undertime_deduction(self):
-        return round(self.hourly_wage * float(self.undertime_hours))
+        return round(self.hourly_wage * self.effective_undertime_hours)
 
     @property
     def approved_leave_days_this_month(self):
@@ -441,7 +504,7 @@ class MonthlyPayroll(models.Model):
     def gross_pay(self):
         """حقوق ناخالص = (حقوق ساعتی × ساعت کارکرد) + اضافه‌کاری + پاداش + اضافه‌پرداخت"""
         base = round(self.hourly_wage * float(self.worked_hours))
-        return base + self.overtime_pay + self.bonus_amount + self.extra_payment
+        return base + self.overtime_pay + self.holiday_work_pay + self.bonus_amount + self.extra_payment
 
     @property
     def total_deductions(self):
@@ -600,7 +663,10 @@ class LeaveRequest(models.Model):
     class LeaveShift(models.TextChoices):
         MORNING = 'morning', 'مرخصی صبح'
         EVENING = 'evening', 'مرخصی عصر'
+        MIXED = 'mixed', 'ترکیبی صبح و عصر'
     leave_shift = models.CharField(max_length=10, choices=LeaveShift.choices, default=LeaveShift.MORNING, help_text='برای مرخصی روزانه')
+    morning_days = models.PositiveIntegerField(default=0, help_text='در مرخصی ترکیبی، تعداد روزهای صبح')
+    evening_days = models.PositiveIntegerField(default=0, help_text='در مرخصی ترکیبی، تعداد روزهای عصر')
     reason = models.CharField(max_length=255, blank=True, help_text='برای دسته‌ی «سایر» الزامی است')
     status = models.CharField(max_length=10, choices=Status.choices, default=Status.PENDING)
     requested_at = models.DateTimeField(auto_now_add=True)
@@ -619,6 +685,12 @@ class LeaveRequest(models.Model):
             profile = SalaryProfile.objects.filter(work_year=jd.year).first() or SalaryProfile.objects.order_by('-work_year').first()
             morning = float(profile.morning_leave_hours if profile else DEFAULT_MORNING_LEAVE_HOURS)
             evening = float(profile.evening_leave_hours if profile else DEFAULT_EVENING_LEAVE_HOURS)
+            if self.leave_shift == self.LeaveShift.MIXED:
+                morning_days = int(self.morning_days or 0)
+                evening_days = int(self.evening_days or 0)
+                if morning_days + evening_days != self.days_count:
+                    return 0
+                return morning_days * morning + evening_days * evening
             return self.days_count * (evening if self.leave_shift == self.LeaveShift.EVENING else morning)
         except Exception:
             return 0
@@ -658,3 +730,80 @@ class LeaveRequest(models.Model):
 
     def __str__(self):
         return f"مرخصی {self.user.get_full_name()} — {self.start_date_jalali}"
+
+
+class OfficialHoliday(models.Model):
+    """تعطیلی رسمی که مدیر می‌تواند برای یک یا چند روز ثبت یا غیرفعال کند."""
+    date = models.DateField(unique=True)
+    title = models.CharField(max_length=150, default='تعطیلی رسمی')
+    is_active = models.BooleanField(default=True)
+    work_multiplier = models.DecimalField(max_digits=4, decimal_places=2, default=1.75, help_text='ضریب کارکرد در تعطیلی رسمی')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-date']
+
+    def __str__(self):
+        return f'{self.title} — {self.date}'
+
+
+class HolidayWorkAssignment(models.Model):
+    """تنظیم مدیر برای اینکه کارمند در تعطیلی رسمی کار کرده یا ساعات تعطیلی به کارکردش اضافه شود."""
+    class Shift(models.TextChoices):
+        MORNING = 'morning', 'صبح'
+        EVENING = 'evening', 'عصر'
+        MIXED = 'mixed', 'ترکیبی صبح و عصر'
+
+    holiday = models.ForeignKey(OfficialHoliday, on_delete=models.CASCADE, related_name='work_assignments')
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='holiday_work_assignments')
+    include_in_worked_hours = models.BooleanField(default=False, help_text='در صورت فعال بودن، ساعات شیفت به کارکرد اضافه می‌شود')
+    shift = models.CharField(max_length=10, choices=Shift.choices, default=Shift.MORNING)
+    morning_days = models.PositiveIntegerField(default=0, help_text='برای بازه چندروزه، تعداد روزهای صبح')
+    evening_days = models.PositiveIntegerField(default=0, help_text='برای بازه چندروزه، تعداد روزهای عصر')
+    multiplier = models.DecimalField(max_digits=4, decimal_places=2, null=True, blank=True, help_text='ضریب اختصاصی؛ خالی یعنی ضریب خود تعطیلی')
+    notes = models.CharField(max_length=255, blank=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=['holiday', 'user'], name='unique_holiday_work_user')]
+
+    @property
+    def configured_hours(self):
+        if not self.include_in_worked_hours:
+            return 0
+        profile = SalaryProfile.objects.filter(work_year=jdatetime.date.fromgregorian(date=self.holiday.date).year).first() or SalaryProfile.objects.order_by('-work_year').first()
+        morning = float(profile.morning_leave_hours if profile else DEFAULT_MORNING_LEAVE_HOURS)
+        evening = float(profile.evening_leave_hours if profile else DEFAULT_EVENING_LEAVE_HOURS)
+        if self.shift == self.Shift.EVENING:
+            return evening
+        if self.shift == self.Shift.MIXED:
+            return morning * int(self.morning_days or 0) + evening * int(self.evening_days or 0)
+        return morning
+
+    @property
+    def effective_multiplier(self):
+        return float(self.multiplier if self.multiplier is not None else self.holiday.work_multiplier)
+
+    def __str__(self):
+        return f'{self.user.get_full_name()} — {self.holiday.date}'
+
+
+# محاسبه ساعات و مبلغ تعطیلی رسمی روی همان فیش کارمند انجام می‌شود تا در گزارش و فیش قابل توضیح باشد.
+def _holiday_work_for_payroll(payroll):
+    start = jdatetime.date(payroll.jalali_year, payroll.jalali_month, 1).togregorian()
+    end = jdatetime.date(payroll.jalali_year, payroll.jalali_month, days_in_jalali_month(payroll.jalali_year, payroll.jalali_month)).togregorian()
+    assignments = HolidayWorkAssignment.objects.select_related('holiday').filter(user=payroll.user, include_in_worked_hours=True, holiday__is_active=True, holiday__date__range=(start, end))
+    return list(assignments)
+
+
+def _holiday_hours_for_payroll(payroll):
+    total = 0.0
+    for assignment in _holiday_work_for_payroll(payroll):
+        log = AttendanceLog.objects.filter(user=payroll.user, date=assignment.holiday.date).first()
+        total += float(log.worked_hours) if log and log.worked_hours else float(assignment.configured_hours)
+    return round(total, 2)
+
+
+MonthlyPayroll.holiday_work_hours = property(_holiday_hours_for_payroll)
+MonthlyPayroll.holiday_work_explanation = property(lambda self: f'کارکرد تعطیلی رسمی: {self.holiday_work_hours:g} ساعت؛ با ضریب تنظیم‌شده محاسبه شد.' if self.holiday_work_hours else '')
+MonthlyPayroll.holiday_work_pay = property(lambda self: round(sum(float(log.worked_hours) * self.hourly_wage * (assignment.effective_multiplier - 1) for assignment in _holiday_work_for_payroll(self) for log in [AttendanceLog.objects.filter(user=self.user, date=assignment.holiday.date).first()] if log and log.worked_hours)))

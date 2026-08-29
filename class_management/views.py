@@ -28,41 +28,31 @@ MANAGE_ROLES = ('admin', 'evaluator', 'office')
 
 
 def _next_level_for_carryover(level_code):
-    """Return (next_level, terminal_warning). Prefer configured StandardLevel order; use the project defaults as fallback."""
+    """Return the next level using the school-approved progression, plus a terminal warning."""
     raw = str(level_code or '').strip()
     if not raw:
         return '', ''
+    normalized = raw.lower().replace(' ', '')
+    kids = [f'{prefix}{n}' for prefix in ('e', 's', 'g', 'u', 'm', 'h', 'i') for n in range(1, 6)]
+    teens = ['teenstarter'] + [f'teen{n}' for n in range(1, 16)]
+    adults = [str(n) for block in range(1, 7) for n in range(block * 100 + 1, block * 100 + 7)]
+    for sequence, label in ((kids, 'کودک'), (teens, 'نوجوان'), (adults, 'بزرگسال')):
+        idx = next((i for i, code in enumerate(sequence) if code.lower() == normalized), -1)
+        if idx >= 0:
+            if idx + 1 < len(sequence):
+                return sequence[idx + 1], ''
+            return raw, f'سطح «{raw}» آخرین سطح {label} است و برای ترم بعد سطح بالاتری ندارد.'
     try:
         from level_tests.models import StandardLevel
         current = StandardLevel.objects.filter(code__iexact=raw).first()
         if current:
             siblings = list(StandardLevel.objects.filter(age_group=current.age_group).order_by('order', 'code').values_list('code', flat=True))
-            idx = next((i for i, code in enumerate(siblings) if str(code).lower() == raw.lower()), -1)
+            idx = next((i for i, code in enumerate(siblings) if str(code).lower() == normalized), -1)
             if idx >= 0 and idx + 1 < len(siblings):
                 return siblings[idx + 1], ''
             return raw, f'سطح «{raw}» آخرین سطح گروه «{current.get_age_group_display()}» است و برای ترم بعد سطح بالاتری ندارد.'
     except Exception:
         pass
-    normalized = raw.lower().replace(' ', '')
-    m = re.fullmatch(r'e([1-5])', normalized)
-    if m:
-        n = int(m.group(1))
-        return (f'e{n + 1}', '') if n < 5 else (raw, f'سطح «{raw}» آخرین سطح کودک است و برای ترم بعد سطح بالاتری ندارد.')
-    m = re.fullmatch(r'teen(?:([0-9]{1,2}))', normalized)
-    if m:
-        n = int(m.group(1))
-        return (f'teen {n + 1}', '') if n < 15 else (raw, f'سطح «{raw}» آخرین سطح نوجوان است و برای ترم بعد سطح بالاتری ندارد.')
-    m = re.fullmatch(r'(10[1-6]|[2-6]0[1-6])', normalized)
-    if m:
-        n = int(m.group(1))
-        block, step = divmod(n, 100)
-        if 101 <= n <= 106:
-            return ('201', '') if n == 106 else (str(n + 1), '')
-        if 201 <= n <= 606 and n % 100 < 6:
-            return str(n + 1), ''
-        if n in (206, 306, 406, 506):
-            return str(n + 95), ''
-        return raw, f'سطح «{raw}» آخرین سطح بزرگسال تعریف‌شده است و برای ترم بعد سطح بالاتری ندارد.'
     return raw, f'برای سطح «{raw}» ترتیب ارتقا پیدا نشد؛ سطح ترم جدید را دستی بررسی کنید.'
 
 

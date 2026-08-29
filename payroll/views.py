@@ -6,10 +6,10 @@ from django.utils import timezone
 from django.contrib.auth import get_user_model
 from django.db.models import Q
 
-from .models import EmployeeProfile, SalaryProfile, MonthlyPayroll, LeaveBalance, LeaveRequest, AttendanceLog
+from .models import EmployeeProfile, SalaryProfile, MonthlyPayroll, LeaveBalance, LeaveRequest, AttendanceLog, OfficialHoliday, HolidayWorkAssignment
 from .serializers import (
     EmployeeProfileSerializer, SalaryProfileSerializer, MonthlyPayrollSerializer,
-    LeaveBalanceSerializer, LeaveRequestSerializer, AttendanceLogSerializer,
+    LeaveBalanceSerializer, LeaveRequestSerializer, AttendanceLogSerializer, OfficialHolidaySerializer, HolidayWorkAssignmentSerializer,
 )
 
 User = get_user_model()
@@ -269,10 +269,15 @@ class MonthlyPayrollAcknowledgeView(APIView):
 
 
 def approved_daily_leave(user, day):
-    # فقط ستون‌هایی را بخوان که در migration اولیه وجود دارند تا قبل از اجرای migrationهای
-    # جدید (leave_shift/credited_hours) ثبت ورود کارمند با خطای ستون ناشناخته متوقف نشود.
-    return LeaveRequest.objects.only('id', 'user', 'status', 'leave_type', 'start_date', 'end_date').filter(
-        user=user, status=LeaveRequest.Status.APPROVED, leave_type=LeaveRequest.LeaveType.DAILY, start_date__lte=day
+    """Return approved daily leave for this exact employee only.
+
+    Use user_id rather than a reusable model instance so a leave record can never
+    leak from one employee's dashboard into another employee's attendance flow.
+    """
+    user_id = getattr(user, 'id', None) or getattr(user, 'pk', None) or user
+    return LeaveRequest.objects.filter(
+        user_id=int(user_id), status=LeaveRequest.Status.APPROVED,
+        leave_type=LeaveRequest.LeaveType.DAILY, start_date__lte=day,
     ).filter(Q(end_date__gte=day) | Q(end_date__isnull=True)).first()
 
 # ==================== ثبت ساعت ورود و خروج (AttendanceLog) ====================
@@ -283,11 +288,11 @@ class MyAttendanceTodayView(APIView):
 
     def get(self, request):
         today = timezone.localtime(timezone.now()).date()
-        leave = approved_daily_leave(request.user, today)
-        if leave:
-            return Response({'error': 'کارمند در مرخصی می‌باشد', 'on_leave': True, 'leave_shift': getattr(leave, 'leave_shift', 'full_day'), 'leave_credited_hours': getattr(leave, 'credited_hours_label', ''),}, status=status.HTTP_400_BAD_REQUEST)
-        log = AttendanceLog.objects.filter(user=request.user, date=today).first()
-        leave = approved_daily_leave(request.user, today)
+        # وضعیت مرخصی فقط برای کاربر جاری خوانده می‌شود و به‌صورت payload عادی برمی‌گردد.
+        # پاسخ 400 در GET باعث می‌شد frontend خطا را نادیده بگیرد و وضعیت قبلی کاربر
+        # (از جمله مرخصی کارمند دیگر) روی صفحه باقی بماند.
+        leave = approved_daily_leave(request.user.id, today)
+        log = AttendanceLog.objects.filter(user_id=request.user.id, date=today).first()
         payload = AttendanceLogSerializer(log).data if log else {'date': today.isoformat(), 'check_in': None, 'check_out': None}
         payload.update({'on_leave': bool(leave), 'leave_message': 'کارمند در مرخصی می‌باشد' if leave else None, 'leave_shift': getattr(leave, 'leave_shift', 'full_day') if leave else None, 'leave_credited_hours': getattr(leave, 'credited_hours_label', '') if leave else None})
         return Response(payload)
@@ -299,7 +304,7 @@ class CheckInView(APIView):
 
     def post(self, request):
         today = timezone.localtime(timezone.now()).date()
-        leave = approved_daily_leave(request.user, today)
+        leave = approved_daily_leave(request.user.id, today)
         if leave:
             return Response({'error': 'کارمند در مرخصی می‌باشد', 'on_leave': True, 'leave_shift': getattr(leave, 'leave_shift', 'full_day'), 'leave_credited_hours': getattr(leave, 'credited_hours_label', ''),}, status=status.HTTP_400_BAD_REQUEST)
         log, created = AttendanceLog.objects.get_or_create(user=request.user, date=today)
@@ -345,6 +350,10 @@ class AttendanceLogListCreateView(AdminEditOwnViewMixin, generics.ListCreateAPIV
         if not self.check_write_permission():
             return Response({'error': 'فقط مدیر می‌تواند رکورد حضور دستی ثبت کند'}, status=status.HTTP_403_FORBIDDEN)
         data = request.data.copy()
+        target_user_id = data.get('user')
+        attendance_date = data.get('date') or timezone.localdate()
+        if target_user_id and approved_daily_leave(target_user_id, attendance_date):
+            return Response({'error': 'این کارمند در تاریخ انتخاب‌شده مرخصی دارد و ثبت ورود/خروج برای او مجاز نیست.', 'on_leave': True}, status=status.HTTP_400_BAD_REQUEST)
         data['edited_by_admin'] = True
         serializer = self.get_serializer(data=data)
         serializer.is_valid(raise_exception=True)
@@ -436,3 +445,47 @@ class AttendanceSummaryView(APIView):
             'jalali_year': today_jalali.year, 'jalali_month': today_jalali.month,
             'daily_breakdown': sorted(daily_breakdown, key=lambda x: x['date_jalali']),
         })
+
+
+class OfficialHolidayListCreateView(generics.ListCreateAPIView):
+    serializer_class = OfficialHolidaySerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        return OfficialHoliday.objects.all() if is_admin(self.request.user) else OfficialHoliday.objects.none()
+
+    def perform_create(self, serializer):
+        if not is_admin(self.request.user):
+            from rest_framework.exceptions import PermissionDenied
+            raise PermissionDenied('فقط مدیر می‌تواند تعطیلی رسمی ثبت کند')
+        serializer.save()
+
+
+class OfficialHolidayDetailView(generics.RetrieveUpdateDestroyAPIView):
+    serializer_class = OfficialHolidaySerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        return OfficialHoliday.objects.all() if is_admin(self.request.user) else OfficialHoliday.objects.none()
+
+
+class HolidayWorkAssignmentListCreateView(generics.ListCreateAPIView):
+    serializer_class = HolidayWorkAssignmentSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        return HolidayWorkAssignment.objects.select_related('holiday', 'user').all() if is_admin(self.request.user) else HolidayWorkAssignment.objects.none()
+
+    def perform_create(self, serializer):
+        if not is_admin(self.request.user):
+            from rest_framework.exceptions import PermissionDenied
+            raise PermissionDenied('فقط مدیر می‌تواند کارکرد تعطیلی رسمی را ثبت کند')
+        serializer.save()
+
+
+class HolidayWorkAssignmentDetailView(generics.RetrieveUpdateDestroyAPIView):
+    serializer_class = HolidayWorkAssignmentSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        return HolidayWorkAssignment.objects.select_related('holiday', 'user').all() if is_admin(self.request.user) else HolidayWorkAssignment.objects.none()

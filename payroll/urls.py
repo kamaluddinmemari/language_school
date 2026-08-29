@@ -7,6 +7,7 @@ from .views import (
     LeaveRequestListCreateView, LeaveRequestDetailView, LeaveRequestDecideView,
     MyAttendanceTodayView, CheckInView, CheckOutView,
     AttendanceLogListCreateView, AttendanceLogDetailView, AttendanceSummaryView,
+    OfficialHolidayListCreateView, OfficialHolidayDetailView, HolidayWorkAssignmentListCreateView, HolidayWorkAssignmentDetailView,
 )
 
 urlpatterns = [
@@ -34,4 +35,9 @@ urlpatterns = [
     path('attendance/', AttendanceLogListCreateView.as_view(), name='attendance_list'),
     path('attendance/<int:pk>/', AttendanceLogDetailView.as_view(), name='attendance_detail'),
     path('attendance/summary/', AttendanceSummaryView.as_view(), name='attendance_summary'),
+
+    path('official-holidays/', OfficialHolidayListCreateView.as_view(), name='official_holiday_list'),
+    path('official-holidays/<int:pk>/', OfficialHolidayDetailView.as_view(), name='official_holiday_detail'),
+    path('holiday-work-assignments/', HolidayWorkAssignmentListCreateView.as_view(), name='holiday_work_assignment_list'),
+    path('holiday-work-assignments/<int:pk>/', HolidayWorkAssignmentDetailView.as_view(), name='holiday_work_assignment_detail'),
 ]
