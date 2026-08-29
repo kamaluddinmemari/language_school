@@ -39,12 +39,35 @@ from .allocation import allocate_classes
 MANAGE_ROLES = ('admin', 'evaluator', 'office')
 
 
-def _next_level_for_carryover(level_code):
-    """Return the next level using the school-approved progression, plus a terminal warning."""
+def _next_level_for_carryover(level_code, terminal_levels=None):
+    """Return the next level using the school-approved progression, plus a terminal warning.
+
+    منبع اصلی، جدول StandardLevel («تعریف سطوح استاندارد») است: ترتیب از فیلد order و سطح
+    پایانی هر رده از فیلد is_terminal خوانده می‌شود. terminal_levels (اگر فرستاده شود) فقط
+    به‌عنوان بازگشت‌پذیری با نسخه‌های قدیمی‌تر فرانت‌اند در نظر گرفته می‌شود.
+    """
     raw = str(level_code or '').strip()
     if not raw:
         return '', ''
     normalized = raw.lower().replace(' ', '')
+
+    from level_tests.models import StandardLevel
+    current = StandardLevel.objects.filter(code__iexact=raw).first()
+    if current:
+        if current.is_terminal:
+            return raw, f'سطح «{raw}» سطح پایانی رده «{current.get_age_group_display()}» است؛ دانش‌آموزان برای ثبت‌نام ترم بعد نیازمند تعیین سطح می‌باشند.'
+        siblings = list(StandardLevel.objects.filter(age_group=current.age_group).order_by('order', 'code'))
+        idx = next((i for i, lvl in enumerate(siblings) if lvl.code.lower() == normalized), -1)
+        if idx >= 0 and idx + 1 < len(siblings):
+            return siblings[idx + 1].code, ''
+        return raw, f'سطح «{raw}» آخرین سطح تعریف‌شده در رده «{current.get_age_group_display()}» است ولی به عنوان سطح پایانی علامت نخورده — از بخش «تعریف سطوح استاندارد» بررسی کنید.'
+
+    # سطح در جدول StandardLevel پیدا نشد (داده‌ی قدیمی/دستی) — بازگشت به توالی پیش‌فرض قدیمی
+    configured_terminal = {str(v).strip().lower().replace(' ', ''): str(k).strip() for k, v in (terminal_levels or {}).items() if v}
+    terminal_group_labels = {'kids': 'کودک', 'teen': 'نوجوان', 'adult': 'بزرگسال'}
+    if normalized in configured_terminal:
+        group_key = configured_terminal.get(normalized, '')
+        return raw, f'سطح نهایی گروه «{terminal_group_labels.get(group_key, group_key)}» است؛ دانش‌آموزان برای ثبت‌نام ترم بعد نیازمند تعیین سطح می‌باشند.'
     kids = [f'{prefix}{n}' for prefix in ('e', 's', 'g', 'u', 'm', 'h', 'i') for n in range(1, 6)]
     teens = ['teenstarter'] + [f'teen{n}' for n in range(1, 16)]
     adults = [str(n) for block in range(1, 7) for n in range(block * 100 + 1, block * 100 + 7)]
@@ -54,17 +77,6 @@ def _next_level_for_carryover(level_code):
             if idx + 1 < len(sequence):
                 return sequence[idx + 1], ''
             return raw, f'سطح «{raw}» آخرین سطح {label} است و برای ترم بعد سطح بالاتری ندارد.'
-    try:
-        from level_tests.models import StandardLevel
-        current = StandardLevel.objects.filter(code__iexact=raw).first()
-        if current:
-            siblings = list(StandardLevel.objects.filter(age_group=current.age_group).order_by('order', 'code').values_list('code', flat=True))
-            idx = next((i for i, code in enumerate(siblings) if str(code).lower() == normalized), -1)
-            if idx >= 0 and idx + 1 < len(siblings):
-                return siblings[idx + 1], ''
-            return raw, f'سطح «{raw}» آخرین سطح گروه «{current.get_age_group_display()}» است و برای ترم بعد سطح بالاتری ندارد.'
-    except Exception:
-        pass
     return raw, f'برای سطح «{raw}» ترتیب ارتقا پیدا نشد؛ سطح ترم جدید را دستی بررسی کنید.'
 
 
@@ -154,6 +166,7 @@ class CarryClassesToNextTermView(APIView):
         day_types = request.data.get('day_types') or []
         time_slots = request.data.get('time_slots') or []
         assignments = request.data.get('classes') or []
+        terminal_levels = request.data.get('terminal_levels') or {}
         try:
             target_term = Term.objects.get(pk=target_term_id)
         except (Term.DoesNotExist, TypeError, ValueError):
@@ -199,7 +212,7 @@ class CarryClassesToNextTermView(APIView):
                 fixed_time = {ClassSlot.DayType.THURSDAY_MORNING: THURSDAY_MORNING_SLOT, ClassSlot.DayType.THURSDAY_EVENING: THURSDAY_EVENING_SLOT, ClassSlot.DayType.FRIDAY: FRIDAY_SLOT}.get(day_type)
                 if fixed_time:
                     time_slot = fixed_time
-                automatic_level, level_warning = _next_level_for_carryover(source.assigned_level)
+                automatic_level, level_warning = _next_level_for_carryover(source.assigned_level, terminal_levels)
                 assigned_level = str(row['assigned_level']).strip() if 'assigned_level' in row else automatic_level
                 if assigned_level == automatic_level and level_warning:
                     warnings.append({'source_id': source.id, 'number': source.number, 'level': source.assigned_level or '', 'message': level_warning})
@@ -2719,7 +2732,7 @@ def _teacher_event_payload(event):
 
 
 def _teacher_report_payload(slot, events):
-    approved = [e for e in events if e.status == TeacherSessionEvent.ApprovalStatus.APPROVED]
+    approved = [e for e in events if TeacherSessionEvent is not None and e.status == TeacherSessionEvent.ApprovalStatus.APPROVED]
     source = slot.teacher_name or ''
     source_count = 15
     replacement_counts = {}
@@ -2728,12 +2741,12 @@ def _teacher_report_payload(slot, events):
         if e.event_type == TeacherSessionEvent.EventType.SUBSTITUTION:
             source_count -= 1
             replacement_counts[e.replacement_teacher_name] = replacement_counts.get(e.replacement_teacher_name, 0) + 1
-            status_rows.append({'session_number': e.session_number, 'date': e.class_date_jalali, 'status': 'substitution', 'label': 'ساب', 'teacher': e.replacement_teacher_name})
+            status_rows.append({'id': e.id, 'session_number': e.session_number, 'date': e.class_date_jalali, 'status': 'substitution', 'label': 'ساب', 'teacher': e.replacement_teacher_name})
         elif e.event_type == TeacherSessionEvent.EventType.ABSENCE:
             source_count -= 1
-            status_rows.append({'session_number': e.session_number, 'date': e.class_date_jalali, 'status': 'absence', 'label': 'غیبت/کنسلی', 'teacher': source})
+            status_rows.append({'id': e.id, 'session_number': e.session_number, 'date': e.class_date_jalali, 'status': 'absence', 'label': 'غیبت/کنسلی', 'teacher': source})
         elif e.event_type == TeacherSessionEvent.EventType.MAKEUP:
-            status_rows.append({'session_number': e.session_number, 'date': e.class_date_jalali, 'status': 'makeup', 'label': 'جبرانی', 'teacher': source})
+            status_rows.append({'id': e.id, 'session_number': e.session_number, 'date': e.class_date_jalali, 'status': 'makeup', 'label': 'جبرانی', 'teacher': source})
     participants = [{'teacher_name': source, 'role': 'استاد اصلی', 'scheduled_sessions': 15, 'effective_sessions': max(0, source_count)}]
     for name, count in sorted(replacement_counts.items()):
         if name:
@@ -2743,7 +2756,7 @@ def _teacher_report_payload(slot, events):
         'teacher_name': source, 'day_type': slot.day_type, 'day_type_display': slot.get_day_type_display(),
         'time_slot': slot.time_slot, 'gender': slot.gender, 'gender_display': slot.get_gender_display(),
         'level': slot.assigned_level, 'capacity': slot.capacity, 'total_sessions': 15,
-        'held_sessions': max(0, 15 - sum(1 for e in approved if e.event_type == TeacherSessionEvent.EventType.ABSENCE)),
+        'held_sessions': max(0, 15 - sum(1 for e in approved if TeacherSessionEvent is not None and e.event_type == TeacherSessionEvent.EventType.ABSENCE)),
         'participants': participants, 'session_statuses': status_rows,
     }
 
@@ -2927,6 +2940,7 @@ class TeacherTermReportView(APIView):
         if not teacher_values and request.query_params.get('teacher'):
             teacher_values = [x.strip() for x in request.query_params.get('teacher').split(',') if x.strip()]
         search = (request.query_params.get('search') or '').strip().lower()
+        event_type = request.query_params.get('event_type') or ''
         if teacher_values:
             teacher_query = Q()
             for teacher_value in teacher_values:
@@ -2937,11 +2951,15 @@ class TeacherTermReportView(APIView):
             events = []
         else:
             events = TeacherSessionEvent.objects.filter(status=TeacherSessionEvent.ApprovalStatus.APPROVED).select_related('class_slot', 'term', 'requested_by', 'approved_by')
+            if event_type in dict(TeacherSessionEvent.EventType.choices):
+                events = events.filter(event_type=event_type)
             if term_key != 'all':
                 events = events.filter(term_id=int(term_id)) if term_key.isdigit() else events.none()
         grouped = {}
         for event in events:
             grouped.setdefault(event.class_slot_id, []).append(event)
+        if TeacherSessionEvent is not None and event_type in dict(TeacherSessionEvent.EventType.choices):
+            slots = [slot for slot in slots if slot.id in grouped]
         rows = [_teacher_report_payload(slot, grouped.get(slot.id, [])) for slot in slots]
         if search:
             rows = [r for r in rows if search in f"{r['teacher_name']} {r['class_number']} {r['level']} {r['day_type_display']}".lower()]
@@ -2990,16 +3008,27 @@ class TeacherSessionEventListCreateView(APIView):
         term_id = request.data.get('term_id') or request.data.get('term')
         slot_id = request.data.get('class_slot_id') or request.data.get('class_slot')
         event_type = request.data.get('event_type')
+        if TeacherSessionEvent is None:
+            return Response({'error': 'مدل ثبت جلسات استادان در نسخه backend نصب نشده است؛ ابتدا فایل مدل جلسات استادان و migration مربوط به آن را نصب کنید.'}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
         if not str(term_id).isdigit() or not str(slot_id).isdigit() or event_type not in dict(TeacherSessionEvent.EventType.choices):
             return Response({'error': 'ترم، کلاس و نوع رویداد را کامل انتخاب کنید'}, status=status.HTTP_400_BAD_REQUEST)
         try:
             term = Term.objects.get(pk=int(term_id)); slot = ClassSlot.objects.get(pk=int(slot_id), term=term)
         except (Term.DoesNotExist, ClassSlot.DoesNotExist):
             return Response({'error': 'کلاس با ترم انتخاب‌شده مطابقت ندارد'}, status=status.HTTP_400_BAD_REQUEST)
+        raw_date = str(request.data.get('class_date') or request.data.get('class_date_jalali') or '').strip()
+        raw_date = raw_date.translate(str.maketrans('۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩', '01234567890123456789'))
         try:
-            class_date = datetime.strptime(str(request.data.get('class_date')), '%Y-%m-%d').date()
+            if '/' in raw_date:
+                y, m, d = [int(x) for x in raw_date.replace('-', '/').split('/')]
+                class_date = jdatetime.date(y, m, d).togregorian()
+            else:
+                class_date = datetime.strptime(raw_date, '%Y-%m-%d').date()
         except (TypeError, ValueError):
-            return Response({'error': 'تاریخ جلسه را به‌صورت معتبر وارد کنید'}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({'error': 'تاریخ جلسه را به‌صورت شمسی معتبر مانند ۱۴۰۵/۰۶/۰۷ وارد کنید'}, status=status.HTTP_400_BAD_REQUEST)
+        class_time = str(request.data.get('class_time') or '').strip()
+        if class_time and class_time != str(slot.time_slot or '').strip():
+            return Response({'error': 'ساعت انتخاب‌شده با ساعت استاندارد کلاس مطابقت ندارد'}, status=status.HTTP_400_BAD_REQUEST)
         session_number = int(request.data.get('session_number') or 0)
         if not 1 <= session_number <= 15:
             return Response({'error': 'شماره جلسه باید بین ۱ تا ۱۵ باشد'}, status=status.HTTP_400_BAD_REQUEST)
@@ -3021,6 +3050,8 @@ class TeacherSessionEventDetailView(APIView):
         except TeacherSessionEvent.DoesNotExist: return Response({'error': 'رویداد پیدا نشد'}, status=404)
         for field in ('requested_teacher_name', 'replacement_teacher_name', 'notes'):
             if field in request.data: setattr(event, field, str(request.data.get(field) or '').strip())
+        if 'event_type' in request.data and request.data['event_type'] in dict(TeacherSessionEvent.EventType.choices):
+            event.event_type = request.data['event_type']
         if 'session_number' in request.data:
             n = int(request.data['session_number'])
             if not 1 <= n <= 15: return Response({'error': 'شماره جلسه باید بین ۱ تا ۱۵ باشد'}, status=400)

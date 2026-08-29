@@ -300,7 +300,7 @@ class TuitionSetting(models.Model):
     اپ level_tests استفاده می‌شود. موقع ثبت‌نام، با توجه به سطحِ کلاس و گروه سنی دانش‌آموز
     (از روی آخرین آزمون تعیین‌سطحِ تکمیل‌شده‌اش)، این مبلغ به‌عنوان پیش‌فرض پیشنهاد می‌شود.
     """
-    level = models.CharField(max_length=10, choices=get_all_level_choices)
+    level = models.CharField(max_length=20, choices=get_all_level_choices)
     age_group = models.CharField(max_length=10, choices=LevelTest.AgeGroup.choices)
     amount = models.PositiveIntegerField(default=0, help_text='شهریه‌ی مصوب (تومان)')
     updated_at = models.DateTimeField(auto_now=True)
@@ -407,7 +407,7 @@ class LevelRenewalApproval(models.Model):
         REJECTED = 'rejected', 'ردشده'
 
     student = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='level_renewal_requests')
-    level = models.CharField(max_length=10)
+    level = models.CharField(max_length=20)
     requested_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name='level_renewals_requested')
     status = models.CharField(max_length=10, choices=Status.choices, default=Status.PENDING)
     reviewed_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name='level_renewals_reviewed')

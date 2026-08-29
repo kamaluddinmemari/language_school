@@ -15,35 +15,76 @@ from notifications.utils import send_notification
 
 MANAGE_LEVEL_ROLES = ('admin', 'evaluator')
 
+DEFAULT_STANDARD_LEVELS = (
+    ('kids', ['e1', 'e2', 'e3', 'e4', 'e5', 's1', 's2', 's3', 's4', 's5', 'g1', 'g2', 'g3', 'g4', 'g5', 'u1', 'u2', 'u3', 'u4', 'u5', 'm1', 'm2', 'm3', 'm4', 'm5', 'h1', 'h2', 'h3', 'h4', 'h5', 'i1', 'i2', 'i3', 'i4', 'i5']),
+    ('teen', ['teen starter'] + [f'teen{i}' for i in range(1, 16)]),
+    ('adult', [f'{prefix}{i}' for prefix in ('1', '2', '3', '4', '5', '6') for i in range(1, 7)]),
+)
+
+
+def ensure_default_standard_levels():
+    """Seed only missing defaults; never edits or deletes levels created by the manager."""
+    existing = set(StandardLevel.objects.values_list('code', flat=True))
+    missing = []
+    for age_group, codes in DEFAULT_STANDARD_LEVELS:
+        last_code = codes[-1]
+        for order, code in enumerate(codes, start=1):
+            if code not in existing:
+                missing.append(StandardLevel(code=code, age_group=age_group, order=order, is_terminal=(code == last_code)))
+    if missing:
+        StandardLevel.objects.bulk_create(missing, ignore_conflicts=True)
+
+
+def _clear_other_terminals(age_group, keep_id=None):
+    """فقط یک سطح پایانی در هر رده معتبر است — با علامت‌گذاری سطح جدید، بقیه‌ی همان رده خودکار پاک می‌شوند."""
+    qs = StandardLevel.objects.filter(age_group=age_group, is_terminal=True)
+    if keep_id is not None:
+        qs = qs.exclude(pk=keep_id)
+    qs.update(is_terminal=False)
+
 
 class StandardLevelSerializer(drf_serializers.ModelSerializer):
     age_group_display = drf_serializers.CharField(source='get_age_group_display', read_only=True)
 
     class Meta:
         model = StandardLevel
-        fields = ['id', 'code', 'age_group', 'age_group_display', 'order', 'created_at']
+        fields = ['id', 'code', 'age_group', 'age_group_display', 'order', 'is_terminal', 'created_at']
         read_only_fields = ['id', 'created_at']
 
 
 class StandardLevelListView(generics.ListCreateAPIView):
-    """GET: لیست سطوح استاندارد تعریف‌شده / POST: افزودن سطح استاندارد جدید — منبع واحد سطوح در کل پروژه"""
+    """GET: لیست سطوح استاندارد تعریف‌شده (همه‌ی رده‌ها) / POST: افزودن سطح استاندارد جدید — منبع واحد سطوح در کل پروژه"""
     permission_classes = [IsAuthenticated]
     serializer_class = StandardLevelSerializer
 
     def get_queryset(self):
         if self.request.user.role not in MANAGE_LEVEL_ROLES:
             return StandardLevel.objects.none()
-        return StandardLevel.objects.all()
+        if not StandardLevel.objects.exists():
+            # فقط وقتی جدول کاملاً خالیه (نصب اولیه) سطوح پیش‌فرض ساخته می‌شن؛
+            # وگرنه حذفِ یک سطح پیش‌فرض توسط مدیر، با رفرش بعدی دوباره ساخته می‌شد.
+            ensure_default_standard_levels()
+        qs = StandardLevel.objects.all()
+        age_group = self.request.query_params.get('age_group')
+        if age_group:
+            qs = qs.filter(age_group=age_group)
+        return qs
 
     def create(self, request, *args, **kwargs):
         if request.user.role not in MANAGE_LEVEL_ROLES:
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         code = (request.data.get('code') or '').strip()
+        age_group = (request.data.get('age_group') or '').strip()
         if not code:
             return Response({'error': 'کد سطح را وارد کنید'}, status=status.HTTP_400_BAD_REQUEST)
+        if not age_group:
+            return Response({'error': 'گروه سنی را انتخاب کنید'}, status=status.HTTP_400_BAD_REQUEST)
         if StandardLevel.objects.filter(code__iexact=code).exists():
             return Response({'error': f'سطح «{code}» از قبل وجود دارد'}, status=status.HTTP_400_BAD_REQUEST)
-        return super().create(request, *args, **kwargs)
+        response = super().create(request, *args, **kwargs)
+        if response.status_code == status.HTTP_201_CREATED and request.data.get('is_terminal'):
+            _clear_other_terminals(age_group, keep_id=response.data.get('id'))
+        return response
 
 
 class StandardLevelDetailView(generics.RetrieveUpdateDestroyAPIView):
@@ -55,7 +96,11 @@ class StandardLevelDetailView(generics.RetrieveUpdateDestroyAPIView):
     def update(self, request, *args, **kwargs):
         if request.user.role not in MANAGE_LEVEL_ROLES:
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
-        return super().update(request, *args, **kwargs)
+        instance = self.get_object()
+        response = super().update(request, *args, **kwargs)
+        if response.status_code == status.HTTP_200_OK and request.data.get('is_terminal'):
+            _clear_other_terminals(instance.age_group, keep_id=instance.pk)
+        return response
 
     def destroy(self, request, *args, **kwargs):
         if request.user.role not in MANAGE_LEVEL_ROLES:
