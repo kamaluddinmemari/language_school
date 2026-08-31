@@ -117,6 +117,7 @@ class OfficeStaffSerializer(serializers.ModelSerializer):
         user = User(**validated_data)
         if password:
             user.set_password(password)
+            user.last_generated_password = password
         else:
             user.set_unusable_password()
         user.save()
@@ -128,6 +129,7 @@ class OfficeStaffSerializer(serializers.ModelSerializer):
             setattr(instance, attr, value)
         if password:
             instance.set_password(password)
+            instance.last_generated_password = password
         instance.save()
         return instance
 

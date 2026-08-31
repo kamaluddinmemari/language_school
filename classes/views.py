@@ -16,6 +16,7 @@ from .serializers import (
     ClassRequestStudentSerializer,
     ClassSessionSerializer,
 )
+from accounts.menu_permissions import can_view_menu
 
 
 class PendingPrivateClassRequestsView(generics.ListAPIView):
@@ -628,7 +629,7 @@ class ClassStatsView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        if request.user.role not in ('admin', 'office'):
+        if not can_view_menu(request.user, 'stats'):
             return Response({'error': 'فقط مدیر به این گزارش دسترسی دارد'}, status=status.HTTP_403_FORBIDDEN)
 
         queryset = ClassRequest.objects.filter(status=ClassRequest.Status.COMPLETED)

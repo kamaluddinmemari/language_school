@@ -3,6 +3,7 @@ import random
 import re
 import math
 from datetime import datetime, timedelta
+from decimal import Decimal, ROUND_HALF_UP
 from django.db import models as django_models, transaction
 from django.db.models import Count, Max, Q
 from django.shortcuts import get_object_or_404
@@ -13,7 +14,15 @@ from rest_framework.parsers import MultiPartParser, FormParser
 from rest_framework.permissions import IsAuthenticated
 import jdatetime
 from .models import ClassSlot, ClassSlotEnrollment, TuitionSetting, DiscountedPerson, EnrollmentRefund, WalletTransaction, infer_age_group_from_level, _jalali, LevelRenewalApproval, Term, OnlineCourse, OnlineCourseEnrollment, PaymentSettings, ClassAttendance, OnlineCourseActionRequest
-from .models import THREE_DAY_TIME_SLOTS, THURSDAY_MORNING_SLOT, THURSDAY_EVENING_SLOT, FRIDAY_SLOT
+from .models import (
+    THREE_DAY_TIME_SLOTS,
+    THURSDAY_MORNING_SLOT,
+    THURSDAY_EVENING_SLOT,
+    FRIDAY_SLOT,
+    THURSDAY_MORNING_EVENT_SLOTS,
+    THURSDAY_EVENING_EVENT_SLOTS,
+    FRIDAY_EVENT_SLOTS,
+)
 
 # QR و جلسات استادان فعلاً غیرفعال هستند؛ نبودن مدل‌های این بخش‌ها نباید مانع اجرای ترم و کلاس شود.
 try:
@@ -34,8 +43,11 @@ from .serializers import (
     OnlineCourseActionRequestCreateSerializer, OnlineCourseActionRequestReviewSerializer,
 )
 from level_tests.models import LevelTest
+from accounts.menu_permissions import can_edit_menu, can_view_menu
 from .allocation import allocate_classes
 
+# منسوخ — از تنظیمات دسترسی (accounts.menu_permissions.can_edit_menu) جایگزین شد.
+# فقط برای مرجع/سازگاری با کد قدیمی نگه داشته شده؛ جایی از این فایل استفاده نمی‌شود.
 MANAGE_ROLES = ('admin', 'evaluator', 'office')
 
 
@@ -122,7 +134,7 @@ class ClassSlotListView(generics.ListCreateAPIView):
     serializer_class = ClassSlotSerializer
 
     def get_queryset(self):
-        if self.request.user.role not in MANAGE_ROLES:
+        if not can_edit_menu(self.request.user, 'class-management'):
             return ClassSlot.objects.none()
         qs = ClassSlot.objects.all()
         term_id = self.request.query_params.get('term')
@@ -133,7 +145,7 @@ class ClassSlotListView(generics.ListCreateAPIView):
         return qs
 
     def create(self, request, *args, **kwargs):
-        if request.user.role not in MANAGE_ROLES:
+        if not can_edit_menu(request.user, 'class-management'):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         return super().create(request, *args, **kwargs)
 
@@ -144,12 +156,12 @@ class TermListView(generics.ListCreateAPIView):
     serializer_class = TermSerializer
 
     def get_queryset(self):
-        if self.request.user.role not in MANAGE_ROLES:
+        if not can_edit_menu(self.request.user, 'class-management'):
             return Term.objects.none()
         return Term.objects.all()
 
     def create(self, request, *args, **kwargs):
-        if request.user.role not in MANAGE_ROLES:
+        if not can_edit_menu(request.user, 'class-management'):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         return super().create(request, *args, **kwargs)
 
@@ -159,7 +171,7 @@ class CarryClassesToNextTermView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
-        if request.user.role not in MANAGE_ROLES:
+        if not can_edit_menu(request.user, 'class-management'):
             return Response({'error': 'دسترسی به انتقال کلاس‌ها ندارید'}, status=status.HTTP_403_FORBIDDEN)
         source_term_id = request.data.get('source_term_id')
         target_term_id = request.data.get('target_term_id')
@@ -241,12 +253,12 @@ class TermDetailView(generics.RetrieveUpdateDestroyAPIView):
     queryset = Term.objects.all()
 
     def update(self, request, *args, **kwargs):
-        if request.user.role not in MANAGE_ROLES:
+        if not can_edit_menu(request.user, 'class-management'):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         return super().update(request, *args, **kwargs)
 
     def destroy(self, request, *args, **kwargs):
-        if request.user.role not in MANAGE_ROLES:
+        if not can_edit_menu(request.user, 'class-management'):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         return super().destroy(request, *args, **kwargs)
 
@@ -257,7 +269,7 @@ class ClassSlotDetailView(generics.RetrieveUpdateDestroyAPIView):
     queryset = ClassSlot.objects.all()
 
     def update(self, request, *args, **kwargs):
-        if request.user.role not in MANAGE_ROLES:
+        if not can_edit_menu(request.user, 'class-management'):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
 
         # خواسته: توی هر ردیفِ روز+ساعت (مثلاً همه‌ی کلاس‌های زوج ساعت ۳:۴۵ الی ۵:۱۵)، یک استاد
@@ -278,7 +290,7 @@ class ClassSlotDetailView(generics.RetrieveUpdateDestroyAPIView):
         return super().update(request, *args, **kwargs)
 
     def destroy(self, request, *args, **kwargs):
-        if request.user.role not in MANAGE_ROLES:
+        if not can_edit_menu(request.user, 'class-management'):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         return super().destroy(request, *args, **kwargs)
 
@@ -319,7 +331,7 @@ class SwapClassLocationView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request, pk):
-        if request.user.role not in MANAGE_ROLES:
+        if not can_edit_menu(request.user, 'class-management'):
             return Response({'error': 'دسترسی به جابجایی محل کلاس‌ها ندارید'}, status=status.HTTP_403_FORBIDDEN)
         target_id = request.data.get('target_slot_id')
         if not target_id or str(target_id) == str(pk):
@@ -352,7 +364,7 @@ class TransferClassLocationView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request, pk):
-        if request.user.role not in MANAGE_ROLES:
+        if not can_edit_menu(request.user, 'class-management'):
             return Response({'error': 'دسترسی به انتقال کلاس ندارید'}, status=status.HTTP_403_FORBIDDEN)
         target_id = request.data.get('target_slot_id')
         force_compatibility = request.data.get('force_compatibility') is True
@@ -400,7 +412,7 @@ class AllocateClassesView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
-        if request.user.role not in MANAGE_ROLES:
+        if not can_edit_menu(request.user, 'class-management'):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         serializer = AllocateClassesSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -469,7 +481,7 @@ class ConfirmOverflowView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
-        if request.user.role not in MANAGE_ROLES:
+        if not can_edit_menu(request.user, 'class-management'):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         serializer = ConfirmOverflowSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -515,7 +527,7 @@ class TransferSurplusView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request, pk):
-        if request.user.role not in MANAGE_ROLES:
+        if not can_edit_menu(request.user, 'class-management'):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         try:
             source = ClassSlot.objects.get(pk=pk)
@@ -579,7 +591,7 @@ class SpinOffSurplusView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request, pk):
-        if request.user.role not in MANAGE_ROLES:
+        if not can_edit_menu(request.user, 'class-management'):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         try:
             source = ClassSlot.objects.get(pk=pk)
@@ -637,7 +649,7 @@ class ClassStatsView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        if request.user.role not in MANAGE_ROLES:
+        if not can_edit_menu(request.user, 'class-management'):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         slots = list(ClassSlot.objects.all().order_by('number'))
         total_capacity = sum(s.capacity for s in slots)
@@ -698,7 +710,7 @@ class BulkCreatePhysicalClassesView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
-        if request.user.role not in MANAGE_ROLES:
+        if not can_edit_menu(request.user, 'class-management'):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         serializer = BulkCreatePhysicalClassesSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -785,7 +797,7 @@ class ClassSlotEnrollView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request, pk):
-        if request.user.role not in MANAGE_ROLES:
+        if not can_edit_menu(request.user, 'class-management'):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         try:
             slot = ClassSlot.objects.get(pk=pk)
@@ -902,7 +914,7 @@ class ClassSlotUnenrollView(APIView):
     permission_classes = [IsAuthenticated]
 
     def delete(self, request, pk, student_id):
-        if request.user.role not in MANAGE_ROLES:
+        if not can_edit_menu(request.user, 'class-management'):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         try:
             slot = ClassSlot.objects.get(pk=pk)
@@ -924,7 +936,7 @@ class ClassSlotRosterView(generics.ListAPIView):
     serializer_class = ClassSlotEnrollmentSerializer
 
     def get_queryset(self):
-        if self.request.user.role not in MANAGE_ROLES:
+        if not can_edit_menu(self.request.user, 'class-management'):
             return ClassSlotEnrollment.objects.none()
         return ClassSlotEnrollment.objects.filter(class_slot_id=self.kwargs['pk'], payment_verified=True).select_related('student')
 
@@ -940,7 +952,7 @@ class StudentEducationHistoryView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request, student_id):
-        if request.user.role not in MANAGE_ROLES:
+        if not can_edit_menu(request.user, 'class-management'):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         from django.contrib.auth import get_user_model
         User = get_user_model()
@@ -1014,7 +1026,7 @@ class StudentFinancialHistoryView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request, student_id):
-        if request.user.role not in MANAGE_ROLES:
+        if not can_edit_menu(request.user, 'class-management'):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         from django.contrib.auth import get_user_model
         User = get_user_model()
@@ -1065,7 +1077,7 @@ class EnrollmentReportView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        if request.user.role not in MANAGE_ROLES:
+        if not can_edit_menu(request.user, 'class-management'):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
 
         qs = ClassSlotEnrollment.objects.select_related('class_slot', 'student').all()
@@ -1258,7 +1270,7 @@ class DirectEnrollSuggestionsView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        if request.user.role not in MANAGE_ROLES:
+        if not can_edit_menu(request.user, 'class-management'):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         student_id = request.query_params.get('student_id')
         manual_level = request.query_params.get('level', '').strip()
@@ -1418,7 +1430,7 @@ class PendingSelfEnrollmentsView(generics.ListAPIView):
     serializer_class = ClassSlotEnrollmentSerializer
 
     def get_queryset(self):
-        if self.request.user.role not in MANAGE_ROLES:
+        if not can_edit_menu(self.request.user, 'class-management'):
             return ClassSlotEnrollment.objects.none()
         return ClassSlotEnrollment.objects.filter(self_enrolled=True, payment_verified=False).select_related('student', 'class_slot').order_by('created_at')
 
@@ -1428,7 +1440,7 @@ class RejectPendingEnrollmentView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request, pk, student_id):
-        if request.user.role not in MANAGE_ROLES:
+        if not can_edit_menu(request.user, 'class-management'):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         try:
             enrollment = ClassSlotEnrollment.objects.get(class_slot_id=pk, student_id=student_id, self_enrolled=True, payment_verified=False)
@@ -1443,7 +1455,7 @@ class VerifyEnrollmentPaymentView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request, pk, student_id):
-        if request.user.role not in MANAGE_ROLES:
+        if not can_edit_menu(request.user, 'class-management'):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         try:
             enrollment = ClassSlotEnrollment.objects.get(class_slot_id=pk, student_id=student_id)
@@ -1464,7 +1476,7 @@ class LevelRenewalApprovalListView(generics.ListCreateAPIView):
     serializer_class = LevelRenewalApprovalSerializer
 
     def get_queryset(self):
-        if self.request.user.role not in MANAGE_ROLES:
+        if not can_edit_menu(self.request.user, 'class-management'):
             return LevelRenewalApproval.objects.none()
         qs = LevelRenewalApproval.objects.select_related('student', 'requested_by', 'reviewed_by').all()
         status_filter = self.request.query_params.get('status')
@@ -1473,7 +1485,7 @@ class LevelRenewalApprovalListView(generics.ListCreateAPIView):
         return qs
 
     def create(self, request, *args, **kwargs):
-        if request.user.role not in MANAGE_ROLES:
+        if not can_edit_menu(request.user, 'class-management'):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         student_id = request.data.get('student')
         level = request.data.get('level')
@@ -1493,7 +1505,7 @@ class LevelRenewalApprovalDecideView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request, pk):
-        if request.user.role not in MANAGE_ROLES:
+        if not can_edit_menu(request.user, 'class-management'):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         try:
             approval = LevelRenewalApproval.objects.get(pk=pk)
@@ -1518,7 +1530,7 @@ class TuitionSuggestionView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request, pk):
-        if request.user.role not in MANAGE_ROLES:
+        if not can_edit_menu(request.user, 'class-management'):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         student_id = request.query_params.get('student_id')
         if not student_id:
@@ -1567,12 +1579,12 @@ class TuitionSettingListView(generics.ListCreateAPIView):
     serializer_class = TuitionSettingSerializer
 
     def get_queryset(self):
-        if self.request.user.role not in MANAGE_ROLES:
+        if not can_edit_menu(self.request.user, 'class-management'):
             return TuitionSetting.objects.none()
         return TuitionSetting.objects.all()
 
     def create(self, request, *args, **kwargs):
-        if request.user.role not in MANAGE_ROLES:
+        if not can_edit_menu(request.user, 'class-management'):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         level = request.data.get('level')
         # گروه سنی معمولاً از روی خودِ سطح محاسبه می‌شود؛ ولی برای سطوح سفارشی/غیراستاندارد
@@ -1599,12 +1611,12 @@ class TuitionSettingDetailView(generics.RetrieveUpdateDestroyAPIView):
     queryset = TuitionSetting.objects.all()
 
     def update(self, request, *args, **kwargs):
-        if request.user.role not in MANAGE_ROLES:
+        if not can_edit_menu(request.user, 'class-management'):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         return super().update(request, *args, **kwargs)
 
     def destroy(self, request, *args, **kwargs):
-        if request.user.role not in MANAGE_ROLES:
+        if not can_edit_menu(request.user, 'class-management'):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         return super().destroy(request, *args, **kwargs)
 
@@ -1615,7 +1627,7 @@ class DiscountedPersonListView(generics.ListAPIView):
     serializer_class = DiscountedPersonSerializer
 
     def get_queryset(self):
-        if self.request.user.role not in MANAGE_ROLES:
+        if not can_view_menu(self.request.user, 'discounts'):
             return DiscountedPerson.objects.none()
         return DiscountedPerson.objects.select_related('student', 'class_slot', 'online_course').all()
 
@@ -1627,12 +1639,12 @@ class DiscountedPersonDetailView(generics.RetrieveUpdateDestroyAPIView):
     queryset = DiscountedPerson.objects.all()
 
     def update(self, request, *args, **kwargs):
-        if request.user.role not in MANAGE_ROLES:
+        if not can_edit_menu(request.user, 'discounts'):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         return super().update(request, *args, **kwargs)
 
     def destroy(self, request, *args, **kwargs):
-        if request.user.role not in MANAGE_ROLES:
+        if not can_edit_menu(request.user, 'discounts'):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         return super().destroy(request, *args, **kwargs)
 
@@ -1645,7 +1657,7 @@ class RefundEnrollmentView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request, pk, student_id):
-        if request.user.role not in MANAGE_ROLES:
+        if not can_edit_menu(request.user, 'class-management'):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         try:
             slot = ClassSlot.objects.get(pk=pk)
@@ -1679,7 +1691,7 @@ class TransferEnrollmentOptionsView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request, pk, student_id):
-        if request.user.role not in MANAGE_ROLES:
+        if not can_edit_menu(request.user, 'class-management'):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         try:
             slot = ClassSlot.objects.get(pk=pk)
@@ -1702,7 +1714,7 @@ class TransferEnrollmentView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request, pk, student_id):
-        if request.user.role not in MANAGE_ROLES:
+        if not can_edit_menu(request.user, 'class-management'):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         try:
             source = ClassSlot.objects.get(pk=pk)
@@ -1749,7 +1761,7 @@ class CreditToWalletView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request, pk, student_id):
-        if request.user.role not in MANAGE_ROLES:
+        if not can_edit_menu(request.user, 'class-management'):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         try:
             slot = ClassSlot.objects.get(pk=pk)
@@ -1785,7 +1797,7 @@ class SplitClassView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request, pk):
-        if request.user.role not in MANAGE_ROLES:
+        if not can_edit_menu(request.user, 'class-management'):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         try:
             source = ClassSlot.objects.get(pk=pk)
@@ -1856,7 +1868,7 @@ class TeacherEducationHistoryView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request, teacher_id):
-        if request.user.role not in MANAGE_ROLES:
+        if not can_edit_menu(request.user, 'class-management'):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         from django.contrib.auth import get_user_model
         User = get_user_model()
@@ -2014,12 +2026,12 @@ class OnlineCourseListView(generics.ListCreateAPIView):
     serializer_class = OnlineCourseSerializer
 
     def get_queryset(self):
-        if self.request.user.role not in MANAGE_ROLES:
+        if not can_edit_menu(self.request.user, 'class-management'):
             return OnlineCourse.objects.none()
         return OnlineCourse.objects.all()
 
     def create(self, request, *args, **kwargs):
-        if request.user.role not in MANAGE_ROLES:
+        if not can_edit_menu(request.user, 'class-management'):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         # هشدار (نه مسدودسازی) تداخل زمانی استاد با دوره‌های دیگرش
         warning = self._teacher_overlap_warning(request.data.get('teacher_name', ''), request.data.get('schedule_note', ''))
@@ -2049,7 +2061,7 @@ class OnlineCourseDetailView(generics.RetrieveUpdateDestroyAPIView):
     queryset = OnlineCourse.objects.all()
 
     def update(self, request, *args, **kwargs):
-        if request.user.role not in MANAGE_ROLES:
+        if not can_edit_menu(request.user, 'class-management'):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         obj = self.get_object()
         warning = OnlineCourseListView()._teacher_overlap_warning(
@@ -2063,7 +2075,7 @@ class OnlineCourseDetailView(generics.RetrieveUpdateDestroyAPIView):
         return response
 
     def destroy(self, request, *args, **kwargs):
-        if request.user.role not in MANAGE_ROLES:
+        if not can_edit_menu(request.user, 'class-management'):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         return super().destroy(request, *args, **kwargs)
 
@@ -2088,7 +2100,7 @@ class OnlineCourseEnrollView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request, pk):
-        if request.user.role not in MANAGE_ROLES:
+        if not can_edit_menu(request.user, 'class-management'):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         try:
             course = OnlineCourse.objects.get(pk=pk)
@@ -2198,7 +2210,7 @@ class PendingOnlineCourseEnrollmentsView(generics.ListAPIView):
     serializer_class = OnlineCourseEnrollmentSerializer
 
     def get_queryset(self):
-        if self.request.user.role not in MANAGE_ROLES:
+        if not can_edit_menu(self.request.user, 'class-management'):
             return OnlineCourseEnrollment.objects.none()
         return OnlineCourseEnrollment.objects.filter(self_enrolled=True, payment_verified=False).select_related('student', 'course').order_by('created_at')
 
@@ -2208,7 +2220,7 @@ class VerifyOnlineCourseEnrollmentPaymentView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request, pk, student_id):
-        if request.user.role not in MANAGE_ROLES:
+        if not can_edit_menu(request.user, 'class-management'):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         try:
             enrollment = OnlineCourseEnrollment.objects.get(course_id=pk, student_id=student_id)
@@ -2224,7 +2236,7 @@ class RejectPendingOnlineCourseEnrollmentView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request, pk, student_id):
-        if request.user.role not in MANAGE_ROLES:
+        if not can_edit_menu(request.user, 'class-management'):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         try:
             enrollment = OnlineCourseEnrollment.objects.get(course_id=pk, student_id=student_id, self_enrolled=True, payment_verified=False)
@@ -2239,7 +2251,7 @@ class RefundOnlineCourseEnrollmentView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request, pk, student_id):
-        if request.user.role not in MANAGE_ROLES:
+        if not can_edit_menu(request.user, 'class-management'):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         try:
             course = OnlineCourse.objects.get(pk=pk)
@@ -2269,7 +2281,7 @@ class CreditOnlineCourseToWalletView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request, pk, student_id):
-        if request.user.role not in MANAGE_ROLES:
+        if not can_edit_menu(request.user, 'class-management'):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         try:
             course = OnlineCourse.objects.get(pk=pk)
@@ -2301,7 +2313,7 @@ class OnlineCourseRosterView(generics.ListAPIView):
     serializer_class = OnlineCourseEnrollmentSerializer
 
     def get_queryset(self):
-        if self.request.user.role not in MANAGE_ROLES:
+        if not can_edit_menu(self.request.user, 'class-management'):
             return OnlineCourseEnrollment.objects.none()
         return OnlineCourseEnrollment.objects.filter(course_id=self.kwargs['pk'], payment_verified=True).select_related('student')
 
@@ -2311,7 +2323,7 @@ class OnlineCourseUnenrollView(APIView):
     permission_classes = [IsAuthenticated]
 
     def delete(self, request, pk, student_id):
-        if request.user.role not in MANAGE_ROLES:
+        if not can_edit_menu(request.user, 'class-management'):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         try:
             course = OnlineCourse.objects.get(pk=pk)
@@ -2327,7 +2339,7 @@ class OnlineCourseTransferOptionsView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request, pk, student_id):
-        if request.user.role not in MANAGE_ROLES:
+        if not can_edit_menu(request.user, 'class-management'):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         try:
             course = OnlineCourse.objects.get(pk=pk)
@@ -2348,7 +2360,7 @@ class OnlineCourseTransferView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request, pk, student_id):
-        if request.user.role not in MANAGE_ROLES:
+        if not can_edit_menu(request.user, 'class-management'):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         try:
             source = OnlineCourse.objects.get(pk=pk)
@@ -2439,7 +2451,7 @@ class AdminOnlineCourseActionRequestListView(generics.ListAPIView):
     serializer_class = OnlineCourseActionRequestSerializer
 
     def get_queryset(self):
-        if self.request.user.role not in MANAGE_ROLES:
+        if not can_edit_menu(self.request.user, 'class-management'):
             return OnlineCourseActionRequest.objects.none()
         qs = OnlineCourseActionRequest.objects.select_related('student', 'online_course', 'requested_target_course')
         status_param = self.request.query_params.get('status', 'pending')
@@ -2458,7 +2470,7 @@ class ApproveOnlineCourseActionRequestView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request, pk):
-        if request.user.role not in MANAGE_ROLES:
+        if not can_edit_menu(request.user, 'class-management'):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         try:
             req = OnlineCourseActionRequest.objects.select_related('online_course', 'student', 'requested_target_course').get(pk=pk)
@@ -2518,7 +2530,7 @@ class RejectOnlineCourseActionRequestView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request, pk):
-        if request.user.role not in MANAGE_ROLES:
+        if not can_edit_menu(request.user, 'class-management'):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         try:
             req = OnlineCourseActionRequest.objects.get(pk=pk)
@@ -2633,7 +2645,7 @@ class PaymentSettingsView(APIView):
         return Response(PaymentSettingsSerializer(PaymentSettings.get_solo()).data)
 
     def patch(self, request):
-        if request.user.role not in MANAGE_ROLES:
+        if not can_edit_menu(request.user, 'class-management'):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         obj = PaymentSettings.get_solo()
         serializer = PaymentSettingsSerializer(obj, data=request.data, partial=True)
@@ -2656,7 +2668,7 @@ class MarkAttendanceView(APIView):
     def post(self, request):
         from django.contrib.auth import get_user_model
         User = get_user_model()
-        if request.user.role not in MANAGE_ROLES and request.user.role not in User.TEACHER_LIKE_ROLES:
+        if not can_edit_menu(request.user, 'class-management') and request.user.role not in User.TEACHER_LIKE_ROLES:
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
 
         class_slot_id = request.data.get('class_slot')
@@ -2670,7 +2682,7 @@ class MarkAttendanceView(APIView):
             return Response({'error': 'student، date، و یکی از class_slot/online_course الزامی است'}, status=status.HTTP_400_BAD_REQUEST)
 
         # اگه استاد (نه مدیر) درخواست داده، فقط اجازه داره برای کلاس‌های خودش ثبت کنه
-        if request.user.role in User.TEACHER_LIKE_ROLES and request.user.role not in MANAGE_ROLES:
+        if request.user.role in User.TEACHER_LIKE_ROLES and not can_edit_menu(request.user, 'class-management'):
             teacher_full_name = request.user.get_full_name().strip()
             if class_slot_id:
                 owns = ClassSlot.objects.filter(pk=class_slot_id, teacher_name__iexact=teacher_full_name).exists()
@@ -2712,11 +2724,18 @@ class ClassAttendanceListView(generics.ListAPIView):
 
 def _teacher_event_payload(event):
     slot = event.class_slot
+    allowed_times = (
+        THURSDAY_MORNING_EVENT_SLOTS if slot.day_type == ClassSlot.DayType.THURSDAY_MORNING
+        else THURSDAY_EVENING_EVENT_SLOTS if slot.day_type == ClassSlot.DayType.THURSDAY_EVENING
+        else FRIDAY_EVENT_SLOTS if slot.day_type == ClassSlot.DayType.FRIDAY
+        else [slot.time_slot] if slot.time_slot else []
+    )
     return {
         'id': event.id, 'term': event.term_id, 'term_title': event.term.title,
         'class_slot': slot.id, 'class_number': slot.number, 'class_title': slot.title,
         'day_type': slot.day_type, 'day_type_display': slot.get_day_type_display(),
-        'time_slot': slot.time_slot, 'gender': slot.gender, 'gender_display': slot.get_gender_display(),
+        'time_slot': slot.time_slot, 'class_time': event.class_time or slot.time_slot,
+        'available_times': allowed_times, 'gender': slot.gender, 'gender_display': slot.get_gender_display(),
         'level': slot.assigned_level, 'event_type': event.event_type,
         'event_type_display': event.get_event_type_display(), 'class_date': event.class_date,
         'class_date_jalali': event.class_date_jalali, 'session_number': event.session_number,
@@ -2804,7 +2823,7 @@ class RoomQrManageView(APIView):
     """مدیریت QR محل کلاس؛ فقط مدیر/اداری/مدیرآموزش."""
     permission_classes = [IsAuthenticated]
 
-    def _allowed(self, request): return request.user.role in MANAGE_ROLES
+    def _allowed(self, request): return can_edit_menu(request.user, 'class-management')
 
     def get(self, request, pk):
         if not self._allowed(request): return Response({'error': 'دسترسی ندارید'}, status=403)
@@ -2832,7 +2851,7 @@ class TeacherQrAttendanceView(APIView):
     def post(self, request):
         from django.contrib.auth import get_user_model
         User = get_user_model()
-        if request.user.role not in User.TEACHER_LIKE_ROLES and request.user.role not in MANAGE_ROLES:
+        if request.user.role not in User.TEACHER_LIKE_ROLES and not can_edit_menu(request.user, 'class-management'):
             return Response({'error': 'این بخش فقط برای استاد یا مدیر است'}, status=403)
         raw = str(request.data.get('qr_token') or '').strip()
         parts = raw.split(':')
@@ -2842,7 +2861,7 @@ class TeacherQrAttendanceView(APIView):
         slot = qr.class_slot
         today = timezone.localtime().date()
         class_date = request.data.get('class_date') or today.isoformat()
-        if request.user.role not in MANAGE_ROLES and str(class_date) != today.isoformat():
+        if not can_edit_menu(request.user, 'class-management') and str(class_date) != today.isoformat():
             return Response({'error': 'ثبت حضور فقط برای جلسه امروز مجاز است'}, status=400)
         try: session_number = int(request.data.get('session_number', 1))
         except (TypeError, ValueError): session_number = 0
@@ -2879,7 +2898,7 @@ class TeacherSessionAttendanceListView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        if request.user.role not in MANAGE_ROLES: return Response({'error': 'فقط مدیر می‌تواند گزارش حضور استادان را ببیند'}, status=403)
+        if not can_edit_menu(request.user, 'teacher-sessions'): return Response({'error': 'فقط مدیر می‌تواند گزارش حضور استادان را ببیند'}, status=403)
         if TeacherSessionAttendance is None:
             return Response({'records': []})
         qs = TeacherSessionAttendance.objects.select_related('class_slot', 'teacher').all()
@@ -2898,33 +2917,253 @@ class TeacherSessionAttendanceListView(APIView):
 class TeacherCompensationSettingsView(APIView):
     permission_classes = [IsAuthenticated]
 
-    def _allowed(self, request): return request.user.role in MANAGE_ROLES
+    def _allowed(self, request):
+        return can_edit_menu(request.user, 'teacher-sessions')
+
+    @staticmethod
+    def _payload(obj):
+        return {
+            'id': obj.id,
+            'teacher_id': obj.teacher_id,
+            'teacher_name': obj.teacher.get_full_name(),
+            'session_price': obj.session_price,
+            'ordinary_multiplier': obj.ordinary_multiplier,
+            'thursday_multiplier': obj.thursday_multiplier,
+            'friday_multiplier': obj.friday_multiplier,
+            'insurance_base_monthly': obj.insurance_base_monthly,
+            'insurance_rate_percent': obj.insurance_rate_percent,
+            'insurance_days_per_term': obj.insurance_days_per_term,
+            'allowed_minutes_per_session': obj.allowed_minutes_per_session,
+            'adjustment_per_minute': obj.adjustment_per_minute,
+        }
 
     def get(self, request):
-        if not self._allowed(request): return Response({'error': 'فقط مدیر می‌تواند تنظیمات دستمزد استادان را ببیند'}, status=403)
+        if not self._allowed(request):
+            return Response({'error': 'فقط مدیر می‌تواند تنظیمات دستمزد استادان را ببیند'}, status=403)
         qs = TeacherCompensationSetting.objects.select_related('teacher').all()
-        if request.query_params.get('teacher_id'): qs = qs.filter(teacher_id=request.query_params['teacher_id'])
-        return Response({'settings': [{'id': x.id, 'teacher_id': x.teacher_id, 'teacher_name': x.teacher.get_full_name(), 'session_price': x.session_price, 'thursday_multiplier': x.thursday_multiplier, 'friday_multiplier': x.friday_multiplier, 'insurance_deduction': x.insurance_deduction} for x in qs]})
+        if request.query_params.get('teacher_id'):
+            qs = qs.filter(teacher_id=request.query_params['teacher_id'])
+        return Response({'settings': [self._payload(obj) for obj in qs]})
 
     def post(self, request):
-        if not self._allowed(request): return Response({'error': 'فقط مدیر می‌تواند تنظیمات دستمزد را تغییر دهد'}, status=403)
+        if not self._allowed(request):
+            return Response({'error': 'فقط مدیر می‌تواند تنظیمات دستمزد را تغییر دهد'}, status=403)
         teacher_id = request.data.get('teacher_id')
-        if not teacher_id: return Response({'error': 'استاد الزامی است'}, status=400)
+        if not teacher_id:
+            return Response({'error': 'استاد الزامی است'}, status=400)
         from django.contrib.auth import get_user_model
-        teacher = get_user_model().objects.filter(pk=teacher_id, role__in=get_user_model().TEACHER_LIKE_ROLES).first()
-        if not teacher: return Response({'error': 'استاد معتبر پیدا نشد'}, status=400)
+        User = get_user_model()
+        teacher = User.objects.filter(pk=teacher_id, role__in=User.TEACHER_LIKE_ROLES).first()
+        if not teacher:
+            return Response({'error': 'استاد معتبر پیدا نشد'}, status=400)
         obj, _ = TeacherCompensationSetting.objects.get_or_create(teacher=teacher)
-        for field in ('session_price', 'thursday_multiplier', 'friday_multiplier', 'insurance_deduction', 'allowed_minutes_per_session', 'adjustment_per_minute'):
-            if field in request.data: setattr(obj, field, request.data[field])
+        integer_fields = ('session_price', 'insurance_base_monthly', 'insurance_days_per_term', 'allowed_minutes_per_session', 'adjustment_per_minute')
+        decimal_fields = ('ordinary_multiplier', 'thursday_multiplier', 'friday_multiplier', 'insurance_rate_percent')
+        try:
+            for field in integer_fields:
+                if field in request.data:
+                    setattr(obj, field, max(0, int(request.data[field] or 0)))
+            for field in decimal_fields:
+                if field in request.data:
+                    setattr(obj, field, max(Decimal('0'), Decimal(str(request.data[field] or 0))))
+        except (TypeError, ValueError, ArithmeticError):
+            return Response({'error': 'یکی از مقادیر عددی تنظیمات دستمزد معتبر نیست'}, status=400)
         obj.save()
-        return Response({'id': obj.id, 'teacher_id': teacher.id, 'teacher_name': teacher.get_full_name(), 'session_price': obj.session_price, 'thursday_multiplier': obj.thursday_multiplier, 'friday_multiplier': obj.friday_multiplier, 'insurance_deduction': obj.insurance_deduction, 'allowed_minutes_per_session': obj.allowed_minutes_per_session, 'adjustment_per_minute': obj.adjustment_per_minute})
+        return Response(self._payload(obj))
+
+
+class TeacherCompensationReportView(APIView):
+    """گزارش حقوق ترمی استادان بر اساس کلاس، ساب/غیبت/جبرانی، ضرایب، بیمه و QR."""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        if not can_edit_menu(request.user, 'teacher-sessions'):
+            return Response({'error': 'فقط مدیر می‌تواند گزارش حقوق استادان را ببیند'}, status=403)
+        term_value = str(request.query_params.get('term') or request.query_params.get('term_id') or '').strip().lower()
+        if not term_value or (not term_value.isdigit() and term_value != 'all'):
+            return Response({'error': 'انتخاب ترم برای گزارش حقوق الزامی است'}, status=400)
+        if term_value == 'all':
+            slots = list(ClassSlot.objects.all().order_by('teacher_name', 'number', 'time_slot'))
+            events = TeacherSessionEvent.objects.filter(status=TeacherSessionEvent.ApprovalStatus.APPROVED).select_related('class_slot', 'term') if TeacherSessionEvent is not None else []
+        else:
+            term_id = int(term_value)
+            slots = list(ClassSlot.objects.filter(term_id=term_id).order_by('teacher_name', 'number', 'time_slot'))
+            events = TeacherSessionEvent.objects.filter(term_id=term_id, status=TeacherSessionEvent.ApprovalStatus.APPROVED).select_related('class_slot', 'term') if TeacherSessionEvent is not None else []
+        teacher_filter = [x.strip().casefold() for x in request.query_params.getlist('teacher') if x.strip()]
+        if not teacher_filter and request.query_params.get('teacher'):
+            teacher_filter = [x.strip().casefold() for x in request.query_params.get('teacher').split(',') if x.strip()]
+        if teacher_filter:
+            slots = [slot for slot in slots if any(value in (slot.teacher_name or '').casefold() for value in teacher_filter)]
+            events = [event for event in events if any(value in f'{event.requested_teacher_name} {event.replacement_teacher_name}'.casefold() for value in teacher_filter)]
+
+        from django.contrib.auth import get_user_model
+        User = get_user_model()
+        settings_by_name = {}
+        settings_by_id = {}
+        for setting in TeacherCompensationSetting.objects.select_related('teacher').all():
+            key = setting.teacher.get_full_name().strip().casefold()
+            settings_by_name[key] = setting
+            settings_by_id[setting.teacher_id] = setting
+
+        by_slot = {}
+        for event in events:
+            by_slot.setdefault(event.class_slot_id, []).append(event)
+        teacher_buckets = {}
+        def bucket_for(name):
+            clean = (name or '').strip()
+            if not clean:
+                return None
+            key = clean.casefold()
+            if key not in teacher_buckets:
+                setting = settings_by_name.get(key)
+                teacher_buckets[key] = {
+                    'teacher_name': clean,
+                    'teacher_id': setting.teacher_id if setting else None,
+                    'setting': setting,
+                    'ordinary_sessions': 0,
+                    'thursday_sessions': 0,
+                    'friday_sessions': 0,
+                    'ordinary_amount': Decimal('0'),
+                    'thursday_amount': Decimal('0'),
+                    'friday_amount': Decimal('0'),
+                    'total_sessions': 0,
+                    'gross_amount': Decimal('0'),
+                    'class_breakdown': [],
+                }
+            return teacher_buckets[key]
+
+        def multiplier_for(setting, day_type):
+            if not setting:
+                return Decimal('1')
+            if day_type == ClassSlot.DayType.FRIDAY:
+                return Decimal(str(setting.friday_multiplier))
+            if day_type in (ClassSlot.DayType.THURSDAY_MORNING, ClassSlot.DayType.THURSDAY_EVENING):
+                return Decimal(str(setting.thursday_multiplier))
+            return Decimal(str(setting.ordinary_multiplier))
+
+        def add_compensation(name, slot, sessions, role):
+            if sessions <= 0:
+                return
+            bucket = bucket_for(name)
+            if not bucket:
+                return
+            setting = bucket['setting']
+            price = Decimal(str(setting.session_price if setting else 0))
+            multiplier = multiplier_for(setting, slot.day_type)
+            amount = (price * multiplier * Decimal(sessions)).quantize(Decimal('1'), rounding=ROUND_HALF_UP)
+            if slot.day_type in (ClassSlot.DayType.THURSDAY_MORNING, ClassSlot.DayType.THURSDAY_EVENING):
+                bucket['thursday_sessions'] += sessions
+                bucket['thursday_amount'] += amount
+            elif slot.day_type == ClassSlot.DayType.FRIDAY:
+                bucket['friday_sessions'] += sessions
+                bucket['friday_amount'] += amount
+            else:
+                bucket['ordinary_sessions'] += sessions
+                bucket['ordinary_amount'] += amount
+            bucket['total_sessions'] += sessions
+            bucket['gross_amount'] += amount
+            bucket['class_breakdown'].append({
+                'class_slot': slot.id,
+                'class_number': slot.number,
+                'class_title': slot.title,
+                'level': slot.assigned_level,
+                'day_type': slot.day_type,
+                'day_type_display': slot.get_day_type_display(),
+                'time_slot': slot.time_slot,
+                'role': role,
+                'sessions': sessions,
+                'session_price': int(price),
+                'multiplier': float(multiplier),
+                'amount': int(amount),
+            })
+
+        for slot in slots:
+            slot_events = by_slot.get(slot.id, [])
+            substitutions = {}
+            absences = 0
+            makeups = {}
+            for event in slot_events:
+                if event.event_type == TeacherSessionEvent.EventType.SUBSTITUTION:
+                    replacement = (event.replacement_teacher_name or '').strip()
+                    if replacement:
+                        substitutions[replacement.casefold()] = substitutions.get(replacement.casefold(), {'name': replacement, 'count': 0})
+                        substitutions[replacement.casefold()]['count'] += 1
+                elif event.event_type == TeacherSessionEvent.EventType.ABSENCE:
+                    absences += 1
+                elif event.event_type == TeacherSessionEvent.EventType.MAKEUP:
+                    makeup_name = (event.replacement_teacher_name or event.requested_teacher_name or slot.teacher_name or '').strip()
+                    if makeup_name:
+                        makeups[makeup_name.casefold()] = makeups.get(makeup_name.casefold(), {'name': makeup_name, 'count': 0})
+                        makeups[makeup_name.casefold()]['count'] += 1
+            original_sessions = max(0, 15 - len(substitutions) - absences)
+            add_compensation(slot.teacher_name, slot, original_sessions, 'استاد اصلی')
+            for item in substitutions.values():
+                add_compensation(item['name'], slot, item['count'], 'استاد پذیرنده ساب')
+            for item in makeups.values():
+                add_compensation(item['name'], slot, item['count'], 'استاد جلسه جبرانی')
+
+        total_gross = Decimal('0')
+        total_insurance = Decimal('0')
+        total_net = Decimal('0')
+        teacher_rows = []
+        for bucket in sorted(teacher_buckets.values(), key=lambda item: item['teacher_name']):
+            setting = bucket['setting']
+            gross = bucket['gross_amount'].quantize(Decimal('1'), rounding=ROUND_HALF_UP)
+            insurance_days = int(setting.insurance_days_per_term) if setting else 37
+            insurance_base = Decimal(str(setting.insurance_base_monthly)) if setting and setting.insurance_base_monthly else gross
+            insurance_rate = Decimal(str(setting.insurance_rate_percent)) if setting else Decimal('7')
+            insurance = (insurance_base * insurance_rate * Decimal(insurance_days) / Decimal('3000')).quantize(Decimal('1'), rounding=ROUND_HALF_UP)
+            net = max(Decimal('0'), gross - insurance)
+            qr_filter = {'teacher_id': bucket['teacher_id']} if bucket['teacher_id'] else {'teacher__first_name__iexact': bucket['teacher_name']}
+            attendance_qs = TeacherSessionAttendance.objects.filter(**qr_filter) if TeacherSessionAttendance is not None else []
+            if term_value != 'all':
+                attendance_qs = attendance_qs.filter(class_slot__term_id=int(term_value))
+            qr_sessions = attendance_qs.filter(check_out_at__isnull=False).count() if TeacherSessionAttendance is not None else 0
+            qr_minutes = sum(int(row.minutes_worked or 0) for row in attendance_qs) if TeacherSessionAttendance is not None else 0
+            teacher_rows.append({
+                'teacher_id': bucket['teacher_id'],
+                'teacher_name': bucket['teacher_name'],
+                'ordinary_sessions': bucket['ordinary_sessions'],
+                'ordinary_amount': int(bucket['ordinary_amount']),
+                'thursday_sessions': bucket['thursday_sessions'],
+                'thursday_amount': int(bucket['thursday_amount']),
+                'friday_sessions': bucket['friday_sessions'],
+                'friday_amount': int(bucket['friday_amount']),
+                'total_sessions': bucket['total_sessions'],
+                'session_price': int(setting.session_price) if setting else 0,
+                'gross_amount': int(gross),
+                'insurance_days': insurance_days,
+                'insurance_base_monthly': int(insurance_base),
+                'insurance_rate_percent': float(insurance_rate),
+                'insurance_amount': int(insurance),
+                'net_amount': int(net),
+                'qr_sessions': qr_sessions,
+                'qr_minutes': qr_minutes,
+                'class_breakdown': bucket['class_breakdown'],
+            })
+            total_gross += gross
+            total_insurance += insurance
+            total_net += net
+        term_title = 'همه ترم‌ها'
+        if term_value != 'all':
+            term = Term.objects.filter(pk=int(term_value)).first()
+            term_title = term.title if term else f'ترم {term_value}'
+        return Response({
+            'term': term_value,
+            'term_title': term_title,
+            'term_days': max((row['insurance_days'] for row in teacher_rows), default=37),
+            'teachers': teacher_rows,
+            'total_gross_amount': int(total_gross),
+            'total_insurance_amount': int(total_insurance),
+            'total_net_amount': int(total_net),
+        })
 
 
 class TeacherTermReportView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        if request.user.role not in MANAGE_ROLES:
+        if not can_edit_menu(request.user, 'teacher-sessions'):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         term_id = request.query_params.get('term') or request.query_params.get('term_id')
         if not term_id or (not str(term_id).isdigit() and str(term_id).lower() not in {'legacy', 'unassigned', 'null', 'all'}):
@@ -2971,7 +3210,7 @@ class TeacherSessionEventListCreateView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        if request.user.role not in MANAGE_ROLES:
+        if not can_edit_menu(request.user, 'teacher-sessions'):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         term_id = request.query_params.get('term') or request.query_params.get('term_id')
         if not term_id or (not str(term_id).isdigit() and str(term_id).lower() not in {'legacy', 'unassigned', 'null', 'all'}):
@@ -3003,7 +3242,7 @@ class TeacherSessionEventListCreateView(APIView):
         return Response(data)
 
     def post(self, request):
-        if request.user.role not in MANAGE_ROLES:
+        if not can_edit_menu(request.user, 'teacher-sessions'):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         term_id = request.data.get('term_id') or request.data.get('term')
         slot_id = request.data.get('class_slot_id') or request.data.get('class_slot')
@@ -3027,8 +3266,15 @@ class TeacherSessionEventListCreateView(APIView):
         except (TypeError, ValueError):
             return Response({'error': 'تاریخ جلسه را به‌صورت شمسی معتبر مانند ۱۴۰۵/۰۶/۰۷ وارد کنید'}, status=status.HTTP_400_BAD_REQUEST)
         class_time = str(request.data.get('class_time') or '').strip()
-        if class_time and class_time != str(slot.time_slot or '').strip():
-            return Response({'error': 'ساعت انتخاب‌شده با ساعت استاندارد کلاس مطابقت ندارد'}, status=status.HTTP_400_BAD_REQUEST)
+        allowed_times = {
+            ClassSlot.DayType.THURSDAY_MORNING: THURSDAY_MORNING_EVENT_SLOTS,
+            ClassSlot.DayType.THURSDAY_EVENING: THURSDAY_EVENING_EVENT_SLOTS,
+            ClassSlot.DayType.FRIDAY: FRIDAY_EVENT_SLOTS,
+        }.get(slot.day_type, [str(slot.time_slot or '').strip()] if slot.time_slot else [])
+        if not class_time:
+            class_time = str(slot.time_slot or '').strip()
+        if allowed_times and class_time not in allowed_times:
+            return Response({'error': 'ساعت انتخاب‌شده با بازه‌های مجاز این کلاس مطابقت ندارد'}, status=status.HTTP_400_BAD_REQUEST)
         session_number = int(request.data.get('session_number') or 0)
         if not 1 <= session_number <= 15:
             return Response({'error': 'شماره جلسه باید بین ۱ تا ۱۵ باشد'}, status=status.HTTP_400_BAD_REQUEST)
@@ -3036,7 +3282,7 @@ class TeacherSessionEventListCreateView(APIView):
         replacement_name = str(request.data.get('replacement_teacher_name') or '').strip()
         if event_type == 'substitution' and not replacement_name:
             return Response({'error': 'استاد جایگزین را انتخاب یا وارد کنید'}, status=status.HTTP_400_BAD_REQUEST)
-        event = TeacherSessionEvent.objects.create(term=term, class_slot=slot, event_type=event_type, class_date=class_date, session_number=session_number, requested_teacher_name=requested_name, replacement_teacher_name=replacement_name if event_type == 'substitution' else '', requested_by=request.user, makeup_required=event_type == 'absence', makeup_session_count=1 if event_type == 'absence' else 0, notes=str(request.data.get('notes') or '').strip(), status=TeacherSessionEvent.ApprovalStatus.PENDING)
+        event = TeacherSessionEvent.objects.create(term=term, class_slot=slot, event_type=event_type, class_date=class_date, class_time=class_time, session_number=session_number, requested_teacher_name=requested_name, replacement_teacher_name=replacement_name if event_type == 'substitution' else '', requested_by=request.user, makeup_required=event_type == 'absence', makeup_session_count=1 if event_type == 'absence' else 0, notes=str(request.data.get('notes') or '').strip(), status=TeacherSessionEvent.ApprovalStatus.PENDING)
         return Response(_teacher_event_payload(event), status=status.HTTP_201_CREATED)
 
 
@@ -3044,12 +3290,22 @@ class TeacherSessionEventDetailView(APIView):
     permission_classes = [IsAuthenticated]
 
     def patch(self, request, pk):
-        if request.user.role not in MANAGE_ROLES:
+        if not can_edit_menu(request.user, 'teacher-sessions'):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         try: event = TeacherSessionEvent.objects.select_related('class_slot', 'term').get(pk=pk)
         except TeacherSessionEvent.DoesNotExist: return Response({'error': 'رویداد پیدا نشد'}, status=404)
         for field in ('requested_teacher_name', 'replacement_teacher_name', 'notes'):
             if field in request.data: setattr(event, field, str(request.data.get(field) or '').strip())
+        if 'class_time' in request.data:
+            class_time = str(request.data.get('class_time') or '').strip()
+            allowed_times = {
+                ClassSlot.DayType.THURSDAY_MORNING: THURSDAY_MORNING_EVENT_SLOTS,
+                ClassSlot.DayType.THURSDAY_EVENING: THURSDAY_EVENING_EVENT_SLOTS,
+                ClassSlot.DayType.FRIDAY: FRIDAY_EVENT_SLOTS,
+            }.get(event.class_slot.day_type, [str(event.class_slot.time_slot or '').strip()] if event.class_slot.time_slot else [])
+            if allowed_times and class_time not in allowed_times:
+                return Response({'error': 'ساعت انتخاب‌شده با بازه‌های مجاز این کلاس مطابقت ندارد'}, status=400)
+            event.class_time = class_time
         if 'event_type' in request.data and request.data['event_type'] in dict(TeacherSessionEvent.EventType.choices):
             event.event_type = request.data['event_type']
         if 'session_number' in request.data:
@@ -3062,12 +3318,12 @@ class TeacherSessionEventDetailView(APIView):
         event.save(); return Response(_teacher_event_payload(event))
 
     def delete(self, request, pk):
-        if request.user.role not in MANAGE_ROLES: return Response({'error': 'دسترسی ندارید'}, status=403)
+        if not can_edit_menu(request.user, 'teacher-sessions'): return Response({'error': 'دسترسی ندارید'}, status=403)
         deleted, _ = TeacherSessionEvent.objects.filter(pk=pk).delete()
         return Response(status=204 if deleted else 404)
 
     def post(self, request, pk):
-        if request.user.role not in MANAGE_ROLES: return Response({'error': 'دسترسی ندارید'}, status=403)
+        if not can_edit_menu(request.user, 'teacher-sessions'): return Response({'error': 'دسترسی ندارید'}, status=403)
         try: event = TeacherSessionEvent.objects.get(pk=pk)
         except TeacherSessionEvent.DoesNotExist: return Response({'error': 'رویداد پیدا نشد'}, status=404)
         decision = request.data.get('decision')
@@ -3099,7 +3355,7 @@ class BulkClassSlotActionView(APIView):
     ALLOWED_EDIT_FIELDS = ['teacher_name', 'assigned_level', 'capacity', 'gender', 'notes', 'meeting_link', 'is_online']
 
     def post(self, request):
-        if request.user.role not in MANAGE_ROLES:
+        if not can_edit_menu(request.user, 'class-management'):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
 
         action = request.data.get('action')

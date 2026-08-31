@@ -11,6 +11,7 @@ from .serializers import (
     TeacherNoticeCreateSerializer,
     EntryExitPermissionRequestSerializer,
 )
+from accounts.menu_permissions import can_edit_menu
 
 
 # ---------------------------------------------------------------------------
@@ -38,7 +39,7 @@ class TeacherNoticeSendView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
-        if request.user.role not in ('admin', 'office'):
+        if not can_edit_menu(request.user, 'staff-messages'):
             return Response({'error': 'فقط مدیر می‌تواند پیام بفرستد'}, status=status.HTTP_403_FORBIDDEN)
         serializer = TeacherNoticeCreateSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -72,7 +73,7 @@ class TeacherNoticeDetailView(APIView):
             return None
 
     def patch(self, request, pk):
-        if request.user.role not in ('admin', 'office'):
+        if not can_edit_menu(request.user, 'staff-messages'):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         notice = self._get(pk)
         if not notice:
@@ -85,7 +86,7 @@ class TeacherNoticeDetailView(APIView):
         return Response(TeacherNoticeSerializer(notice).data)
 
     def delete(self, request, pk):
-        if request.user.role not in ('admin', 'office'):
+        if not can_edit_menu(request.user, 'staff-messages'):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         notice = self._get(pk)
         if not notice:
@@ -261,7 +262,7 @@ class EntryExitRequestDecideView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request, pk):
-        if request.user.role not in ('admin', 'office'):
+        if not can_edit_menu(request.user, 'staff-messages'):
             return Response({'error': 'فقط مدیر می‌تواند تصمیم بگیرد'}, status=status.HTTP_403_FORBIDDEN)
         try:
             req = EntryExitPermissionRequest.objects.get(pk=pk, is_deleted=False)

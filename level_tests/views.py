@@ -8,11 +8,13 @@ from django.utils import timezone
 from django.db.models import Q
 from .models import LevelTest, LevelTestPriceSetting, StandardLevel
 from .serializers import LevelTestIntakeSerializer, LevelTestSerializer, LevelTestPriceSettingSerializer
+from accounts.menu_permissions import can_edit_menu, can_view_menu
 from .levels import get_levels_by_age_group, AGE_GROUP_LABELS
 from accounts.models import User
 from accounts.serializers import StudentSerializer
 from notifications.utils import send_notification
 
+# منسوخ — از تنظیمات دسترسی (accounts.menu_permissions) جایگزین شد؛ فقط برای مرجع نگه داشته شده.
 MANAGE_LEVEL_ROLES = ('admin', 'evaluator')
 
 DEFAULT_STANDARD_LEVELS = (
@@ -58,7 +60,7 @@ class StandardLevelListView(generics.ListCreateAPIView):
     serializer_class = StandardLevelSerializer
 
     def get_queryset(self):
-        if self.request.user.role not in MANAGE_LEVEL_ROLES:
+        if not can_view_menu(self.request.user, 'standard-levels'):
             return StandardLevel.objects.none()
         if not StandardLevel.objects.exists():
             # فقط وقتی جدول کاملاً خالیه (نصب اولیه) سطوح پیش‌فرض ساخته می‌شن؛
@@ -71,7 +73,7 @@ class StandardLevelListView(generics.ListCreateAPIView):
         return qs
 
     def create(self, request, *args, **kwargs):
-        if request.user.role not in MANAGE_LEVEL_ROLES:
+        if not can_edit_menu(request.user, 'standard-levels'):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         code = (request.data.get('code') or '').strip()
         age_group = (request.data.get('age_group') or '').strip()
@@ -94,7 +96,7 @@ class StandardLevelDetailView(generics.RetrieveUpdateDestroyAPIView):
     queryset = StandardLevel.objects.all()
 
     def update(self, request, *args, **kwargs):
-        if request.user.role not in MANAGE_LEVEL_ROLES:
+        if not can_edit_menu(request.user, 'standard-levels'):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         instance = self.get_object()
         response = super().update(request, *args, **kwargs)
@@ -103,7 +105,7 @@ class StandardLevelDetailView(generics.RetrieveUpdateDestroyAPIView):
         return response
 
     def destroy(self, request, *args, **kwargs):
-        if request.user.role not in MANAGE_LEVEL_ROLES:
+        if not can_edit_menu(request.user, 'standard-levels'):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         return super().destroy(request, *args, **kwargs)
 
@@ -129,7 +131,7 @@ class LevelTestListCreateView(APIView):
 
     def get(self, request):
         user = request.user
-        if user.role not in ('admin', 'evaluator', 'office'):
+        if not can_view_menu(user, 'level-tests'):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
 
         qs = LevelTest.objects.all()
@@ -143,7 +145,7 @@ class LevelTestListCreateView(APIView):
         return Response(LevelTestSerializer(qs, many=True).data)
 
     def post(self, request):
-        if request.user.role not in ('admin', 'office'):
+        if not can_edit_menu(request.user, 'level-tests'):
             return Response({'error': 'فقط مدیر/کانتر می‌تواند داوطلب جدید ثبت کند'}, status=status.HTTP_403_FORBIDDEN)
         data = request.data.copy()
         if data.get('price') in (None, ''):
@@ -253,7 +255,7 @@ class LevelTestPriceSettingView(APIView):
         return Response(LevelTestPriceSettingSerializer(self.get_current()).data)
 
     def patch(self, request):
-        if request.user.role not in ('admin', 'evaluator'):
+        if not can_edit_menu(request.user, 'level-tests'):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         setting = self.get_current()
         serializer = LevelTestPriceSettingSerializer(setting, data=request.data, partial=True)
@@ -274,7 +276,7 @@ class LevelTestDetailView(APIView):
         return LevelTest.objects.get(pk=pk)
 
     def get(self, request, pk):
-        if request.user.role not in ('admin', 'evaluator', 'office'):
+        if not can_view_menu(request.user, 'level-tests'):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         try:
             obj = self._get_visible(request, pk)
@@ -284,7 +286,7 @@ class LevelTestDetailView(APIView):
 
     def patch(self, request, pk):
         user = request.user
-        if user.role not in ('admin', 'evaluator', 'office'):
+        if not can_edit_menu(user, 'level-tests'):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         try:
             obj = self._get_visible(request, pk)
@@ -378,7 +380,7 @@ class LevelTestDetailView(APIView):
         return Response(LevelTestSerializer(updated).data)
 
     def delete(self, request, pk):
-        if request.user.role not in ('admin', 'evaluator'):
+        if not can_edit_menu(request.user, 'level-tests'):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         try:
             obj = LevelTest.objects.get(pk=pk)

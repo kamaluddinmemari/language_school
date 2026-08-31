@@ -16,6 +16,10 @@ from .views import (
     UserRoleView,
     PeopleSearchView,
     StudentQuickSearchView,
+    MenuPermissionSettingsView,
+    MyMenuPermissionsView,
+    StaffCredentialsListView,
+    StaffCredentialsDetailView,
 )
 
 urlpatterns = [
@@ -35,4 +39,8 @@ urlpatterns = [
     path('people-search/', PeopleSearchView.as_view(), name='people_search'),
     path('student-quick-search/', StudentQuickSearchView.as_view(), name='student_quick_search'),
     path('users/<int:pk>/role/', UserRoleView.as_view(), name='user_role'),
+    path('menu-permissions/', MenuPermissionSettingsView.as_view(), name='menu_permission_settings'),
+    path('my-menu-permissions/', MyMenuPermissionsView.as_view(), name='my_menu_permissions'),
+    path('staff-credentials/', StaffCredentialsListView.as_view(), name='staff_credentials_list'),
+    path('staff-credentials/<int:pk>/', StaffCredentialsDetailView.as_view(), name='staff_credentials_detail'),
 ]

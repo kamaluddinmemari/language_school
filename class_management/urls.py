@@ -19,6 +19,7 @@ from .views import (
     StudentCreateOnlineCourseActionRequestView, MyOnlineCourseActionRequestsView,
     AdminOnlineCourseActionRequestListView, ApproveOnlineCourseActionRequestView, RejectOnlineCourseActionRequestView,
     TeacherTermReportView, TeacherSessionEventListCreateView, TeacherSessionEventDetailView,
+    TeacherCompensationSettingsView, TeacherCompensationReportView,
 )
 
 urlpatterns = [
@@ -65,6 +66,8 @@ urlpatterns = [
     path('class-management/teacher-term-report/', TeacherTermReportView.as_view(), name='teacher_term_report'),
     path('class-management/teacher-session-events/', TeacherSessionEventListCreateView.as_view(), name='teacher_session_event_list_create'),
     path('class-management/teacher-session-events/<int:pk>/', TeacherSessionEventDetailView.as_view(), name='teacher_session_event_detail'),
+    path('class-management/teacher-compensation-settings/', TeacherCompensationSettingsView.as_view(), name='teacher_compensation_settings'),
+    path('class-management/teacher-compensation-report/', TeacherCompensationReportView.as_view(), name='teacher_compensation_report'),
 
     # --- سایر دوره‌ها / کلاس‌های علمی (OnlineCourse) ---
     path('class-management/courses/', OnlineCourseListView.as_view(), name='online_course_list'),

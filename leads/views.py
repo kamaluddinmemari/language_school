@@ -12,6 +12,7 @@ from .serializers import (
     DebtorSerializer,
     DiscountedPersonSerializer,
 )
+from accounts.menu_permissions import can_edit_menu
 
 
 def duplicate_warning(queryset, identity_key, term):
@@ -35,13 +36,13 @@ class NewLeadListView(generics.ListCreateAPIView):
     serializer_class = NewLeadSerializer
 
     def get_queryset(self):
-        if self.request.user.role not in ('admin', 'office'):
+        if not can_edit_menu(self.request.user, "new-leads"):
             return NewLead.objects.none()
         return NewLead.objects.all()
 
     def create(self, request, *args, **kwargs):
         from accounts.services import sync_student_from_lead
-        if request.user.role not in ('admin', 'office'):
+        if not can_edit_menu(request.user, "new-leads"):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         data = request.data.copy()
         confirmed = str(data.pop('confirm_new_term', '')).lower() in ('1', 'true', 'yes')
@@ -69,7 +70,7 @@ class NewLeadDetailView(generics.RetrieveUpdateDestroyAPIView):
     queryset = NewLead.objects.all()
 
     def _forbidden_if_not_admin(self, request):
-        return request.user.role not in ('admin', 'office')
+        return not can_edit_menu(request.user, "new-leads")
 
     def update(self, request, *args, **kwargs):
         if self._forbidden_if_not_admin(request):
@@ -87,7 +88,7 @@ class NewLeadActionView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request, pk, action):
-        if request.user.role not in ('admin', 'office'):
+        if not can_edit_menu(request.user, "new-leads"):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         try:
             lead = NewLead.objects.get(pk=pk)
@@ -131,7 +132,7 @@ class UnregisteredStudentListView(generics.ListCreateAPIView):
     serializer_class = UnregisteredStudentSerializer
 
     def get_queryset(self):
-        if self.request.user.role not in ('admin', 'office'):
+        if not can_edit_menu(self.request.user, "followups"):
             return UnregisteredStudent.objects.none()
         qs = UnregisteredStudent.objects.all()
         term_id = self.request.query_params.get('term_id')
@@ -205,12 +206,12 @@ class UnregisteredStudentDetailView(generics.RetrieveUpdateDestroyAPIView):
     queryset = UnregisteredStudent.objects.all()
 
     def update(self, request, *args, **kwargs):
-        if request.user.role not in ('admin', 'office'):
+        if not can_edit_menu(request.user, "followups"):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         return super().update(request, *args, **kwargs)
 
     def destroy(self, request, *args, **kwargs):
-        if request.user.role not in ('admin', 'office'):
+        if not can_edit_menu(request.user, "followups"):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         return super().destroy(request, *args, **kwargs)
 
@@ -220,7 +221,7 @@ class UnregisteredStudentFollowupView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request, pk):
-        if request.user.role not in ('admin', 'office'):
+        if not can_edit_menu(request.user, "followups"):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         try:
             student = UnregisteredStudent.objects.get(pk=pk)
@@ -237,7 +238,7 @@ class UnregisteredStudentRegisterView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request, pk):
-        if request.user.role not in ('admin', 'office'):
+        if not can_edit_menu(request.user, "followups"):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         try:
             student = UnregisteredStudent.objects.get(pk=pk)
@@ -253,7 +254,7 @@ class UnregisteredStudentStatsView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        if request.user.role not in ('admin', 'office'):
+        if not can_edit_menu(request.user, "followups"):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         qs = UnregisteredStudent.objects.all()
         tracking = qs.filter(status=UnregisteredStudent.Status.TRACKING)
@@ -278,7 +279,7 @@ class DropoutStudentListView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        if request.user.role not in ('admin', 'office'):
+        if not can_edit_menu(request.user, "dropout-students"):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         from class_management.models import Term, ClassSlotEnrollment
         from accounts.models import User
@@ -342,7 +343,7 @@ class DropoutStudentFollowupView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request, student_id):
-        if request.user.role not in ('admin', 'office'):
+        if not can_edit_menu(request.user, "dropout-students"):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         from class_management.models import Term
         from_term = Term.objects.filter(pk=request.data.get('from_term_id')).first() if request.data.get('from_term_id') else None
@@ -360,7 +361,7 @@ class DebtorListView(generics.ListCreateAPIView):
     serializer_class = DebtorSerializer
 
     def get_queryset(self):
-        if self.request.user.role not in ('admin', 'office'):
+        if not can_edit_menu(self.request.user, "followups"):
             return Debtor.objects.none()
         qs = Debtor.objects.all()
         term_id = self.request.query_params.get('term_id')
@@ -383,7 +384,7 @@ class DebtorListView(generics.ListCreateAPIView):
     def create(self, request, *args, **kwargs):
         from accounts.services import sync_student_from_lead
         from .models import get_current_term
-        if request.user.role not in ('admin', 'office'):
+        if not can_edit_menu(request.user, "followups"):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         data = request.data.copy()
         confirmed = str(data.pop('confirm_new_term', '')).lower() in ('1', 'true', 'yes')
@@ -411,12 +412,12 @@ class DebtorDetailView(generics.RetrieveUpdateDestroyAPIView):
     queryset = Debtor.objects.all()
 
     def update(self, request, *args, **kwargs):
-        if request.user.role not in ('admin', 'office'):
+        if not can_edit_menu(request.user, "followups"):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         return super().update(request, *args, **kwargs)
 
     def destroy(self, request, *args, **kwargs):
-        if request.user.role not in ('admin', 'office'):
+        if not can_edit_menu(request.user, "followups"):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         return super().destroy(request, *args, **kwargs)
 
@@ -425,7 +426,7 @@ class DebtorFollowupView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request, pk):
-        if request.user.role not in ('admin', 'office'):
+        if not can_edit_menu(request.user, "followups"):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         try:
             debtor = Debtor.objects.get(pk=pk)
@@ -439,7 +440,7 @@ class DebtorSettleView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request, pk):
-        if request.user.role not in ('admin', 'office'):
+        if not can_edit_menu(request.user, "followups"):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         try:
             debtor = Debtor.objects.get(pk=pk)
@@ -455,7 +456,7 @@ class DebtorStatsView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        if request.user.role not in ('admin', 'office'):
+        if not can_edit_menu(request.user, "followups"):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         qs = Debtor.objects.all()
         pending = qs.filter(status=Debtor.Status.PENDING)
@@ -481,12 +482,12 @@ class DiscountedPersonListView(generics.ListCreateAPIView):
     serializer_class = DiscountedPersonSerializer
 
     def get_queryset(self):
-        if self.request.user.role not in ('admin', 'office'):
+        if not can_edit_menu(self.request.user, "discounts"):
             return DiscountedPerson.objects.none()
         return DiscountedPerson.objects.all()
 
     def create(self, request, *args, **kwargs):
-        if request.user.role not in ('admin', 'office'):
+        if not can_edit_menu(request.user, "discounts"):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -500,11 +501,11 @@ class DiscountedPersonDetailView(generics.RetrieveUpdateDestroyAPIView):
     queryset = DiscountedPerson.objects.all()
 
     def update(self, request, *args, **kwargs):
-        if request.user.role not in ('admin', 'office'):
+        if not can_edit_menu(request.user, "discounts"):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         return super().update(request, *args, **kwargs)
 
     def destroy(self, request, *args, **kwargs):
-        if request.user.role not in ('admin', 'office'):
+        if not can_edit_menu(request.user, "discounts"):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         return super().destroy(request, *args, **kwargs)

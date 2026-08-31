@@ -8,7 +8,9 @@ from .serializers import (
     NotificationSerializer, SendNotificationSerializer,
     ContactFeedbackSerializer, ContactFeedbackCreateSerializer, ContactFeedbackReplySerializer,
 )
+from accounts.menu_permissions import can_edit_menu, can_view_menu
 
+# منسوخ — از تنظیمات دسترسی (accounts.menu_permissions) جایگزین شد؛ فقط برای مرجع نگه داشته شده.
 MANAGE_ROLES = ('admin', 'evaluator', 'office')
 
 
@@ -91,7 +93,7 @@ class AdminContactFeedbackListView(generics.ListAPIView):
     serializer_class = ContactFeedbackSerializer
 
     def get_queryset(self):
-        if self.request.user.role not in MANAGE_ROLES:
+        if not can_view_menu(self.request.user, 'feedback'):
             return ContactFeedback.objects.none()
         return ContactFeedback.objects.select_related('sender', 'replied_by')
 
@@ -104,7 +106,7 @@ class AdminContactFeedbackDetailView(APIView):
     permission_classes = [IsAuthenticated]
 
     def patch(self, request, pk):
-        if request.user.role not in MANAGE_ROLES:
+        if not can_edit_menu(request.user, 'feedback'):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         try:
             fb = ContactFeedback.objects.get(pk=pk)
@@ -120,7 +122,7 @@ class AdminContactFeedbackDetailView(APIView):
         return Response(ContactFeedbackSerializer(fb).data)
 
     def delete(self, request, pk):
-        if request.user.role not in MANAGE_ROLES:
+        if not can_edit_menu(request.user, 'feedback'):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         try:
             fb = ContactFeedback.objects.get(pk=pk)
@@ -135,7 +137,7 @@ class MarkContactFeedbackSeenView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request, pk):
-        if request.user.role not in MANAGE_ROLES:
+        if not can_edit_menu(request.user, 'feedback'):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         try:
             fb = ContactFeedback.objects.get(pk=pk)

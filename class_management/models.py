@@ -7,6 +7,7 @@ from level_tests.models import LevelTest
 
 
 import re
+import uuid
 
 
 # تشخیص خودکار گروه سنی از روی خودِ کد سطح — چون هر سطح فقط متعلق به یک گروه سنی است:
@@ -40,8 +41,14 @@ EVENING_LATE_TIME_SLOTS = ['17:30-19:00', '19:00-20:30']  # برای زبان‌
 # ساعت‌های واقعی روزهای زوج/فرد (سه روز در هفته) — بدون ۰۸:۰۰-۰۹:۳۰ که فقط برای پنجشنبه‌صبح است
 THREE_DAY_TIME_SLOTS = ['09:45-11:15', '11:30-13:00', '15:45-17:15', '17:30-19:00', '19:00-20:30']
 THURSDAY_MORNING_SLOT = '08:00-13:00'
-THURSDAY_EVENING_SLOT = '13:00-17:15'
-FRIDAY_SLOT = '08:30-13:15'
+THURSDAY_EVENING_SLOT = '13:00-17:30'
+FRIDAY_SLOT = '08:00-13:00'
+
+# بازه‌های مجاز برای ثبت ساب/غیبت/جبرانیِ کلاس‌های یک‌روزه.
+# خودِ ClassSlot بازهٔ کلی روز را نگه می‌دارد، اما هر رویداد جلسه‌ای بازهٔ واقعی همان جلسه را ثبت می‌کند.
+THURSDAY_MORNING_EVENT_SLOTS = ['08:00-13:00', '08:00-09:30', '09:45-11:15', '11:30-13:00']
+THURSDAY_EVENING_EVENT_SLOTS = ['13:00-17:30', '13:00-14:15', '14:30-15:45', '16:00-17:30']
+FRIDAY_EVENT_SLOTS = ['08:00-13:00']
 
 ALL_STANDARD_TIME_SLOTS = MORNING_TIME_SLOTS + EVENING_TIME_SLOTS + [THURSDAY_MORNING_SLOT, THURSDAY_EVENING_SLOT, FRIDAY_SLOT]
 
@@ -635,6 +642,7 @@ class TeacherSessionEvent(models.Model):
     class_slot = models.ForeignKey(ClassSlot, on_delete=models.CASCADE, related_name='teacher_session_events')
     event_type = models.CharField(max_length=20, choices=EventType.choices)
     class_date = models.DateField(help_text='تاریخ واقعی جلسه؛ به میلادی ذخیره و در پنل شمسی نمایش داده می‌شود')
+    class_time = models.CharField(max_length=20, blank=True, help_text='ساعت واقعی همان جلسه؛ برای پنجشنبه و جمعه از بازه‌های استاندارد انتخاب می‌شود')
     session_number = models.PositiveSmallIntegerField(default=1, help_text='شماره جلسه از ۱ تا ۱۵')
     requested_teacher_name = models.CharField(max_length=150, blank=True)
     replacement_teacher_name = models.CharField(max_length=150, blank=True)
@@ -650,6 +658,12 @@ class TeacherSessionEvent(models.Model):
 
     class Meta:
         ordering = ['-class_date', '-requested_at']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['term', 'class_slot', 'event_type', 'class_date', 'session_number'],
+                name='unique_teacher_event_per_session_type',
+            ),
+        ]
         indexes = [
             models.Index(fields=['term', 'event_type', 'class_date']),
             models.Index(fields=['term', 'requested_teacher_name']),
@@ -670,3 +684,83 @@ class TeacherSessionEvent(models.Model):
 
     def __str__(self):
         return f'{self.get_event_type_display()} — {self.class_date_jalali} — کلاس {self.class_slot.number}'
+
+
+class RoomQrToken(models.Model):
+    """توکن QR ثابت هر کلاس برای ثبت ورود و خروج استاد در محل کلاس."""
+    class_slot = models.OneToOneField(ClassSlot, on_delete=models.CASCADE, related_name='room_qr_token')
+    token = models.UUIDField(default=uuid.uuid4, unique=True, editable=False)
+    is_active = models.BooleanField(default=True)
+    latitude = models.DecimalField(max_digits=9, decimal_places=6, null=True, blank=True)
+    longitude = models.DecimalField(max_digits=9, decimal_places=6, null=True, blank=True)
+    allowed_radius_m = models.PositiveIntegerField(default=100)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def rotate(self):
+        self.token = uuid.uuid4()
+        self.save(update_fields=['token', 'updated_at'])
+
+    def __str__(self):
+        return f'QR کلاس {self.class_slot.number}'
+
+
+class TeacherSessionAttendance(models.Model):
+    """ثبت ورود و خروج استاد برای یک جلسه؛ مبنای آمادهٔ محاسبهٔ زمان واقعی کار در آینده."""
+    class_slot = models.ForeignKey(ClassSlot, on_delete=models.CASCADE, related_name='teacher_attendances')
+    teacher = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='teacher_session_attendances',
+        limit_choices_to={'role__in': ['teacher', 'evaluator']},
+    )
+    class_date = models.DateField()
+    session_number = models.PositiveSmallIntegerField(default=1)
+    check_in_at = models.DateTimeField(null=True, blank=True)
+    check_out_at = models.DateTimeField(null=True, blank=True)
+    minutes_worked = models.PositiveIntegerField(default=0)
+    status = models.CharField(max_length=20, default='present')
+    check_in_latitude = models.DecimalField(max_digits=9, decimal_places=6, null=True, blank=True)
+    check_in_longitude = models.DecimalField(max_digits=9, decimal_places=6, null=True, blank=True)
+    check_in_accuracy_m = models.DecimalField(max_digits=8, decimal_places=2, null=True, blank=True)
+    notes = models.CharField(max_length=255, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-class_date', 'session_number']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['class_slot', 'teacher', 'class_date', 'session_number'],
+                name='unique_teacher_attendance_per_session',
+            ),
+        ]
+        indexes = [
+            models.Index(fields=['class_slot', 'class_date', 'session_number']),
+            models.Index(fields=['teacher', 'class_date']),
+        ]
+
+    def __str__(self):
+        return f'{self.teacher.get_full_name()} — کلاس {self.class_slot.number} — جلسه {self.session_number}'
+
+
+class TeacherCompensationSetting(models.Model):
+    """تنظیمات قابل‌ویرایش دستمزد و بیمهٔ هر استاد برای محاسبهٔ حقوق ترمی."""
+    teacher = models.OneToOneField(
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='teacher_compensation_setting',
+        limit_choices_to={'role__in': ['teacher', 'evaluator']},
+    )
+    session_price = models.PositiveIntegerField(default=0, help_text='قیمت پایهٔ هر جلسه به تومان')
+    ordinary_multiplier = models.DecimalField(max_digits=6, decimal_places=2, default=1, help_text='ضریب روزهای عادی')
+    thursday_multiplier = models.DecimalField(max_digits=6, decimal_places=2, default=1, help_text='ضریب پنجشنبه')
+    friday_multiplier = models.DecimalField(max_digits=6, decimal_places=2, default=1, help_text='ضریب جمعه')
+    insurance_base_monthly = models.PositiveIntegerField(default=0, help_text='مزد مبنای بیمهٔ ماهانه؛ صفر یعنی استفاده از ناخالص ترم')
+    insurance_rate_percent = models.DecimalField(max_digits=5, decimal_places=2, default=7, help_text='درصد بیمهٔ سهم استاد')
+    insurance_days_per_term = models.PositiveIntegerField(default=37, help_text='روز بیمهٔ معادل ترم؛ ترم پیش‌فرض یک ماه و یک هفته است')
+    allowed_minutes_per_session = models.PositiveIntegerField(default=90, help_text='دقیقهٔ استاندارد هر جلسه برای اتصال آینده به QR')
+    adjustment_per_minute = models.PositiveIntegerField(default=0, help_text='تعدیل مبلغ هر دقیقه؛ صفر یعنی قیمت جلسه تقسیم بر دقیقهٔ استاندارد')
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['teacher__last_name', 'teacher__first_name']
+
+    def __str__(self):
+        return f'تنظیم دستمزد {self.teacher.get_full_name()}'

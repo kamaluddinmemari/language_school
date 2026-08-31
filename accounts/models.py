@@ -17,8 +17,9 @@ class User(AbstractUser):
         ADMIN = 'admin', 'مدیر'
         TEACHER = 'teacher', 'معلم'
         STUDENT = 'student', 'دانش‌آموز'
-        EVALUATOR = 'evaluator', 'مدیر آموزش'
-        OFFICE = 'office', 'اداری'
+        EVALUATOR = 'evaluator', 'کارشناس آموزش'
+        OFFICE = 'office', 'کارشناس اداری'
+        EMPLOYEE = 'employee', 'کارمند'
 
     class Gender(models.TextChoices):
         FEMALE = 'female', 'خانم'
@@ -32,6 +33,11 @@ class User(AbstractUser):
     # به‌جز بخش‌های حقوق‌ودستمزد و مرخصیِ خودِ کارمندان (که در اپ payroll جداگانه کنترل می‌شود:
     # هرکس فقط اطلاعات خودش را می‌بیند، بدون امکان ویرایش، مگر مدیر).
     ADMIN_LEVEL_ROLES = ['admin', 'office']
+
+    # نقش‌هایی که سطح دسترسیِ هرکدام به منوهای پنل ادمین از طریق «تنظیمات دسترسی»
+    # (accounts.menu_permissions) توسط مدیر قابل تعیین است — نقش «مدیر» همیشه دسترسی کامل
+    # و غیرقابل‌محدودسازی دارد و در این فهرست نیست.
+    MENU_CONFIGURABLE_ROLES = ['employee', 'office', 'evaluator']
 
     # override می‌کنیم چون AbstractUser پیش‌فرض یونیکد (شامل حروف فارسی) رو قبول می‌کنه؛
     # طبق تصمیم کارفرما، نام کاربری فقط باید حروف/اعداد/کاراکترهای انگلیسی باشد.
@@ -54,6 +60,12 @@ class User(AbstractUser):
         default=False,
         help_text='برای دانش‌آموزی که فقط با اطلاعات حداقلی از «ثبت‌نام مستقیم» ساخته شده (بدون تاریخ تولد/آدرس و...)؛ '
                    'در «مدیریت دانش‌آموزان» علامت‌گذاری می‌شود تا مدیر یادش بماند اطلاعات را بعداً تکمیل کند.'
+    )
+    last_generated_password = models.CharField(
+        max_length=32, blank=True,
+        help_text='آخرین رمز عبوری که مدیر برای این کاربر تنظیم کرده (متن خام، فقط برای نمایش به مدیر در '
+                   '«تنظیمات دسترسی»؛ تا وقتی خودِ کاربر رمزش را عوض نکرده معتبر است — با هر بازیابی خودکار '
+                   'رمز توسط کاربر خالی می‌شود).'
     )
 
     def __str__(self):
@@ -215,3 +227,27 @@ class OTPCode(models.Model):
 
     def __str__(self):
         return f"{self.user} - {self.code} ({self.purpose})"
+
+
+class MenuPermission(models.Model):
+    """
+    تنظیمات دسترسی — دسترسی هر منوی پنل ادمین برای نقش‌های «کارمند»، «کارشناس اداری»،
+    و «کارشناس آموزش» توسط مدیر از صفحه‌ی «تنظیمات دسترسی» قابل تعیین است. نقش «مدیر»
+    همیشه به همه‌چیز دسترسی کامل دارد و اینجا مدیریت نمی‌شود.
+    فقط رکوردهایی که مدیر صراحتاً override کرده اینجا ذخیره می‌شوند؛ برای بقیه‌ی
+    ترکیب‌های (نقش، منو) که رکوردی ندارند، از accounts.menu_permissions.DEFAULT_PERMISSIONS
+    استفاده می‌شود (تا رفتار فعلیِ سیستم بدون نیاز به تنظیم دستیِ همه‌چیز حفظ شود).
+    """
+    role = models.CharField(max_length=15, choices=[(r, r) for r in User.MENU_CONFIGURABLE_ROLES])
+    menu_key = models.CharField(max_length=40)
+    enabled = models.BooleanField(default=False, help_text='دیدن این منو (نمایش لینک + امکان باز کردن صفحه)')
+    can_edit = models.BooleanField(default=False, help_text='انجام کارهای این صفحه (ثبت/ویرایش/حذف) — نه فقط دیدن')
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=['role', 'menu_key'], name='unique_role_menu_permission'),
+        ]
+
+    def __str__(self):
+        return f"{self.role} / {self.menu_key} = {self.enabled}"

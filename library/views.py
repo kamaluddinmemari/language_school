@@ -8,7 +8,9 @@ from rest_framework.permissions import IsAuthenticated
 import jdatetime
 from .models import Book, BookSale, BookStockAddition
 from .serializers import BookSerializer, BookSaleSerializer, SellBookSerializer, AddBookStockSerializer, BookStockAdditionSerializer
+from accounts.menu_permissions import can_edit_menu
 
+# منسوخ — از تنظیمات دسترسی (accounts.menu_permissions.can_edit_menu) جایگزین شد.
 MANAGE_ROLES = ('admin', 'evaluator', 'office')
 
 
@@ -18,12 +20,12 @@ class BookListView(generics.ListCreateAPIView):
     serializer_class = BookSerializer
 
     def get_queryset(self):
-        if self.request.user.role not in MANAGE_ROLES:
+        if not can_edit_menu(self.request.user, 'library'):
             return Book.objects.none()
         return Book.objects.all()
 
     def create(self, request, *args, **kwargs):
-        if request.user.role not in MANAGE_ROLES:
+        if not can_edit_menu(request.user, 'library'):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         return super().create(request, *args, **kwargs)
 
@@ -34,7 +36,7 @@ class BookDetailView(generics.RetrieveUpdateDestroyAPIView):
     queryset = Book.objects.all()
 
     def check_permission(self, request):
-        return request.user.role in MANAGE_ROLES
+        return can_edit_menu(request.user, 'library')
 
     def retrieve(self, request, *args, **kwargs):
         if not self.check_permission(request):
@@ -57,7 +59,7 @@ class SellBookView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request, pk):
-        if request.user.role not in MANAGE_ROLES:
+        if not can_edit_menu(request.user, 'library'):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         try:
             book = Book.objects.get(pk=pk)
@@ -88,7 +90,7 @@ class AddBookStockView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request, pk):
-        if request.user.role not in MANAGE_ROLES:
+        if not can_edit_menu(request.user, 'library'):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         try:
             book = Book.objects.get(pk=pk)
@@ -115,7 +117,7 @@ class BookSalesHistoryView(generics.ListAPIView):
     serializer_class = BookSaleSerializer
 
     def get_queryset(self):
-        if self.request.user.role not in MANAGE_ROLES:
+        if not can_edit_menu(self.request.user, 'library'):
             return BookSale.objects.none()
         return BookSale.objects.filter(book_id=self.kwargs['pk'])
 
@@ -130,7 +132,7 @@ class LibraryStatsView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        if request.user.role not in MANAGE_ROLES:
+        if not can_edit_menu(request.user, 'library'):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
 
         date_from = request.query_params.get('date_from') or None

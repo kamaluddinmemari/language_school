@@ -8,6 +8,7 @@ from django.core.exceptions import ValidationError as DjangoValidationError
 from accounts.models import User
 from accounts.validators import username_validator, password_validator
 from notifications.utils import send_notification
+from accounts.menu_permissions import can_edit_menu
 from .models import (
     GroupSession, GroupSessionParticipant, GroupSessionMeeting, GroupPriceSetting,
     GroupSessionAttendance, ensure_meetings, ensure_attendance_rows,
@@ -50,7 +51,7 @@ class GroupSessionListCreateView(APIView):
         return Response(serializer_cls(qs, many=True, context={'request': request}).data)
 
     def post(self, request):
-        if request.user.role not in ('admin', 'office'):
+        if not can_edit_menu(request.user, 'group-classes'):
             return Response({'error': 'فقط مدیر می‌تواند جلسه‌ی گروهی بسازد'}, status=status.HTTP_403_FORBIDDEN)
         serializer = GroupSessionCreateSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -84,7 +85,7 @@ class GroupSessionDetailView(APIView):
         return Response(serializer_cls(group_session, context={'request': request}).data)
 
     def patch(self, request, pk):
-        if request.user.role not in ('admin', 'evaluator'):
+        if not can_edit_menu(request.user, 'group-classes'):
             return Response({'error': 'فقط مدیر یا مدیر آموزش می‌تواند ویرایش کند'}, status=status.HTTP_403_FORBIDDEN)
         try:
             group_session = GroupSession.objects.get(pk=pk)
@@ -96,7 +97,7 @@ class GroupSessionDetailView(APIView):
         return Response(serializer.data)
 
     def delete(self, request, pk):
-        if request.user.role not in ('admin', 'evaluator'):
+        if not can_edit_menu(request.user, 'group-classes'):
             return Response({'error': 'فقط مدیر یا مدیر آموزش می‌تواند حذف کند'}, status=status.HTTP_403_FORBIDDEN)
         try:
             group_session = GroupSession.objects.get(pk=pk)
@@ -216,7 +217,7 @@ class CloseRegistrationView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request, pk):
-        if request.user.role not in ('admin', 'office'):
+        if not can_edit_menu(request.user, 'group-classes'):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         try:
             group_session = GroupSession.objects.get(pk=pk, status=GroupSession.Status.OPEN)
@@ -233,7 +234,7 @@ class AssignTeachersView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request, pk):
-        if request.user.role not in ('admin', 'office'):
+        if not can_edit_menu(request.user, 'group-classes'):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         try:
             group_session = GroupSession.objects.get(pk=pk, status=GroupSession.Status.ASSIGNING)
@@ -298,7 +299,7 @@ class FinalizeGroupSessionView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request, pk):
-        if request.user.role not in ('admin', 'office'):
+        if not can_edit_menu(request.user, 'group-classes'):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         try:
             group_session = GroupSession.objects.get(pk=pk, status=GroupSession.Status.ASSIGNING)
@@ -331,7 +332,7 @@ class CancelGroupSessionView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request, pk):
-        if request.user.role not in ('admin', 'office'):
+        if not can_edit_menu(request.user, 'group-classes'):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         try:
             group_session = GroupSession.objects.exclude(
@@ -464,7 +465,7 @@ class AdminConfirmCompleteView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request, pk):
-        if request.user.role not in ('admin', 'office'):
+        if not can_edit_menu(request.user, 'group-classes'):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         try:
             group_session = GroupSession.objects.get(pk=pk, status=GroupSession.Status.CONFIRMED, is_completed=True)
@@ -513,7 +514,7 @@ class ApproveParticipantSatisfactionView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request, pk):
-        if request.user.role not in ('admin', 'evaluator'):
+        if not can_edit_menu(request.user, 'group-classes'):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         participant_id = request.data.get('participant_id')
         try:
@@ -530,7 +531,7 @@ class ParticipantPaymentView(APIView):
     permission_classes = [IsAuthenticated]
 
     def patch(self, request, pk, participant_id):
-        if request.user.role not in ('admin', 'evaluator'):
+        if not can_edit_menu(request.user, 'group-classes'):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         try:
             participant = GroupSessionParticipant.objects.get(pk=participant_id, group_session_id=pk)
@@ -555,7 +556,7 @@ class GroupPriceSettingView(APIView):
         return Response(GroupPriceSettingSerializer(setting).data)
 
     def patch(self, request):
-        if request.user.role not in ('admin', 'office'):
+        if not can_edit_menu(request.user, 'group-classes'):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         setting = GroupPriceSetting.objects.order_by('-updated_at').first()
         if not setting:
