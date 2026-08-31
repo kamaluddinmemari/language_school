@@ -269,16 +269,23 @@ class MonthlyPayrollAcknowledgeView(APIView):
 
 
 def approved_daily_leave(user, day):
-    """Return approved daily leave for this exact employee only.
+    """Return approved daily leave for this exact employee only, for this exact day.
 
     Use user_id rather than a reusable model instance so a leave record can never
     leak from one employee's dashboard into another employee's attendance flow.
+
+    IMPORTANT: end_date is left empty on the request form for a single-day leave
+    (see Leaves.js: `if (!body.end_date) delete body.end_date;`). A null end_date
+    must therefore mean "only this one day" (start_date == day) — NOT "leave that
+    never ends". The previous version used `Q(end_date__isnull=True)` unconditionally,
+    which meant a single-day leave, once approved, showed the employee as on leave
+    every single day forever afterward.
     """
     user_id = getattr(user, 'id', None) or getattr(user, 'pk', None) or user
     return LeaveRequest.objects.filter(
         user_id=int(user_id), status=LeaveRequest.Status.APPROVED,
         leave_type=LeaveRequest.LeaveType.DAILY, start_date__lte=day,
-    ).filter(Q(end_date__gte=day) | Q(end_date__isnull=True)).first()
+    ).filter(Q(end_date__gte=day) | Q(end_date__isnull=True, start_date=day)).first()
 
 # ==================== ثبت ساعت ورود و خروج (AttendanceLog) ====================
 
