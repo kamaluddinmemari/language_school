@@ -2762,23 +2762,39 @@ def _scheduled_session_dates(slot):
     return result
 
 
+def _past_scheduled_session_count(slot):
+    count = 0
+    today = timezone.localtime().date()
+    for value in _scheduled_session_dates(slot):
+        try:
+            session_date = datetime.fromisoformat(str(value)).date()
+        except (TypeError, ValueError):
+            continue
+        if session_date <= today:
+            count += 1
+    return count
+
+
 def _teacher_report_payload(slot, events):
     approved = [e for e in events if TeacherSessionEvent is not None and e.status == TeacherSessionEvent.ApprovalStatus.APPROVED]
     source = slot.teacher_name or ''
-    source_count = 15
+    substitution_count = sum(1 for e in approved if e.event_type == TeacherSessionEvent.EventType.SUBSTITUTION)
+    absence_count = sum(1 for e in approved if e.event_type == TeacherSessionEvent.EventType.ABSENCE)
+    makeup_count = sum(1 for e in approved if e.event_type == TeacherSessionEvent.EventType.MAKEUP)
+    repaired_absence_count = min(absence_count, makeup_count)
+    remaining_absence_count = max(0, absence_count - repaired_absence_count)
+    source_count = max(0, 15 - substitution_count - remaining_absence_count)
     replacement_counts = {}
     status_rows = []
     for e in approved:
         if e.event_type == TeacherSessionEvent.EventType.SUBSTITUTION:
-            source_count -= 1
             replacement_counts[e.replacement_teacher_name] = replacement_counts.get(e.replacement_teacher_name, 0) + 1
             status_rows.append({'id': e.id, 'session_number': e.session_number, 'date': e.class_date_jalali, 'status': 'substitution', 'label': 'ساب', 'teacher': e.replacement_teacher_name})
         elif e.event_type == TeacherSessionEvent.EventType.ABSENCE:
-            source_count -= 1
             status_rows.append({'id': e.id, 'session_number': e.session_number, 'date': e.class_date_jalali, 'status': 'absence', 'label': 'غیبت/کنسلی', 'teacher': source})
         elif e.event_type == TeacherSessionEvent.EventType.MAKEUP:
             status_rows.append({'id': e.id, 'session_number': e.session_number, 'date': e.class_date_jalali, 'status': 'makeup', 'label': 'جبرانی', 'teacher': source})
-    participants = [{'teacher_name': source, 'role': 'استاد اصلی', 'scheduled_sessions': 15, 'effective_sessions': max(0, source_count)}]
+    participants = [{'teacher_name': source, 'role': 'استاد اصلی', 'scheduled_sessions': 15, 'effective_sessions': source_count}]
     for name, count in sorted(replacement_counts.items()):
         if name:
             participants.append({'teacher_name': name, 'role': 'استاد پذیرنده ساب', 'scheduled_sessions': 0, 'effective_sessions': count})
@@ -2790,7 +2806,9 @@ def _teacher_report_payload(slot, events):
         'term_start_date': slot.term.start_date.isoformat() if slot.term_id and slot.term and slot.term.start_date else '',
         'term_end_date': slot.term.end_date.isoformat() if slot.term_id and slot.term and slot.term.end_date else '',
         'session_dates': _scheduled_session_dates(slot),
-        'held_sessions': max(0, 15 - sum(1 for e in approved if TeacherSessionEvent is not None and e.event_type == TeacherSessionEvent.EventType.ABSENCE)),
+        'held_sessions': max(0, _past_scheduled_session_count(slot) - remaining_absence_count),
+        'substitution_count': substitution_count, 'absence_count': absence_count, 'makeup_count': makeup_count,
+        'repaired_absence_count': repaired_absence_count, 'remaining_absence_count': remaining_absence_count,
         'participants': participants, 'session_statuses': status_rows,
     }
 
