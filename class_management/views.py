@@ -2813,15 +2813,8 @@ def _teacher_report_payload(slot, events):
     }
 
 
-def _teacher_compensation_setting(teacher):
-    try:
-        return teacher.teacher_compensation_setting
-    except (AttributeError, TeacherCompensationSetting.DoesNotExist):
-        return None
-
-
 def _teacher_attendance_data(record):
-    setting = _teacher_compensation_setting(record.teacher)
+    setting = getattr(record.teacher, 'teacher_compensation_setting', None)
     multiplier = 1.0
     if setting:
         if record.class_slot.day_type == ClassSlot.DayType.FRIDAY: multiplier = float(setting.friday_multiplier)
@@ -2963,7 +2956,7 @@ class TeacherCompensationSettingsView(APIView):
         if not self._allowed(request): return Response({'error': 'فقط مدیر می‌تواند تنظیمات دستمزد استادان را ببیند'}, status=403)
         qs = TeacherCompensationSetting.objects.select_related('teacher').all()
         if request.query_params.get('teacher_id'): qs = qs.filter(teacher_id=request.query_params['teacher_id'])
-        return Response({'settings': [{'id': x.id, 'teacher_id': x.teacher_id, 'teacher_name': x.teacher.get_full_name(), 'session_price': x.session_price, 'thursday_multiplier': x.thursday_multiplier, 'friday_multiplier': x.friday_multiplier, 'insurance_deduction': x.insurance_deduction, 'allowed_minutes_per_session': x.allowed_minutes_per_session, 'adjustment_per_minute': x.adjustment_per_minute} for x in qs]})
+        return Response({'settings': [{'id': x.id, 'teacher_id': x.teacher_id, 'teacher_name': x.teacher.get_full_name(), 'session_price': x.session_price, 'thursday_multiplier': x.thursday_multiplier, 'friday_multiplier': x.friday_multiplier, 'insurance_deduction': x.insurance_deduction} for x in qs]})
 
     def post(self, request):
         if not self._allowed(request): return Response({'error': 'فقط مدیر می‌تواند تنظیمات دستمزد را تغییر دهد'}, status=403)
@@ -2977,61 +2970,6 @@ class TeacherCompensationSettingsView(APIView):
             if field in request.data: setattr(obj, field, request.data[field])
         obj.save()
         return Response({'id': obj.id, 'teacher_id': teacher.id, 'teacher_name': teacher.get_full_name(), 'session_price': obj.session_price, 'thursday_multiplier': obj.thursday_multiplier, 'friday_multiplier': obj.friday_multiplier, 'insurance_deduction': obj.insurance_deduction, 'allowed_minutes_per_session': obj.allowed_minutes_per_session, 'adjustment_per_minute': obj.adjustment_per_minute})
-
-
-def _teacher_event_pay_row(event, teacher):
-    slot = event.class_slot
-    setting = _teacher_compensation_setting(teacher)
-    price = int(setting.session_price) if setting else 0
-    multiplier = 1.0
-    if setting and slot.day_type == ClassSlot.DayType.FRIDAY:
-        multiplier = float(setting.friday_multiplier)
-    elif setting and slot.day_type in (ClassSlot.DayType.THURSDAY_MORNING, ClassSlot.DayType.THURSDAY_EVENING):
-        multiplier = float(setting.thursday_multiplier)
-    is_absence = event.event_type == TeacherSessionEvent.EventType.ABSENCE
-    amount = 0 if is_absence else round(price * multiplier)
-    return {'id': f'event-{event.id}', 'class_slot': slot.id, 'class_number': slot.number, 'teacher': teacher.id, 'teacher_name': teacher.get_full_name(), 'day_type': slot.day_type, 'day_type_display': slot.get_day_type_display(), 'time_slot': slot.time_slot, 'gender': slot.get_gender_display(), 'level': slot.assigned_level, 'class_date': event.class_date, 'session_number': event.session_number, 'check_in_at': None, 'check_out_at': None, 'minutes_worked': 0, 'status': 'absence' if is_absence else ('substitution' if event.event_type == TeacherSessionEvent.EventType.SUBSTITUTION else 'makeup'), 'status_display': event.get_event_type_display() + ' تاییدشده', 'session_price': price, 'multiplier': multiplier, 'allowed_minutes': setting.allowed_minutes_per_session if setting else 90, 'shortage_minutes': 0, 'overtime_minutes': 0, 'gross_amount': amount, 'insurance_deduction': 0, 'net_amount': amount, 'source': 'event', 'amount_note': 'بدون پرداخت' if is_absence else 'بر اساس رویداد تاییدشده'}
-
-
-class TeacherCompensationReportView(APIView):
-    """فیش محاسباتی استادان؛ فقط گزارش تولید می‌کند و داده خام را تغییر نمی‌دهد."""
-    permission_classes = [IsAuthenticated]
-
-    def get(self, request):
-        if request.user.role not in MANAGE_ROLES:
-            return Response({'error': 'فقط مدیر، مدیر آموزش یا اداری می‌تواند فیش استادان را ببیند'}, status=403)
-        from django.contrib.auth import get_user_model
-        User = get_user_model()
-        teacher_id = request.query_params.get('teacher_id') or request.query_params.get('teacher')
-        teachers_qs = User.objects.filter(role__in=User.TEACHER_LIKE_ROLES).order_by('first_name', 'last_name')
-        if teacher_id and str(teacher_id).isdigit():
-            teachers_qs = teachers_qs.filter(pk=int(teacher_id))
-        term = str(request.query_params.get('term') or 'all').lower()
-        slots = ClassSlot.objects.filter(term_id=int(term)) if term.isdigit() else ClassSlot.objects.all()
-        events = TeacherSessionEvent.objects.filter(term_id=int(term), status=TeacherSessionEvent.ApprovalStatus.APPROVED) if TeacherSessionEvent is not None and term.isdigit() else (TeacherSessionEvent.objects.filter(status=TeacherSessionEvent.ApprovalStatus.APPROVED) if TeacherSessionEvent is not None else [])
-        attendance = TeacherSessionAttendance.objects.filter(class_slot__term_id=int(term)) if TeacherSessionAttendance is not None and term.isdigit() else (TeacherSessionAttendance.objects.all() if TeacherSessionAttendance is not None else [])
-        slots = list(slots); events = list(events); attendance = list(attendance)
-        totals, records = [], []
-        for teacher in teachers_qs:
-            name = teacher.get_full_name().strip()
-            own_class_count = sum(1 for slot in slots if (slot.teacher_name or '').strip().casefold() == name.casefold())
-            rows = []
-            for record in attendance:
-                if record.teacher_id == teacher.id:
-                    row = _teacher_attendance_data(record)
-                    row.update({'source': 'qr', 'status_display': 'حضور با QR', 'amount_note': 'محاسبه بر اساس ورود و خروج'})
-                    rows.append(row)
-            for event in events:
-                requested = (event.requested_teacher_name or '').strip().casefold()
-                replacement = (event.replacement_teacher_name or '').strip().casefold()
-                if (event.event_type == TeacherSessionEvent.EventType.SUBSTITUTION and replacement == name.casefold()) or (event.event_type in (TeacherSessionEvent.EventType.ABSENCE, TeacherSessionEvent.EventType.MAKEUP) and requested == name.casefold()):
-                    rows.append(_teacher_event_pay_row(event, teacher))
-            rows.sort(key=lambda row: (str(row.get('class_date') or ''), int(row.get('session_number') or 0)))
-            gross = sum(int(row.get('gross_amount') or 0) for row in rows)
-            insurance = sum(int(row.get('insurance_deduction') or 0) for row in rows)
-            totals.append({'teacher': teacher.id, 'teacher_name': name, 'class_count': own_class_count, 'record_count': len(rows), 'minutes_worked': sum(int(row.get('minutes_worked') or 0) for row in rows), 'shortage_minutes': sum(int(row.get('shortage_minutes') or 0) for row in rows), 'overtime_minutes': sum(int(row.get('overtime_minutes') or 0) for row in rows), 'gross_amount': gross, 'insurance_deduction': insurance, 'net_amount': max(0, gross - insurance)})
-            records.extend(rows)
-        return Response({'term': term, 'teachers': [{'id': teacher.id, 'name': teacher.get_full_name()} for teacher in teachers_qs], 'records': records, 'totals': totals})
 
 
 class TeacherTermReportView(APIView):
