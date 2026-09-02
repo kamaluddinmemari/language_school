@@ -14,7 +14,7 @@ from .views import (
     OnlineCourseSelfEnrollView, PendingOnlineCourseEnrollmentsView, VerifyOnlineCourseEnrollmentPaymentView,
     RejectPendingOnlineCourseEnrollmentView, RefundOnlineCourseEnrollmentView, CreditOnlineCourseToWalletView,
     MyOnlineCourseEnrollmentsView, TeacherOnlineCoursesView, GatewayPaymentInitiateView, PaymentSettingsView,
-    MarkAttendanceView, ClassAttendanceListView, BulkClassSlotActionView,
+    MarkAttendanceView, ClassAttendanceListView, RosterAttendanceView, BulkRosterAttendanceView, BulkClassSlotActionView,
     OnlineCourseRosterView, OnlineCourseUnenrollView, OnlineCourseTransferOptionsView, OnlineCourseTransferView,
     StudentCreateOnlineCourseActionRequestView, MyOnlineCourseActionRequestsView,
     AdminOnlineCourseActionRequestListView, ApproveOnlineCourseActionRequestView, RejectOnlineCourseActionRequestView,
@@ -95,6 +95,9 @@ urlpatterns = [
     path('class-management/my-online-courses/', TeacherOnlineCoursesView.as_view(), name='teacher_online_courses'),
     path('class-management/gateway-payment/initiate/', GatewayPaymentInitiateView.as_view(), name='gateway_payment_initiate'),
     path('class-management/payment-settings/', PaymentSettingsView.as_view(), name='payment_settings'),
+    # لیست کلاسی ۲۰ سطری و حضور و غیاب دانش‌آموزان در پنل ادمین
+    path('class-management/roster-attendance/', RosterAttendanceView.as_view(), name='roster_attendance'),
+    path('class-management/roster-attendance/bulk/', BulkRosterAttendanceView.as_view(), name='roster_attendance_bulk'),
     path('class-management/attendance/mark/', MarkAttendanceView.as_view(), name='mark_attendance'),
     path('class-management/attendance/', ClassAttendanceListView.as_view(), name='attendance_list'),
     path('class-management/slots/bulk-action/', BulkClassSlotActionView.as_view(), name='bulk_class_slot_action'),

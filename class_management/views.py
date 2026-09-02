@@ -36,6 +36,7 @@ from .serializers import (
 from level_tests.models import LevelTest
 from accounts.menu_permissions import can_edit_menu, can_view_menu
 from .allocation import allocate_classes
+from .attendance import DEFAULT_SESSION_COUNT, jalali_date, roster_attendance_payload, session_dates_for_slot
 
 # منسوخ — از تنظیمات دسترسی (accounts.menu_permissions.can_edit_menu) جایگزین شد.
 # فقط برای مرجع/سازگاری با کد قدیمی نگه داشته شده؛ جایی از این فایل استفاده نمی‌شود.
@@ -2645,15 +2646,153 @@ class PaymentSettingsView(APIView):
         return Response(serializer.data)
 
 
-# ==================== حضور و غیاب آنلاین توسط استاد ====================
+# ==================== حضور و غیاب دانش‌آموزان ====================
+
+ATTENDANCE_STATUSES = set(ClassAttendance.Status.values)
+
+
+def _save_roster_attendance(slot, student_id, session_number, attendance_status, note, marked_by):
+    """یک وضعیت حضور را فقط برای زبان‌آموز ثبت‌نام‌شده و یک جلسهٔ واقعی ذخیره می‌کند."""
+    try:
+        session_number = int(session_number)
+    except (TypeError, ValueError):
+        raise ValueError('شماره جلسه نامعتبر است')
+    if session_number < 1 or session_number > DEFAULT_SESSION_COUNT:
+        raise ValueError(f'شماره جلسه باید بین ۱ تا {DEFAULT_SESSION_COUNT} باشد')
+    if attendance_status not in ATTENDANCE_STATUSES | {'unmarked'}:
+        raise ValueError('وضعیت حضور و غیاب نامعتبر است')
+    if not ClassSlotEnrollment.objects.filter(
+        class_slot=slot, student_id=student_id, payment_verified=True,
+    ).exists():
+        raise ValueError('دانش‌آموز در فهرست ثبت‌نام‌های تاییدشدهٔ این کلاس نیست')
+
+    dates = session_dates_for_slot(slot)
+    if len(dates) < session_number:
+        raise ValueError('تاریخ خودکار این جلسه برای کلاس قابل محاسبه نیست؛ تاریخ ترم و روز برگزاری را بررسی کنید')
+    class_date = dates[session_number - 1]
+    lookup = {'class_slot': slot, 'student_id': student_id, 'date': class_date}
+
+    if attendance_status == 'unmarked':
+        ClassAttendance.objects.filter(**lookup).delete()
+        return None
+    attendance, _ = ClassAttendance.objects.update_or_create(
+        **lookup,
+        defaults={
+            'status': attendance_status,
+            'is_present': attendance_status != ClassAttendance.Status.ABSENT,
+            'note': str(note or '')[:200],
+            'marked_by': marked_by,
+        },
+    )
+    return attendance
+
+
+class RosterAttendanceView(APIView):
+    """لیست ۲۰ سطری یک کلاس و ثبت حضور با تاریخ‌های از پیش محاسبه‌شدهٔ همان ترم."""
+    permission_classes = [IsAuthenticated]
+
+    def _get_slot(self, slot_id):
+        return get_object_or_404(ClassSlot.objects.select_related('term'), pk=slot_id)
+
+    def get(self, request):
+        if not can_edit_menu(request.user, 'class-management'):
+            return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
+        slot_id = request.query_params.get('class_slot')
+        if not slot_id:
+            return Response({'error': 'شناسه کلاس الزامی است'}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(roster_attendance_payload(self._get_slot(slot_id)))
+
+    def post(self, request):
+        if not can_edit_menu(request.user, 'class-management'):
+            return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
+        slot_id = request.data.get('class_slot')
+        records = request.data.get('records')
+        if not slot_id or not isinstance(records, list):
+            return Response({'error': 'class_slot و فهرست records الزامی هستند'}, status=status.HTTP_400_BAD_REQUEST)
+        slot = self._get_slot(slot_id)
+        try:
+            with transaction.atomic():
+                for row in records:
+                    _save_roster_attendance(
+                        slot=slot,
+                        student_id=row.get('student_id'),
+                        session_number=row.get('session_number'),
+                        attendance_status=row.get('status', 'unmarked'),
+                        note=row.get('note', ''),
+                        marked_by=request.user,
+                    )
+        except ValueError as exc:
+            return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        payload = roster_attendance_payload(slot)
+        payload['message'] = f'{len(records)} وضعیت حضور و غیاب ذخیره شد'
+        return Response(payload)
+
+
+class BulkRosterAttendanceView(APIView):
+    """انتخاب و ثبت یکجای حضور و غیاب کلاس‌های یک ترم با فیلتر استاد، سطح و روز."""
+    permission_classes = [IsAuthenticated]
+
+    def _filtered_slots(self, params):
+        term_id = params.get('term')
+        if not term_id:
+            raise ValueError('انتخاب ترم الزامی است')
+        try:
+            qs = ClassSlot.objects.select_related('term').filter(term_id=int(term_id))
+        except (TypeError, ValueError):
+            raise ValueError('ترم انتخاب‌شده نامعتبر است')
+        teacher_name = str(params.get('teacher_name') or '').strip()
+        level = str(params.get('level') or '').strip()
+        day_type = str(params.get('day_type') or '').strip()
+        if teacher_name:
+            qs = qs.filter(teacher_name__iexact=teacher_name)
+        if level:
+            qs = qs.filter(assigned_level__iexact=level)
+        if day_type:
+            qs = qs.filter(day_type=day_type)
+        return qs.order_by('teacher_name', 'assigned_level', 'day_type', 'time_slot', 'number')
+
+    def get(self, request):
+        if not can_edit_menu(request.user, 'class-management'):
+            return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
+        try:
+            slots = self._filtered_slots(request.query_params)
+        except ValueError as exc:
+            return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response({'classes': [roster_attendance_payload(slot) for slot in slots]})
+
+    def post(self, request):
+        if not can_edit_menu(request.user, 'class-management'):
+            return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
+        records = request.data.get('records')
+        if not isinstance(records, list):
+            return Response({'error': 'فهرست records الزامی است'}, status=status.HTTP_400_BAD_REQUEST)
+        slot_ids = {row.get('class_slot') for row in records if row.get('class_slot')}
+        slots = {
+            slot.id: slot for slot in ClassSlot.objects.select_related('term').filter(id__in=slot_ids)
+        }
+        if len(slots) != len(slot_ids):
+            return Response({'error': 'یک یا چند کلاس پیدا نشد'}, status=status.HTTP_404_NOT_FOUND)
+        try:
+            with transaction.atomic():
+                for row in records:
+                    slot = slots.get(row.get('class_slot'))
+                    if slot is None:
+                        raise ValueError('شناسه کلاس در یک رکورد نامعتبر است')
+                    _save_roster_attendance(
+                        slot=slot,
+                        student_id=row.get('student_id'),
+                        session_number=row.get('session_number'),
+                        attendance_status=row.get('status', 'unmarked'),
+                        note=row.get('note', ''),
+                        marked_by=request.user,
+                    )
+        except ValueError as exc:
+            return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response({'message': f'{len(records)} وضعیت حضور و غیاب در {len(slot_ids)} کلاس ذخیره شد'})
+
 
 class MarkAttendanceView(APIView):
-    """
-    POST: استاد (یا مدیر) حضور/غیاب یک دانش‌آموز را برای یک تاریخ مشخص، در یک کلاس ترمیک یا
-    دوره‌ی علمی ثبت/ویرایش می‌کند. اگر برای همون دانش‌آموز/تاریخ قبلاً رکوردی بود، آپدیت می‌شود
-    (یعنی کاملاً قابل ویرایش است، نه فقط یک‌بار ثبت).
-    بدنه‌ی درخواست: class_slot یا online_course (یکی از این دو الزامی)، student, date (YYYY-MM-DD میلادی)، is_present, note
-    """
+    """API سازگار با اپ استاد/نسخه‌های قبلی؛ با پشتیبانی از حاضر، غایب و تأخیر."""
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
@@ -2666,19 +2805,17 @@ class MarkAttendanceView(APIView):
         online_course_id = request.data.get('online_course')
         student_id = request.data.get('student')
         date_str = request.data.get('date')
-        is_present = request.data.get('is_present', True)
         note = request.data.get('note', '')
+        supplied_status = request.data.get('status')
+        attendance_status = supplied_status or ('present' if request.data.get('is_present', True) else 'absent')
+        if attendance_status not in ATTENDANCE_STATUSES:
+            return Response({'error': 'وضعیت حضور و غیاب نامعتبر است'}, status=status.HTTP_400_BAD_REQUEST)
 
         if not student_id or not date_str or (not class_slot_id and not online_course_id):
             return Response({'error': 'student، date، و یکی از class_slot/online_course الزامی است'}, status=status.HTTP_400_BAD_REQUEST)
-
-        # اگه استاد (نه مدیر) درخواست داده، فقط اجازه داره برای کلاس‌های خودش ثبت کنه
         if request.user.role in User.TEACHER_LIKE_ROLES and not can_edit_menu(request.user, 'class-management'):
             teacher_full_name = request.user.get_full_name().strip()
-            if class_slot_id:
-                owns = ClassSlot.objects.filter(pk=class_slot_id, teacher_name__iexact=teacher_full_name).exists()
-            else:
-                owns = OnlineCourse.objects.filter(pk=online_course_id, teacher_name__iexact=teacher_full_name).exists()
+            owns = ClassSlot.objects.filter(pk=class_slot_id, teacher_name__iexact=teacher_full_name).exists() if class_slot_id else OnlineCourse.objects.filter(pk=online_course_id, teacher_name__iexact=teacher_full_name).exists()
             if not owns:
                 return Response({'error': 'این کلاس/دوره متعلق به شما نیست'}, status=status.HTTP_403_FORBIDDEN)
 
@@ -2687,20 +2824,25 @@ class MarkAttendanceView(APIView):
             lookup['class_slot_id'] = class_slot_id
         else:
             lookup['online_course_id'] = online_course_id
-
         attendance, _created = ClassAttendance.objects.update_or_create(
-            **lookup, defaults={'is_present': is_present, 'note': note, 'marked_by': request.user},
+            **lookup,
+            defaults={
+                'status': attendance_status,
+                'is_present': attendance_status != ClassAttendance.Status.ABSENT,
+                'note': note,
+                'marked_by': request.user,
+            },
         )
         return Response(ClassAttendanceSerializer(attendance).data)
 
 
 class ClassAttendanceListView(generics.ListAPIView):
-    """GET: لیست حضور و غیاب یک کلاس ترمیک یا دوره‌ی علمی — با ?class_slot=<id> یا ?online_course=<id>، اختیاری ?date=<YYYY-MM-DD>"""
+    """GET: لیست حضور و غیاب یک کلاس ترمیک یا دوره‌ی علمی."""
     permission_classes = [IsAuthenticated]
     serializer_class = ClassAttendanceSerializer
 
     def get_queryset(self):
-        qs = ClassAttendance.objects.select_related('student')
+        qs = ClassAttendance.objects.select_related('student', 'marked_by')
         class_slot_id = self.request.query_params.get('class_slot')
         online_course_id = self.request.query_params.get('online_course')
         date_str = self.request.query_params.get('date')
@@ -2737,29 +2879,52 @@ def _teacher_event_payload(event):
 def _teacher_report_payload(slot, events):
     approved = [e for e in events if TeacherSessionEvent is not None and e.status == TeacherSessionEvent.ApprovalStatus.APPROVED]
     source = slot.teacher_name or ''
-    source_count = 15
+    # منبع واحد تاریخ جلسه: همان تقویمی که لیست کلاسی و حضور و غیاب استفاده می‌کند.
+    scheduled_dates = session_dates_for_slot(slot)
+    total_sessions = len(scheduled_dates) or DEFAULT_SESSION_COUNT
+    date_by_session = {index: value for index, value in enumerate(scheduled_dates, start=1)}
+    today = timezone.localdate()
+    elapsed_session_numbers = {number for number, value in date_by_session.items() if value <= today}
+    elapsed_sessions = len(elapsed_session_numbers)
+    past_absence_count = sum(1 for e in approved if e.event_type == TeacherSessionEvent.EventType.ABSENCE and e.session_number in elapsed_session_numbers)
+    past_substitution_count = sum(1 for e in approved if e.event_type == TeacherSessionEvent.EventType.SUBSTITUTION and e.session_number in elapsed_session_numbers)
+    absence_count = sum(1 for e in approved if e.event_type == TeacherSessionEvent.EventType.ABSENCE)
+    substitution_count = sum(1 for e in approved if e.event_type == TeacherSessionEvent.EventType.SUBSTITUTION)
+    makeup_count = sum(1 for e in approved if e.event_type == TeacherSessionEvent.EventType.MAKEUP)
     replacement_counts = {}
     status_rows = []
-    for e in approved:
-        if e.event_type == TeacherSessionEvent.EventType.SUBSTITUTION:
-            source_count -= 1
-            replacement_counts[e.replacement_teacher_name] = replacement_counts.get(e.replacement_teacher_name, 0) + 1
-            status_rows.append({'id': e.id, 'session_number': e.session_number, 'date': e.class_date_jalali, 'status': 'substitution', 'label': 'ساب', 'teacher': e.replacement_teacher_name})
-        elif e.event_type == TeacherSessionEvent.EventType.ABSENCE:
-            source_count -= 1
-            status_rows.append({'id': e.id, 'session_number': e.session_number, 'date': e.class_date_jalali, 'status': 'absence', 'label': 'غیبت/کنسلی', 'teacher': source})
-        elif e.event_type == TeacherSessionEvent.EventType.MAKEUP:
-            status_rows.append({'id': e.id, 'session_number': e.session_number, 'date': e.class_date_jalali, 'status': 'makeup', 'label': 'جبرانی', 'teacher': source})
-    participants = [{'teacher_name': source, 'role': 'استاد اصلی', 'scheduled_sessions': 15, 'effective_sessions': max(0, source_count)}]
+
+    for event in approved:
+        automatic_date = date_by_session.get(event.session_number)
+        display_date = jalali_date(automatic_date) if automatic_date else event.class_date_jalali
+        if event.event_type == TeacherSessionEvent.EventType.SUBSTITUTION:
+            replacement_counts[event.replacement_teacher_name] = replacement_counts.get(event.replacement_teacher_name, 0) + 1
+            status_rows.append({'id': event.id, 'session_number': event.session_number, 'date': display_date, 'status': 'substitution', 'label': 'ساب', 'teacher': event.replacement_teacher_name})
+        elif event.event_type == TeacherSessionEvent.EventType.ABSENCE:
+            status_rows.append({'id': event.id, 'session_number': event.session_number, 'date': display_date, 'status': 'absence', 'label': 'غیبت/کنسلی', 'teacher': source})
+        elif event.event_type == TeacherSessionEvent.EventType.MAKEUP:
+            status_rows.append({'id': event.id, 'session_number': event.session_number, 'date': display_date, 'status': 'makeup', 'label': 'جبرانی', 'teacher': source})
+
+    source_count = max(0, elapsed_sessions - past_substitution_count - past_absence_count)
+    participants = [{'teacher_name': source, 'role': 'استاد اصلی', 'scheduled_sessions': total_sessions, 'effective_sessions': source_count}]
     for name, count in sorted(replacement_counts.items()):
         if name:
             participants.append({'teacher_name': name, 'role': 'استاد پذیرنده ساب', 'scheduled_sessions': 0, 'effective_sessions': count})
     return {
-        'class_slot': slot.id, 'class_number': slot.number, 'class_title': slot.title,
+        'class_slot': slot.id, 'term_id': slot.term_id,
+        'class_number': slot.number, 'class_title': slot.title,
         'teacher_name': source, 'day_type': slot.day_type, 'day_type_display': slot.get_day_type_display(),
         'time_slot': slot.time_slot, 'gender': slot.gender, 'gender_display': slot.get_gender_display(),
-        'level': slot.assigned_level, 'capacity': slot.capacity, 'total_sessions': 15,
-        'held_sessions': max(0, 15 - sum(1 for e in approved if TeacherSessionEvent is not None and e.event_type == TeacherSessionEvent.EventType.ABSENCE)),
+        'level': slot.assigned_level, 'capacity': slot.capacity,
+        'term_start_date': slot.term.start_date.isoformat() if slot.term_id else None,
+        'term_end_date': slot.term.end_date.isoformat() if slot.term_id else None,
+        'session_dates': [value.isoformat() for value in scheduled_dates],
+        'total_sessions': total_sessions,
+        'elapsed_sessions': elapsed_sessions,
+        'held_sessions': max(0, elapsed_sessions - past_absence_count),
+        'progress_sessions': max(0, elapsed_sessions - past_absence_count),
+        'substitution_count': substitution_count, 'absence_count': absence_count,
+        'makeup_count': makeup_count, 'repaired_absence_count': makeup_count,
         'participants': participants, 'session_statuses': status_rows,
     }
 
@@ -2803,29 +2968,55 @@ def _distance_meters(lat1, lon1, lat2, lon2):
         return None
 
 
+def _canonical_qr_slot(slot):
+    """یک QR مشترک برای شمارهٔ کلاس در همان ترم؛ مستقل از سطح و استاد."""
+    existing = RoomQrToken.objects.filter(
+        class_slot__term_id=slot.term_id,
+        class_slot__number=slot.number,
+    ).select_related('class_slot').order_by('id').first()
+    if existing:
+        RoomQrToken.objects.filter(
+            class_slot__term_id=slot.term_id,
+            class_slot__number=slot.number,
+        ).exclude(pk=existing.pk).filter(is_active=True).update(is_active=False)
+        return existing.class_slot, existing
+    qr = RoomQrToken.objects.create(class_slot=slot)
+    return slot, qr
+
+
+def _qr_payload(slot, qr):
+    return {
+        'class_slot': slot.id,
+        'class_number': slot.number,
+        'token': str(qr.token),
+        'payload': f'LSCHOOL-ROOM:{slot.id}:{qr.token}',
+        'is_active': qr.is_active,
+        'latitude': qr.latitude,
+        'longitude': qr.longitude,
+        'allowed_radius_m': qr.allowed_radius_m,
+    }
+
+
 class RoomQrManageView(APIView):
-    """مدیریت QR محل کلاس؛ فقط مدیر/اداری/مدیرآموزش."""
+    """مدیریت یک QR مشترک برای هر شماره کلاس در هر ترم؛ مستقل از سطح و استاد."""
     permission_classes = [IsAuthenticated]
-
     def _allowed(self, request): return can_edit_menu(request.user, 'class-management')
-
     def get(self, request, pk):
         if not self._allowed(request): return Response({'error': 'دسترسی ندارید'}, status=403)
-        slot = get_object_or_404(ClassSlot, pk=pk)
-        qr, _ = RoomQrToken.objects.get_or_create(class_slot=slot)
-        return Response({'class_slot': slot.id, 'token': qr.token, 'payload': f'LSCHOOL-ROOM:{slot.id}:{qr.token}', 'is_active': qr.is_active, 'latitude': qr.latitude, 'longitude': qr.longitude, 'allowed_radius_m': qr.allowed_radius_m})
-
+        requested_slot = get_object_or_404(ClassSlot, pk=pk)
+        slot, qr = _canonical_qr_slot(requested_slot)
+        return Response(_qr_payload(slot, qr))
     def post(self, request, pk):
         if not self._allowed(request): return Response({'error': 'دسترسی ندارید'}, status=403)
-        slot = get_object_or_404(ClassSlot, pk=pk)
-        qr, _ = RoomQrToken.objects.get_or_create(class_slot=slot)
+        requested_slot = get_object_or_404(ClassSlot, pk=pk)
+        slot, qr = _canonical_qr_slot(requested_slot)
         if request.data.get('action') == 'rotate': qr.rotate()
         if 'is_active' in request.data: qr.is_active = bool(request.data.get('is_active'))
         if 'latitude' in request.data: qr.latitude = request.data.get('latitude') or None
         if 'longitude' in request.data: qr.longitude = request.data.get('longitude') or None
         if 'allowed_radius_m' in request.data: qr.allowed_radius_m = max(20, min(1000, int(request.data.get('allowed_radius_m'))))
         qr.save()
-        return Response({'class_slot': slot.id, 'token': qr.token, 'payload': f'LSCHOOL-ROOM:{slot.id}:{qr.token}', 'is_active': qr.is_active, 'latitude': qr.latitude, 'longitude': qr.longitude, 'allowed_radius_m': qr.allowed_radius_m})
+        return Response(_qr_payload(slot, qr))
 
 
 class TeacherQrAttendanceView(APIView):
@@ -2842,7 +3033,8 @@ class TeacherQrAttendanceView(APIView):
         token = parts[-1] if len(parts) >= 3 and parts[0] == 'LSCHOOL-ROOM' else raw
         qr = RoomQrToken.objects.select_related('class_slot').filter(token=token, is_active=True).first()
         if not qr: return Response({'error': 'QR نامعتبر، غیرفعال یا متعلق به محل دیگری است'}, status=400)
-        slot = qr.class_slot
+        canonical_slot = qr.class_slot
+        slot = canonical_slot
         today = timezone.localtime().date()
         class_date = request.data.get('class_date') or today.isoformat()
         if not can_edit_menu(request.user, 'class-management') and str(class_date) != today.isoformat():
@@ -2852,11 +3044,16 @@ class TeacherQrAttendanceView(APIView):
         if not 1 <= session_number <= 15: return Response({'error': 'شماره جلسه باید بین ۱ تا ۱۵ باشد'}, status=400)
         teacher_name = request.user.get_full_name().strip()
         if request.user.role in User.TEACHER_LIKE_ROLES:
-            owns = slot.teacher_name.strip().casefold() == teacher_name.casefold()
-            replacement = TeacherSessionEvent.objects.filter(term=slot.term, class_slot=slot, class_date=class_date, session_number=session_number, event_type=TeacherSessionEvent.EventType.SUBSTITUTION, status=TeacherSessionEvent.ApprovalStatus.APPROVED, replacement_teacher_name__iexact=teacher_name).exists()
+            candidate_slots = ClassSlot.objects.filter(term_id=canonical_slot.term_id, number=canonical_slot.number).order_by('id')
+            owned_slot = next((candidate for candidate in candidate_slots if candidate.teacher_name.strip().casefold() == teacher_name.casefold() and class_date in {value.isoformat() for value in session_dates_for_slot(candidate)}), None)
+            if owned_slot is None:
+                owned_slot = next((candidate for candidate in candidate_slots if candidate.teacher_name.strip().casefold() == teacher_name.casefold()), None)
+            if owned_slot is not None:
+                slot = owned_slot
+            replacement = TeacherSessionEvent.objects.filter(term_id=canonical_slot.term_id, class_slot__in=candidate_slots, class_date=class_date, session_number=session_number, event_type=TeacherSessionEvent.EventType.SUBSTITUTION, status=TeacherSessionEvent.ApprovalStatus.APPROVED, replacement_teacher_name__iexact=teacher_name).exists()
             if replacement: return Response({'error': 'برای این جلسه ساب تایید شده ثبت شده است؛ QR استاد اصلی نباید ثبت شود'}, status=400)
-            if not owns: return Response({'error': 'این QR برای کلاس‌های شما نیست'}, status=403)
-        if TeacherSessionEvent.objects.filter(term=slot.term, class_slot=slot, class_date=class_date, session_number=session_number, event_type=TeacherSessionEvent.EventType.ABSENCE, status=TeacherSessionEvent.ApprovalStatus.APPROVED).exists():
+            if slot.teacher_name.strip().casefold() != teacher_name.casefold(): return Response({'error': 'این QR برای کلاس‌های شما نیست'}, status=403)
+        if TeacherSessionEvent.objects.filter(term_id=slot.term_id, class_slot=slot, class_date=class_date, session_number=session_number, event_type=TeacherSessionEvent.EventType.ABSENCE, status=TeacherSessionEvent.ApprovalStatus.APPROVED).exists():
             return Response({'error': 'این جلسه به‌عنوان غیبت/کنسلی ثبت شده و نباید QR بخورد'}, status=400)
         lat, lon = request.data.get('latitude'), request.data.get('longitude')
         if qr.latitude is not None and qr.longitude is not None:

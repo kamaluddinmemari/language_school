@@ -465,14 +465,20 @@ class PaymentSettings(models.Model):
 class ClassAttendance(models.Model):
     """
     حضور و غیاب یک دانش‌آموز در یک تاریخ مشخص — برای کلاس ترمیک (ClassSlot) یا دوره‌ی علمی
-    (OnlineCourse). توسط استاد از اپ ثبت می‌شود؛ نتیجه‌اش جلوی اسم همون دانش‌آموز در لیست
-    کلاس (هم توی اپ استاد هم پنل ادمین) با تاریخ نشون داده می‌شه و قابل ویرایش می‌مونه.
+    (OnlineCourse). تاریخ جلسه از تقویم ترم تولید می‌شود و وضعیت، قابل ویرایش باقی می‌ماند.
     """
+    class Status(models.TextChoices):
+        PRESENT = 'present', 'حاضر'
+        ABSENT = 'absent', 'غایب'
+        LATE = 'late', 'تاخیر'
+
     class_slot = models.ForeignKey(ClassSlot, null=True, blank=True, on_delete=models.CASCADE, related_name='attendances')
     online_course = models.ForeignKey('OnlineCourse', null=True, blank=True, on_delete=models.CASCADE, related_name='attendances')
     student = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='class_attendances')
     date = models.DateField(default=timezone.now, help_text='تاریخ جلسه (میلادی ذخیره می‌شود؛ شمسی نمایش داده می‌شود)')
+    # این فیلد برای سازگاری APIهای قدیمی باقی مانده و از روی status همگام می‌شود.
     is_present = models.BooleanField(default=True)
+    status = models.CharField(max_length=10, choices=Status.choices, default=Status.PRESENT)
     note = models.CharField(max_length=200, blank=True)
     marked_by = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL, related_name='+')
     created_at = models.DateTimeField(auto_now_add=True)
@@ -490,7 +496,7 @@ class ClassAttendance(models.Model):
         return jdatetime.date.fromgregorian(date=self.date).strftime('%Y/%m/%d')
 
     def __str__(self):
-        return f"{self.student.get_full_name()} — {self.date_jalali} — {'حاضر' if self.is_present else 'غایب'}"
+        return f"{self.student.get_full_name()} — {self.date_jalali} — {self.get_status_display()}"
 
 
 class OnlineCourse(models.Model):

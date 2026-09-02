@@ -209,14 +209,22 @@ class PaymentSettingsSerializer(serializers.ModelSerializer):
 class ClassAttendanceSerializer(serializers.ModelSerializer):
     date_jalali = serializers.ReadOnlyField()
     student_name = serializers.SerializerMethodField()
+    status_display = serializers.CharField(source='get_status_display', read_only=True)
+    marked_by_name = serializers.SerializerMethodField()
 
     class Meta:
         model = ClassAttendance
-        fields = ['id', 'class_slot', 'online_course', 'student', 'student_name', 'date', 'date_jalali', 'is_present', 'note', 'updated_at']
-        read_only_fields = ['id', 'updated_at']
+        fields = [
+            'id', 'class_slot', 'online_course', 'student', 'student_name', 'date', 'date_jalali',
+            'status', 'status_display', 'is_present', 'note', 'marked_by_name', 'updated_at',
+        ]
+        read_only_fields = ['id', 'updated_at', 'marked_by_name']
 
     def get_student_name(self, obj):
         return obj.student.get_full_name()
+
+    def get_marked_by_name(self, obj):
+        return obj.marked_by.get_full_name() if obj.marked_by else ''
 
 
 class RefundEnrollmentSerializer(serializers.Serializer):
