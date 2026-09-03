@@ -307,13 +307,16 @@ def _location_types_compatible(source, target):
 
 
 def _swap_locations_compatible(source, target):
-    """جابجایی فیزیکی فقط بین دو کلاس دقیقاً هم‌روز و هم‌ساعت انجام می‌شود."""
+    """تعویض محل فقط با یک کلاس دیگرِ همان ترم، روز و ساعت انجام می‌شود.
+
+    مقصد لازم نیست خالی باشد؛ چون در این عملیات، شمارهٔ محل دو کلاس با هم عوض
+    می‌شود و اطلاعات آموزشی، استاد و ثبت‌نام‌های هر دو رکورد حفظ می‌گردد.
+    """
     return (
         source.term_id == target.term_id
         and source.number != target.number
         and source.day_type == target.day_type
         and source.time_slot == target.time_slot
-        and source.gender == target.gender
         and source.is_online == target.is_online
     )
 
@@ -337,7 +340,7 @@ class SwapClassLocationView(APIView):
                 if source.number < 1 or source.number > 11 or target.number < 1 or target.number > 11:
                     return Response({'error': 'شمارهٔ محل هر دو کلاس باید بین ۱ تا ۱۱ باشد'}, status=status.HTTP_400_BAD_REQUEST)
                 if not _swap_locations_compatible(source, target):
-                    return Response({'error': 'برای جابجایی، کلاس مقصد باید دقیقاً در همان روز، همان ساعت، همان ترم، با جنسیت و حالت برگزاری یکسان باشد'}, status=status.HTTP_400_BAD_REQUEST)
+                    return Response({'error': 'برای جابجایی، مقصد باید کلاس دیگری در همان روز و همان ساعتِ همان ترم و حالت برگزاری باشد؛ تفاوت جنسیت یا سطح مانع جابه‌جایی نیست'}, status=status.HTTP_400_BAD_REQUEST)
                 source_number, target_number = source.number, target.number
                 temporary_number = (ClassSlot.objects.order_by('-number').values_list('number', flat=True).first() or 0) + 1000000
                 source.number = temporary_number
