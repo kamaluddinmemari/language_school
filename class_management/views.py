@@ -2876,11 +2876,25 @@ def _teacher_event_payload(event):
     }
 
 
+def _teacher_report_session_dates(slot):
+    """تقویم گزارش استادان: هر نوبت یک‌روزدرهفته، سه جلسهٔ متوالی در همان تاریخ دارد."""
+    dates = session_dates_for_slot(slot)
+    one_day_types = {'thursday_morning', 'thursday_evening', 'friday'}
+    if slot.day_type not in one_day_types:
+        return dates
+    expanded = []
+    for date_value in dates:
+        expanded.extend([date_value, date_value, date_value])
+        if len(expanded) >= DEFAULT_SESSION_COUNT:
+            break
+    return expanded[:DEFAULT_SESSION_COUNT]
+
+
 def _teacher_report_payload(slot, events):
     approved = [e for e in events if TeacherSessionEvent is not None and e.status == TeacherSessionEvent.ApprovalStatus.APPROVED]
     source = slot.teacher_name or ''
     # منبع واحد تاریخ جلسه: همان تقویمی که لیست کلاسی و حضور و غیاب استفاده می‌کند.
-    scheduled_dates = session_dates_for_slot(slot)
+    scheduled_dates = _teacher_report_session_dates(slot)
     total_sessions = len(scheduled_dates) or DEFAULT_SESSION_COUNT
     date_by_session = {index: value for index, value in enumerate(scheduled_dates, start=1)}
     today = timezone.localdate()
