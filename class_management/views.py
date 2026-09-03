@@ -2955,9 +2955,11 @@ def _teacher_attendance_data(record):
     shortage = max(0, allowed - record.minutes_worked) if setting and record.check_out_at else 0
     overtime = max(0, record.minutes_worked - allowed) if setting and record.check_out_at else 0
     gross = round(base + (overtime * rate) - (shortage * rate))
-    insurance = setting.insurance_deduction if setting and record.check_out_at else 0
+    # کسری بیمه یک مبلغ ترمی است (نه به ازای هر جلسه)؛ در این تابع سطح-جلسه صفر گزارش می‌شود
+    # و در گزارش جمع‌بندیِ فیش دستمزد (TeacherCompensationReportView) یک‌بار برای هر ترم کسر می‌شود.
     return {
         'id': record.id, 'class_slot': record.class_slot_id, 'class_number': record.class_slot.number,
+        'term_id': record.class_slot.term_id,
         'teacher': record.teacher_id, 'teacher_name': record.teacher.get_full_name(),
         'day_type': record.class_slot.day_type, 'day_type_display': record.class_slot.get_day_type_display(),
         'time_slot': record.class_slot.time_slot, 'gender': record.class_slot.get_gender_display(),
@@ -2967,7 +2969,7 @@ def _teacher_attendance_data(record):
         'status': record.status, 'notes': record.notes,
         'session_price': setting.session_price if setting else 0, 'multiplier': multiplier,
         'allowed_minutes': allowed, 'shortage_minutes': shortage, 'overtime_minutes': overtime,
-        'gross_amount': gross, 'insurance_deduction': insurance, 'net_amount': max(0, gross - insurance),
+        'gross_amount': gross, 'insurance_deduction': 0, 'net_amount': gross,
     }
 
 
@@ -3114,11 +3116,22 @@ class TeacherCompensationSettingsView(APIView):
 
     def _allowed(self, request): return can_edit_menu(request.user, 'teacher-sessions')
 
+    SETTING_FIELDS = ('session_price', 'ordinary_multiplier', 'thursday_multiplier', 'friday_multiplier',
+                       'insurance_base_monthly', 'insurance_rate_percent', 'insurance_days_per_term',
+                       'allowed_minutes_per_session', 'adjustment_per_minute')
+
+    def _payload(self, x):
+        data = {'id': x.id, 'teacher_id': x.teacher_id, 'teacher_name': x.teacher.get_full_name()}
+        for field in self.SETTING_FIELDS:
+            data[field] = getattr(x, field)
+        data['term_insurance_deduction'] = x.term_insurance_deduction
+        return data
+
     def get(self, request):
         if not self._allowed(request): return Response({'error': 'فقط مدیر می‌تواند تنظیمات دستمزد استادان را ببیند'}, status=403)
         qs = TeacherCompensationSetting.objects.select_related('teacher').all()
         if request.query_params.get('teacher_id'): qs = qs.filter(teacher_id=request.query_params['teacher_id'])
-        return Response({'settings': [{'id': x.id, 'teacher_id': x.teacher_id, 'teacher_name': x.teacher.get_full_name(), 'session_price': x.session_price, 'thursday_multiplier': x.thursday_multiplier, 'friday_multiplier': x.friday_multiplier, 'insurance_deduction': x.insurance_deduction} for x in qs]})
+        return Response({'settings': [self._payload(x) for x in qs]})
 
     def post(self, request):
         if not self._allowed(request): return Response({'error': 'فقط مدیر می‌تواند تنظیمات دستمزد را تغییر دهد'}, status=403)
@@ -3128,10 +3141,99 @@ class TeacherCompensationSettingsView(APIView):
         teacher = get_user_model().objects.filter(pk=teacher_id, role__in=get_user_model().TEACHER_LIKE_ROLES).first()
         if not teacher: return Response({'error': 'استاد معتبر پیدا نشد'}, status=400)
         obj, _ = TeacherCompensationSetting.objects.get_or_create(teacher=teacher)
-        for field in ('session_price', 'thursday_multiplier', 'friday_multiplier', 'insurance_deduction', 'allowed_minutes_per_session', 'adjustment_per_minute'):
+        for field in self.SETTING_FIELDS:
             if field in request.data: setattr(obj, field, request.data[field])
         obj.save()
-        return Response({'id': obj.id, 'teacher_id': teacher.id, 'teacher_name': teacher.get_full_name(), 'session_price': obj.session_price, 'thursday_multiplier': obj.thursday_multiplier, 'friday_multiplier': obj.friday_multiplier, 'insurance_deduction': obj.insurance_deduction, 'allowed_minutes_per_session': obj.allowed_minutes_per_session, 'adjustment_per_minute': obj.adjustment_per_minute})
+        return Response(self._payload(obj))
+
+
+class TeacherCompensationReportView(APIView):
+    """فیش دستمزد استادان بر مبنای حضور واقعی QR — جمع دقیقه/مبلغ به تفکیک استاد، و به تفکیک استاد و درس (سطح)."""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        if not can_edit_menu(request.user, 'teacher-sessions'):
+            return Response({'error': 'فقط مدیر می‌تواند فیش دستمزد استادان را ببیند'}, status=403)
+        if TeacherSessionAttendance is None:
+            return Response({'term': None, 'totals': [], 'subject_totals': [], 'records': []})
+
+        term_id = request.query_params.get('term') or request.query_params.get('term_id')
+        term_key = str(term_id).lower() if term_id else 'all'
+        qs = TeacherSessionAttendance.objects.select_related('class_slot', 'teacher').all()
+        if term_key in ('', 'all'):
+            pass
+        elif term_key in {'legacy', 'unassigned', 'null'}:
+            qs = qs.filter(class_slot__term__isnull=True)
+        elif term_key.isdigit():
+            qs = qs.filter(class_slot__term_id=int(term_key))
+        else:
+            return Response({'error': 'ترم انتخاب‌شده معتبر نیست'}, status=400)
+
+        teacher_id = request.query_params.get('teacher_id') or request.query_params.get('teacher')
+        if teacher_id: qs = qs.filter(teacher_id=teacher_id)
+
+        records = [_teacher_attendance_data(x) for x in qs]
+
+        totals, subject_totals, teacher_terms, settings_cache = {}, {}, {}, {}
+        for row in records:
+            tkey = str(row['teacher'])
+            bucket = totals.setdefault(tkey, {
+                'teacher': row['teacher'], 'teacher_name': row['teacher_name'],
+                'class_count_set': set(), 'record_count': 0, 'minutes_worked': 0,
+                'shortage_minutes': 0, 'overtime_minutes': 0, 'gross_amount': 0,
+            })
+            bucket['class_count_set'].add(row['class_slot'])
+            bucket['record_count'] += 1
+            bucket['minutes_worked'] += row['minutes_worked']
+            bucket['shortage_minutes'] += row['shortage_minutes']
+            bucket['overtime_minutes'] += row['overtime_minutes']
+            bucket['gross_amount'] += row['gross_amount']
+            teacher_terms.setdefault(tkey, set()).add(row['term_id'])
+
+            skey = (tkey, row['level'] or 'بدون سطح')
+            sbucket = subject_totals.setdefault(skey, {
+                'teacher': row['teacher'], 'teacher_name': row['teacher_name'], 'level': row['level'] or 'بدون سطح',
+                'class_count_set': set(), 'record_count': 0, 'minutes_worked': 0, 'gross_amount': 0,
+            })
+            sbucket['class_count_set'].add(row['class_slot'])
+            sbucket['record_count'] += 1
+            sbucket['minutes_worked'] += row['minutes_worked']
+            sbucket['gross_amount'] += row['gross_amount']
+
+        def teacher_insurance(tkey):
+            if tkey not in settings_cache:
+                from django.contrib.auth import get_user_model
+                teacher = get_user_model().objects.filter(pk=tkey).first()
+                settings_cache[tkey] = getattr(teacher, 'teacher_compensation_setting', None) if teacher else None
+            setting = settings_cache[tkey]
+            if not setting:
+                return 0
+            terms_worked = teacher_terms.get(tkey, set())
+            term_count = max(1, len({t for t in terms_worked if t is not None})) if term_key == 'all' else 1
+            return setting.term_insurance_deduction * term_count
+
+        totals_list = []
+        for tkey, bucket in totals.items():
+            insurance = teacher_insurance(tkey)
+            gross = bucket['gross_amount']
+            totals_list.append({
+                'teacher': bucket['teacher'], 'teacher_name': bucket['teacher_name'],
+                'class_count': len(bucket['class_count_set']), 'record_count': bucket['record_count'],
+                'minutes_worked': bucket['minutes_worked'], 'shortage_minutes': bucket['shortage_minutes'],
+                'overtime_minutes': bucket['overtime_minutes'], 'gross_amount': gross,
+                'insurance_deduction': insurance, 'net_amount': max(0, gross - insurance),
+            })
+        totals_list.sort(key=lambda x: x['teacher_name'])
+
+        subject_totals_list = [{
+            'teacher': b['teacher'], 'teacher_name': b['teacher_name'], 'level': b['level'],
+            'class_count': len(b['class_count_set']), 'record_count': b['record_count'],
+            'minutes_worked': b['minutes_worked'], 'gross_amount': b['gross_amount'],
+            'net_amount': b['gross_amount'],
+        } for b in subject_totals.values()]
+        subject_totals_list.sort(key=lambda x: (x['teacher_name'], x['level']))
+
+        return Response({'term': term_id, 'totals': totals_list, 'subject_totals': subject_totals_list, 'records': records})
 
 
 class TeacherTermReportView(APIView):

@@ -20,6 +20,7 @@ from .views import (
     AdminOnlineCourseActionRequestListView, ApproveOnlineCourseActionRequestView, RejectOnlineCourseActionRequestView,
     TeacherTermReportView, TeacherSessionEventListCreateView, TeacherSessionEventDetailView,
     RoomQrManageView, TeacherQrAttendanceView, TeacherSessionAttendanceListView, TeacherCompensationSettingsView,
+    TeacherCompensationReportView,
 )
 
 urlpatterns = [
@@ -70,6 +71,7 @@ urlpatterns = [
     path('class-management/teacher-qr-attendance/', TeacherQrAttendanceView.as_view(), name='teacher_qr_attendance'),
     path('class-management/teacher-attendance-records/', TeacherSessionAttendanceListView.as_view(), name='teacher_attendance_records'),
     path('class-management/teacher-compensation-settings/', TeacherCompensationSettingsView.as_view(), name='teacher_compensation_settings'),
+    path('class-management/teacher-compensation-report/', TeacherCompensationReportView.as_view(), name='teacher_compensation_report'),
 
     # --- سایر دوره‌ها / کلاس‌های علمی (OnlineCourse) ---
     path('class-management/courses/', OnlineCourseListView.as_view(), name='online_course_list'),

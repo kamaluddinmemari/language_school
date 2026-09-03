@@ -770,3 +770,11 @@ class TeacherCompensationSetting(models.Model):
 
     def __str__(self):
         return f'تنظیم دستمزد {self.teacher.get_full_name()}'
+
+    @property
+    def term_insurance_deduction(self):
+        """کسری بیمهٔ سهم استاد برای یک ترم — یک‌بار بر مبنای مزد مبنای ماهانه محاسبه می‌شود، نه به ازای هر جلسه."""
+        if not self.insurance_base_monthly:
+            return 0
+        daily = float(self.insurance_base_monthly) / 30
+        return round(daily * int(self.insurance_days_per_term) * float(self.insurance_rate_percent) / 100)
