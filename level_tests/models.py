@@ -21,6 +21,9 @@ class StandardLevel(models.Model):
     age_group = models.CharField(max_length=10, choices=AgeGroup.choices)
     order = models.PositiveIntegerField(default=0, help_text='ترتیب نمایش داخل گروه سنی — همان ترتیب استاندارد پیشرفت سطح')
     is_terminal = models.BooleanField(default=False, help_text='سطح پایانی این رده — بعد از این سطح دانش‌آموز برای ترم بعد نیازمند تعیین سطح مجدد است. فقط یک سطح پایانی در هر رده معتبر است.')
+    book = models.CharField(max_length=50, blank=True, help_text='نام کتاب درسی این سطح، مثلاً «Supermind 2» یا «Project 1» یا «Evolve 3»')
+    midterm_units = models.CharField(max_length=100, blank=True, help_text='بازه‌ی یونیت‌های تحت پوشش میان‌ترم (جلسه ۸)، مثلاً «Units 1-4»')
+    final_units = models.CharField(max_length=100, blank=True, help_text='بازه‌ی یونیت‌های تحت پوشش پایان‌ترم (جلسه ۱۵)، مثلاً «Units 1-8»')
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:

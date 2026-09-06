@@ -18,6 +18,7 @@ urlpatterns = [
     path('api/', include('library.urls')),
     path('api/', include('leads.urls')),
     path('api/', include('class_management.urls')),
+    path('api/', include('grading.urls')),
     path('api/', include('payroll.urls')),
     path('api/', include('reports.urls')),
 ]

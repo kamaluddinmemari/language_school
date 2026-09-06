@@ -50,7 +50,7 @@ class StandardLevelSerializer(drf_serializers.ModelSerializer):
 
     class Meta:
         model = StandardLevel
-        fields = ['id', 'code', 'age_group', 'age_group_display', 'order', 'is_terminal', 'created_at']
+        fields = ['id', 'code', 'age_group', 'age_group_display', 'order', 'is_terminal', 'book', 'midterm_units', 'final_units', 'created_at']
         read_only_fields = ['id', 'created_at']
 
 

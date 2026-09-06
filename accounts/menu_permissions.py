@@ -29,6 +29,7 @@ MENU_ITEMS = [
     ('discounts', 'افراد دارای تخفیف', '/discounts'),
     ('class-management', 'مدیریت کلاس‌ها', '/class-management'),
     ('standard-levels', 'تعریف سطوح استاندارد (زیرمجموعه‌ی مدیریت کلاس‌ها)', '/class-management'),
+    ('grading', 'ثبت و ویرایش نمرات دانش‌آموزان (زیرمجموعه‌ی مدیریت کلاس‌ها)', '/class-management'),
     ('teacher-sessions', 'جلسات و ساب استادان', '/teacher-sessions'),
     ('payroll', 'حقوق و دستمزد', '/payroll'),
     ('leaves', 'مرخصی', '/leaves'),
@@ -44,7 +45,7 @@ EDIT_ENFORCED_MENUS = {
     'class-management', 'standard-levels', 'discounts', 'teacher-sessions',
     'group-classes', 'level-tests', 'teachers', 'students',
     'library', 'feedback', 'staff-messages',
-    'new-leads', 'followups', 'dropout-students',
+    'new-leads', 'followups', 'dropout-students', 'grading',
 }
 # منوهایی که فقط بُعد view واقعاً چک می‌شه (نه edit) — برای نشونه‌ی ⚡ جدا از بالا لازمه
 VIEW_ENFORCED_ONLY_MENUS = {'stats'}
@@ -89,6 +90,8 @@ _DEFAULT_EDIT_OVERRIDES = {
     'new-leads': {'office': True, 'evaluator': False, 'employee': False},
     'followups': {'office': True, 'evaluator': False, 'employee': False},
     'dropout-students': {'office': True, 'evaluator': False, 'employee': False},
+    # بخش نمرات: طبق تصمیم کارفرما کاملاً در اختیار کارشناس اداری و کارشناس آموزش است
+    'grading': {'office': True, 'evaluator': True, 'employee': False},
 }
 
 

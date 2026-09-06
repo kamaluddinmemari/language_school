@@ -307,16 +307,13 @@ def _location_types_compatible(source, target):
 
 
 def _swap_locations_compatible(source, target):
-    """تعویض محل فقط با یک کلاس دیگرِ همان ترم، روز و ساعت انجام می‌شود.
-
-    مقصد لازم نیست خالی باشد؛ چون در این عملیات، شمارهٔ محل دو کلاس با هم عوض
-    می‌شود و اطلاعات آموزشی، استاد و ثبت‌نام‌های هر دو رکورد حفظ می‌گردد.
-    """
+    """جابجایی فیزیکی فقط بین دو کلاس دقیقاً هم‌روز و هم‌ساعت انجام می‌شود."""
     return (
         source.term_id == target.term_id
         and source.number != target.number
         and source.day_type == target.day_type
         and source.time_slot == target.time_slot
+        and source.gender == target.gender
         and source.is_online == target.is_online
     )
 
@@ -340,7 +337,7 @@ class SwapClassLocationView(APIView):
                 if source.number < 1 or source.number > 11 or target.number < 1 or target.number > 11:
                     return Response({'error': 'شمارهٔ محل هر دو کلاس باید بین ۱ تا ۱۱ باشد'}, status=status.HTTP_400_BAD_REQUEST)
                 if not _swap_locations_compatible(source, target):
-                    return Response({'error': 'برای جابجایی، مقصد باید کلاس دیگری در همان روز و همان ساعتِ همان ترم و حالت برگزاری باشد؛ تفاوت جنسیت یا سطح مانع جابه‌جایی نیست'}, status=status.HTTP_400_BAD_REQUEST)
+                    return Response({'error': 'برای جابجایی، کلاس مقصد باید دقیقاً در همان روز، همان ساعت، همان ترم، با جنسیت و حالت برگزاری یکسان باشد'}, status=status.HTTP_400_BAD_REQUEST)
                 source_number, target_number = source.number, target.number
                 temporary_number = (ClassSlot.objects.order_by('-number').values_list('number', flat=True).first() or 0) + 1000000
                 source.number = temporary_number
@@ -1133,9 +1130,16 @@ class MyEnrollmentsView(APIView):
         if student.role != 'student':
             return Response({'error': 'این بخش فقط برای دانش‌آموزان است'}, status=status.HTTP_403_FORBIDDEN)
 
+        from grading.models import StudentGrade
         enrollments = ClassSlotEnrollment.objects.filter(student=student).select_related('class_slot', 'class_slot__term').order_by('-created_at')
+        grade_map = {
+            g.class_slot_id: g for g in StudentGrade.objects.filter(
+                student=student, class_slot_id__in=[e.class_slot_id for e in enrollments], is_finalized=True,
+            )
+        }
         return Response([{
             'id': e.id,
+            'class_slot_id': e.class_slot_id,
             'class_number': e.class_slot.number,
             'level': e.class_slot.assigned_level,
             'teacher_name': e.class_slot.teacher_name,
@@ -1155,6 +1159,9 @@ class MyEnrollmentsView(APIView):
             'self_enrolled': e.self_enrolled,
             'payment_verified': e.payment_verified,
             'created_at_jalali': e.created_at_jalali,
+            'grade_finalized': e.class_slot_id in grade_map,
+            'grade_is_fail': grade_map[e.class_slot_id].is_fail if e.class_slot_id in grade_map else False,
+            'grade_total_score': grade_map[e.class_slot_id].total_score if e.class_slot_id in grade_map else None,
         } for e in enrollments])
 
 
@@ -2690,6 +2697,17 @@ def _save_roster_attendance(slot, student_id, session_number, attendance_status,
     return attendance
 
 
+def _user_can_manage_roster(user, slot):
+    """ادمین با دسترسی مدیریت کلاس، یا استادِ همان کلاس، اجازهٔ ثبت حضور و غیاب رستر را دارد."""
+    from django.contrib.auth import get_user_model
+    User = get_user_model()
+    if can_edit_menu(user, 'class-management'):
+        return True
+    if user.role in User.TEACHER_LIKE_ROLES:
+        return slot.teacher_name.strip().casefold() == user.get_full_name().strip().casefold()
+    return False
+
+
 class RosterAttendanceView(APIView):
     """لیست ۲۰ سطری یک کلاس و ثبت حضور با تاریخ‌های از پیش محاسبه‌شدهٔ همان ترم."""
     permission_classes = [IsAuthenticated]
@@ -2698,21 +2716,22 @@ class RosterAttendanceView(APIView):
         return get_object_or_404(ClassSlot.objects.select_related('term'), pk=slot_id)
 
     def get(self, request):
-        if not can_edit_menu(request.user, 'class-management'):
-            return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         slot_id = request.query_params.get('class_slot')
         if not slot_id:
             return Response({'error': 'شناسه کلاس الزامی است'}, status=status.HTTP_400_BAD_REQUEST)
-        return Response(roster_attendance_payload(self._get_slot(slot_id)))
+        slot = self._get_slot(slot_id)
+        if not _user_can_manage_roster(request.user, slot):
+            return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
+        return Response(roster_attendance_payload(slot))
 
     def post(self, request):
-        if not can_edit_menu(request.user, 'class-management'):
-            return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         slot_id = request.data.get('class_slot')
         records = request.data.get('records')
         if not slot_id or not isinstance(records, list):
             return Response({'error': 'class_slot و فهرست records الزامی هستند'}, status=status.HTTP_400_BAD_REQUEST)
         slot = self._get_slot(slot_id)
+        if not _user_can_manage_roster(request.user, slot):
+            return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         try:
             with transaction.atomic():
                 for row in records:

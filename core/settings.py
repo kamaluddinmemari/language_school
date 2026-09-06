@@ -48,6 +48,7 @@ INSTALLED_APPS = [
     'library',
     'leads',
     'class_management',
+    'grading',
     'payroll',
     'reports',
     'django_jalali',
