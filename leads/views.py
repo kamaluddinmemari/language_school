@@ -150,6 +150,9 @@ class UnregisteredStudentListView(generics.ListCreateAPIView):
                 Q(term_id=term_id) |
                 (Q(term__in=earlier_terms) & ~Q(status=UnregisteredStudent.Status.REGISTERED))
             )
+        status_filter = self.request.query_params.get('status', '').strip()
+        if status_filter in (UnregisteredStudent.Status.TRACKING, UnregisteredStudent.Status.REGISTERED):
+            qs = qs.filter(status=status_filter)
         query = self.request.query_params.get('q', '').strip()
         if query:
             qs = qs.filter(Q(first_name__icontains=query) | Q(last_name__icontains=query) | Q(phone__icontains=query) | Q(national_code__icontains=query) | Q(class_level__icontains=query))
@@ -389,9 +392,12 @@ class DebtorListView(generics.ListCreateAPIView):
                 Q(term_id=term_id) |
                 (Q(term__in=earlier_terms) & ~Q(status=Debtor.Status.SETTLED))
             )
+        status_filter = self.request.query_params.get('status', '').strip()
+        if status_filter in (Debtor.Status.PENDING, Debtor.Status.SETTLED):
+            qs = qs.filter(status=status_filter)
         query = self.request.query_params.get('q', '').strip()
         if query:
-            qs = qs.filter(Q(first_name__icontains=query) | Q(last_name__icontains=query) | Q(phone__icontains=query) | Q(class_level__icontains=query))
+            qs = qs.filter(Q(first_name__icontains=query) | Q(last_name__icontains=query) | Q(phone__icontains=query) | Q(national_code__icontains=query) | Q(class_level__icontains=query))
         return qs
 
     def create(self, request, *args, **kwargs):

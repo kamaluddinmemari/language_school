@@ -222,6 +222,7 @@ class Debtor(models.Model):
     first_name = models.CharField(max_length=150)
     last_name = models.CharField(max_length=150)
     phone = models.CharField(max_length=20)
+    national_code = models.CharField(max_length=20, blank=True)
     identity_key = models.CharField(max_length=255, blank=True, default='', editable=False)
     class_level = models.CharField(max_length=50, blank=True)
     debt_amount = models.PositiveIntegerField()

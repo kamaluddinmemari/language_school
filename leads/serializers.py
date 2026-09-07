@@ -107,7 +107,7 @@ class DebtorSerializer(serializers.ModelSerializer):
     class Meta:
         model = Debtor
         fields = [
-            'id', 'first_name', 'last_name', 'phone', 'class_level', 'debt_amount', 'description',
+            'id', 'first_name', 'last_name', 'phone', 'national_code', 'class_level', 'debt_amount', 'description',
             'status', 'status_display', 'settled_at', 'settled_at_jalali',
             'followup_count', 'last_followup_at_jalali', 'followups',
             'term', 'term_title', 'created_at', 'created_at_jalali', 'updated_at',
