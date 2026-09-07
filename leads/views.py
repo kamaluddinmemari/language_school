@@ -150,6 +150,9 @@ class UnregisteredStudentListView(generics.ListCreateAPIView):
                 Q(term_id=term_id) |
                 (Q(term__in=earlier_terms) & ~Q(status=UnregisteredStudent.Status.REGISTERED))
             )
+        query = self.request.query_params.get('q', '').strip()
+        if query:
+            qs = qs.filter(Q(first_name__icontains=query) | Q(last_name__icontains=query) | Q(phone__icontains=query) | Q(national_code__icontains=query) | Q(class_level__icontains=query))
         return qs
 
     def create(self, request, *args, **kwargs):
@@ -386,6 +389,9 @@ class DebtorListView(generics.ListCreateAPIView):
                 Q(term_id=term_id) |
                 (Q(term__in=earlier_terms) & ~Q(status=Debtor.Status.SETTLED))
             )
+        query = self.request.query_params.get('q', '').strip()
+        if query:
+            qs = qs.filter(Q(first_name__icontains=query) | Q(last_name__icontains=query) | Q(phone__icontains=query) | Q(class_level__icontains=query))
         return qs
 
     def create(self, request, *args, **kwargs):
