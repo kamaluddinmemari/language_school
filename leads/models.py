@@ -143,6 +143,10 @@ class UnregisteredStudent(models.Model):
         'class_management.Term', on_delete=models.SET_NULL, null=True, blank=True, related_name='+',
         help_text='ترمی که این فرد در آن ثبت شده — برای فیلتر ترمی در صفحه‌ی پیگیری',
     )
+    class_slot = models.ForeignKey(
+        'class_management.ClassSlot', on_delete=models.SET_NULL, null=True, blank=True, related_name='unregistered_students',
+        help_text='کلاسی که این فرد در آن خارج از فهرست رسمی گزارش شده است',
+    )
 
     submitted_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='submitted_unregistered_students')
     created_at = models.DateTimeField(auto_now_add=True)

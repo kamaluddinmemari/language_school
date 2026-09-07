@@ -59,6 +59,11 @@ class UnregisteredStudentSerializer(serializers.ModelSerializer):
     submitted_by_name = serializers.SerializerMethodField()
     followups = UnregisteredFollowupSerializer(many=True, read_only=True)
     term_title = serializers.ReadOnlyField()
+    class_slot_number = serializers.IntegerField(source='class_slot.number', read_only=True)
+    class_slot_teacher = serializers.CharField(source='class_slot.teacher_name', read_only=True, allow_null=True)
+    class_slot_day = serializers.CharField(source='class_slot.day_type_display', read_only=True, allow_null=True)
+    class_slot_time = serializers.CharField(source='class_slot.time_slot', read_only=True, allow_null=True)
+    class_slot_level = serializers.CharField(source='class_slot.assigned_level', read_only=True, allow_null=True)
 
     class Meta:
         model = UnregisteredStudent
@@ -66,7 +71,7 @@ class UnregisteredStudentSerializer(serializers.ModelSerializer):
             'id', 'first_name', 'last_name', 'class_level', 'national_code', 'phone', 'tuition_price',
             'status', 'status_display', 'registered_at', 'registered_at_jalali',
             'followup_count', 'last_followup_at_jalali', 'latest_level', 'followups',
-            'submitted_by_name', 'term', 'term_title', 'created_at', 'created_at_jalali', 'updated_at',
+            'submitted_by_name', 'term', 'term_title', 'class_slot', 'class_slot_number', 'class_slot_teacher', 'class_slot_day', 'class_slot_time', 'class_slot_level', 'created_at', 'created_at_jalali', 'updated_at',
         ]
         read_only_fields = ['status', 'registered_at', 'created_at', 'updated_at']
 

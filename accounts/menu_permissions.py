@@ -61,7 +61,9 @@ _OFFICE_VIEW_EXCEPTIONS = {'standard-levels'}
 _DEFAULT_VIEW = {
     'office': {key: (key not in _OFFICE_VIEW_EXCEPTIONS) for key, _, _ in MENU_ITEMS},
     'evaluator': {key: (key not in _EVALUATOR_BLOCKED) for key, _, _ in MENU_ITEMS},
-    'employee': {key: False for key, _, _ in MENU_ITEMS},
+    # کارمند اداری در اپ موبایل همان عملیات اجرایی کارشناس اداری را انجام می‌دهد؛
+    # محدودیت فیش حقوقی شخصی در endpointهای payroll اعمال می‌شود.
+    'employee': {key: (key not in {'standard-levels'}) for key, _, _ in MENU_ITEMS},
 }
 
 # پیش‌فرض‌های edit — برای منوهای سیم‌کشی‌شده، دقیقاً همون چیزیه که ثابت‌های قدیمیِ کد
@@ -69,29 +71,29 @@ _DEFAULT_VIEW = {
 # هیچ‌کس عوض نشه. برای بقیه‌ی منوها، فعلاً همون مقدار view رو mirror می‌کنه (چون هنوز
 # هیچ‌جا چک نمی‌شه، این مقدار صرفاً پیش‌فرض معقول برای روزی‌ست که آن منو هم سیم‌کشی بشه).
 _DEFAULT_EDIT_OVERRIDES = {
-    'class-management': {'office': True, 'evaluator': True, 'employee': False},   # = MANAGE_ROLES سابق
+    'class-management': {'office': True, 'evaluator': True, 'employee': True},   # = MANAGE_ROLES سابق
     'standard-levels': {'office': False, 'evaluator': True, 'employee': False},   # = MANAGE_LEVEL_ROLES سابق
-    'discounts': {'office': True, 'evaluator': True, 'employee': False},          # = MANAGE_ROLES سابق (همون فایل)
-    'teacher-sessions': {'office': True, 'evaluator': True, 'employee': False},   # = MANAGE_ROLES سابق (همون فایل)
+    'discounts': {'office': True, 'evaluator': True, 'employee': True},          # = MANAGE_ROLES سابق (همون فایل)
+    'teacher-sessions': {'office': True, 'evaluator': True, 'employee': True},   # = MANAGE_ROLES سابق (همون فایل)
     # قبلاً ساخت جلسه فقط برای (admin,office) بود و ویرایش/حذف فقط برای (admin,evaluator)؛
     # این دو تا یکی شدن (اجتماع هردو مجموعه) تا کسی نسبت به قبل چیزی از دست نده — یعنی حالا
     # اگه edit این منو برای یک نقش فعال باشه، هم ساخت هم ویرایش/حذف براش باز می‌شه.
-    'group-classes': {'office': True, 'evaluator': True, 'employee': False},
+    'group-classes': {'office': True, 'evaluator': True, 'employee': True},
     # قبلاً: ثبت داوطلب جدید فقط (admin,office)، ویرایش (admin,evaluator,office)، حذف و
     # تنظیم قیمت فقط (admin,evaluator) — اجتماع همه‌شون گرفته شد.
-    'level-tests': {'office': True, 'evaluator': True, 'employee': False},
+    'level-tests': {'office': True, 'evaluator': True, 'employee': True},
     # این دو رو کارشناس آموزش قبلاً اصلاً حتی نمی‌دید (رفتار حفظ شد، چون در _EVALUATOR_BLOCKED هست)
     'teachers': {'office': True, 'evaluator': False, 'employee': False},
     'students': {'office': True, 'evaluator': False, 'employee': False},
-    'library': {'office': True, 'evaluator': True, 'employee': False},
-    'feedback': {'office': True, 'evaluator': True, 'employee': False},
+    'library': {'office': True, 'evaluator': True, 'employee': True},
+    'feedback': {'office': True, 'evaluator': True, 'employee': True},
     'staff-messages': {'office': True, 'evaluator': False, 'employee': False},
     # این سه تا (اپ leads) قبلاً فقط (admin,office) بودن، کارشناس آموزش اصلاً توشون نبود
-    'new-leads': {'office': True, 'evaluator': False, 'employee': False},
-    'followups': {'office': True, 'evaluator': False, 'employee': False},
-    'dropout-students': {'office': True, 'evaluator': False, 'employee': False},
+    'new-leads': {'office': True, 'evaluator': False, 'employee': True},
+    'followups': {'office': True, 'evaluator': False, 'employee': True},
+    'dropout-students': {'office': True, 'evaluator': False, 'employee': True},
     # بخش نمرات: طبق تصمیم کارفرما کاملاً در اختیار کارشناس اداری و کارشناس آموزش است
-    'grading': {'office': True, 'evaluator': True, 'employee': False},
+    'grading': {'office': True, 'evaluator': True, 'employee': True},
 }
 
 

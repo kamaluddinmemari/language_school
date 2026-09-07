@@ -156,10 +156,17 @@ class UnregisteredStudentListView(generics.ListCreateAPIView):
         from accounts.models import User
         from accounts.services import sync_student_from_lead
         from .models import get_current_term
-        if request.user.role not in User.TEACHER_LIKE_ROLES and request.user.role not in ('admin', 'office'):
-            return Response({'error': 'فقط استاد یا مدیر می‌تواند ثبت کند'}, status=status.HTTP_403_FORBIDDEN)
+        if request.user.role not in User.TEACHER_LIKE_ROLES and request.user.role not in ('admin', 'office', 'employee'):
+            return Response({'error': 'فقط استاد یا کاربر اداری می‌تواند ثبت کند'}, status=status.HTTP_403_FORBIDDEN)
         data = request.data.copy()
         confirmed = str(data.pop('confirm_new_term', '')).lower() in ('1', 'true', 'yes')
+        class_slot_id = data.get('class_slot')
+        if class_slot_id:
+            from class_management.models import ClassSlot
+            class_slot = ClassSlot.objects.filter(pk=class_slot_id).select_related('term').first()
+            if not class_slot:
+                return Response({'error': 'کلاس انتخاب‌شده پیدا نشد'}, status=status.HTTP_404_NOT_FOUND)
+            data['term'] = class_slot.term_id
         term = data.get('term') or get_current_term()
         data['term'] = getattr(term, 'pk', term) if term else None
         identity = build_identity_key(data.get('national_code'), data.get('phone'), data.get('first_name'), data.get('last_name'), data.get('class_level'))

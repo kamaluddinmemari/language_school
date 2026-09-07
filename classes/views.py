@@ -28,7 +28,7 @@ class PendingPrivateClassRequestsView(generics.ListAPIView):
     serializer_class = ClassRequestAdminSerializer
 
     def get_queryset(self):
-        if self.request.user.role not in ('admin', 'evaluator', 'office'):
+        if self.request.user.role not in ('admin', 'evaluator', 'office', 'employee'):
             return ClassRequest.objects.none()
         return ClassRequest.objects.filter(
             class_type=ClassRequest.ClassType.PRIVATE,
@@ -42,7 +42,7 @@ class MarkClassRequestsSeenView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
-        if request.user.role not in ('admin', 'evaluator', 'office'):
+        if request.user.role not in ('admin', 'evaluator', 'office', 'employee'):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         ids = request.data.get('ids') or []
         ClassRequest.objects.filter(id__in=ids).update(seen_by_admin=True)
@@ -54,10 +54,10 @@ class ClassRequestListCreateView(generics.ListCreateAPIView):
 
     def get_serializer_class(self):
         if self.request.method == 'POST':
-            if self.request.user.role in ('admin', 'office'):
+            if self.request.user.role in ('admin', 'office', 'employee'):
                 return ClassRequestAdminCreateSerializer
             return ClassRequestCreateSerializer
-        if self.request.user.role in ('admin', 'evaluator', 'office'):
+        if self.request.user.role in ('admin', 'evaluator', 'office', 'employee'):
             return ClassRequestAdminSerializer
         if self.request.user.role in User.TEACHER_LIKE_ROLES:
             return ClassRequestTeacherSerializer
@@ -65,7 +65,7 @@ class ClassRequestListCreateView(generics.ListCreateAPIView):
 
     def get_queryset(self):
         user = self.request.user
-        if user.role in ('admin', 'evaluator', 'office'):
+        if user.role in ('admin', 'evaluator', 'office', 'employee'):
             return ClassRequest.objects.all().order_by('-created_at')
         elif user.role in User.TEACHER_LIKE_ROLES:
             from django.db.models import Q
@@ -77,7 +77,7 @@ class ClassRequestListCreateView(generics.ListCreateAPIView):
     def perform_create(self, serializer):
         if self.request.user.role == 'evaluator':
             raise PermissionDenied('مدیر آموزش نمی‌تواند درخواست کلاس بسازد — فقط گزارش‌گیری/ویرایش/حذف')
-        if self.request.user.role in ('admin', 'office'):
+        if self.request.user.role in ('admin', 'office', 'employee'):
             serializer.save()
         else:
             instance = serializer.save(student=self.request.user)
@@ -108,7 +108,7 @@ class ClassRequestDetailView(generics.RetrieveUpdateDestroyAPIView):
 
     def get_queryset(self):
         user = self.request.user
-        if user.role in ('admin', 'evaluator', 'office'):
+        if user.role in ('admin', 'evaluator', 'office', 'employee'):
             return ClassRequest.objects.all()
         elif user.role in User.TEACHER_LIKE_ROLES:
             from django.db.models import Q

@@ -40,7 +40,7 @@ from .attendance import DEFAULT_SESSION_COUNT, jalali_date, roster_attendance_pa
 
 # منسوخ — از تنظیمات دسترسی (accounts.menu_permissions.can_edit_menu) جایگزین شد.
 # فقط برای مرجع/سازگاری با کد قدیمی نگه داشته شده؛ جایی از این فایل استفاده نمی‌شود.
-MANAGE_ROLES = ('admin', 'evaluator', 'office')
+MANAGE_ROLES = ('admin', 'evaluator', 'office', 'employee')
 
 
 def _next_level_for_carryover(level_code, terminal_levels=None):
