@@ -2,6 +2,7 @@
 from datetime import timedelta
 
 import jdatetime
+from django.utils import timezone
 
 from .models import ClassAttendance, ClassSlotEnrollment, TeacherSessionEvent
 
@@ -109,6 +110,9 @@ def roster_attendance_payload(slot, session_count=DEFAULT_SESSION_COUNT):
             'absence' if event.event_type == TeacherSessionEvent.EventType.ABSENCE else
             'makeup'
         )
+    for item in sessions:
+        item['event_status'] = event_status_by_session.get((item['session_number'], item['date']), '')
+        item['is_past'] = item['date'] < timezone.localdate().isoformat()
     enrolled = list(
         ClassSlotEnrollment.objects.filter(class_slot=slot, payment_verified=True)
         .select_related('student')
