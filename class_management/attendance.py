@@ -3,7 +3,7 @@ from datetime import timedelta
 
 import jdatetime
 
-from .models import ClassAttendance, ClassSlotEnrollment
+from .models import ClassAttendance, ClassSlotEnrollment, TeacherSessionEvent
 
 
 DEFAULT_SESSION_COUNT = 15
@@ -98,6 +98,17 @@ def roster_attendance_payload(slot, session_count=DEFAULT_SESSION_COUNT):
     """متادیتای کلاس، تاریخ جلسات و رستر ثبت‌نام‌های تأییدشده را برمی‌گرداند."""
     sessions = session_dates_payload(slot, session_count=session_count)
     session_number_by_date = {item['date']: item['session_number'] for item in sessions}
+    event_status_by_session = {}
+    for event in TeacherSessionEvent.objects.filter(
+        class_slot=slot,
+        status=TeacherSessionEvent.ApprovalStatus.APPROVED,
+        class_date__in=[item['date'] for item in sessions],
+    ):
+        event_status_by_session[(event.session_number, event.class_date.isoformat())] = (
+            'substitution' if event.event_type == TeacherSessionEvent.EventType.SUBSTITUTION else
+            'absence' if event.event_type == TeacherSessionEvent.EventType.ABSENCE else
+            'makeup'
+        )
     enrolled = list(
         ClassSlotEnrollment.objects.filter(class_slot=slot, payment_verified=True)
         .select_related('student')
@@ -124,6 +135,7 @@ def roster_attendance_payload(slot, session_count=DEFAULT_SESSION_COUNT):
                 'date': item['date'],
                 'date_jalali': item['date_jalali'],
                 'status': attendance_status(record) if record else 'unmarked',
+                'event_status': event_status_by_session.get((item['session_number'], item['date']), ''),
                 'note': record.note if record else '',
             })
         roster.append({
