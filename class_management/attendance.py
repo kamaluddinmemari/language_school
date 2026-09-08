@@ -70,6 +70,24 @@ def session_dates_for_slot(slot, session_count=DEFAULT_SESSION_COUNT):
     return dates
 
 
+def attendance_session_dates_for_slot(slot, session_count=DEFAULT_SESSION_COUNT):
+    """تقویم مورد استفاده در لیست کلاسی ادمین و حضور و غیاب.
+
+    کلاس‌های یک‌روزدرهفته در پنل ادمین سه جلسه متوالی در همان تاریخ دارند؛
+    بنابراین endpoint اپ نیز باید دقیقاً همان شماره جلسه و همان تاریخ را بدهد.
+    """
+    dates = session_dates_for_slot(slot, session_count=session_count)
+    one_day_types = {'thursday_morning', 'thursday_evening', 'friday'}
+    if slot.day_type not in one_day_types:
+        return dates
+    expanded = []
+    for date_value in dates:
+        expanded.extend([date_value, date_value, date_value])
+        if len(expanded) >= session_count:
+            break
+    return expanded[:session_count]
+
+
 def jalali_date(date_value):
     """نمایش تاریخ میلادیِ ذخیره‌شده به قالب شمسی ثابت برای پنل و چاپ."""
     return jdatetime.date.fromgregorian(date=date_value).strftime('%Y/%m/%d') if date_value else ''
@@ -77,7 +95,7 @@ def jalali_date(date_value):
 
 def session_dates_payload(slot, session_count=DEFAULT_SESSION_COUNT):
     """دادهٔ استاندارد تاریخ جلسه برای API."""
-    dates = session_dates_for_slot(slot, session_count=session_count)
+    dates = attendance_session_dates_for_slot(slot, session_count=session_count)
     return [
         {
             'session_number': index,
