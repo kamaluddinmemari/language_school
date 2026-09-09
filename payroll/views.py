@@ -6,7 +6,7 @@ from django.utils import timezone
 from django.contrib.auth import get_user_model
 from django.db.models import Q
 
-from .models import EmployeeProfile, SalaryProfile, MonthlyPayroll, LeaveBalance, LeaveRequest, AttendanceLog, OfficialHoliday, HolidayWorkAssignment
+from .models import EmployeeProfile, SalaryProfile, MonthlyPayroll, LeaveBalance, LeaveRequest, AttendanceLog, OfficialHoliday, HolidayWorkAssignment, OfficeQrToken
 from .serializers import (
     EmployeeProfileSerializer, SalaryProfileSerializer, MonthlyPayrollSerializer,
     LeaveBalanceSerializer, LeaveRequestSerializer, AttendanceLogSerializer, OfficialHolidaySerializer, HolidayWorkAssignmentSerializer,
@@ -336,6 +336,55 @@ class CheckOutView(APIView):
         log.check_out = timezone.now()
         log.save(update_fields=['check_out', 'updated_at'])
         return Response(AttendanceLogSerializer(log).data)
+
+
+class OfficeQrGenerateView(APIView):
+    """مدیر QR محل ورود/خروج کارکنان را تولید یا چرخش می‌دهد."""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        if not is_admin(request.user):
+            return Response({'error': 'فقط مدیر می‌تواند QR اداری تولید کند'}, status=status.HTTP_403_FORBIDDEN)
+        token = OfficeQrToken.objects.filter(is_active=True).order_by('-created_at').first()
+        if token:
+            token.rotate()
+        else:
+            token = OfficeQrToken.objects.create()
+        return Response({
+            'qr_token': str(token.token),
+            'payload': f'LSCHOOL-OFFICE:{token.token}',
+            'is_active': token.is_active,
+            'created_at': token.created_at,
+        })
+
+
+class OfficeQrAttendanceView(APIView):
+    """اسکن QR دقیقاً همان CheckInView/CheckOutView را اجرا می‌کند؛ مرخصی همان‌جا مسدود می‌شود."""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        raw = str(request.data.get('qr_token') or '').strip()
+        parts = raw.split(':')
+        token = parts[-1] if len(parts) == 2 and parts[0] == 'LSCHOOL-OFFICE' else raw
+        if not OfficeQrToken.objects.filter(token=token, is_active=True).exists():
+            return Response({'error': 'QR اداری نامعتبر یا غیرفعال است'}, status=status.HTTP_400_BAD_REQUEST)
+        action = request.data.get('action')
+        today = timezone.localtime(timezone.now()).date()
+        leave = approved_daily_leave(request.user.id, today)
+        if leave:
+            return Response({
+                'error': 'کارمند در مرخصی می‌باشد',
+                'on_leave': True,
+                'leave_shift': getattr(leave, 'leave_shift', 'full_day'),
+                'leave_credited_hours': getattr(leave, 'credited_hours_label', ''),
+            }, status=status.HTTP_400_BAD_REQUEST)
+        if action == 'check_in':
+            response = CheckInView().post(request)
+        elif action == 'check_out':
+            response = CheckOutView().post(request)
+        else:
+            return Response({'error': 'عملیات ورود یا خروج معتبر نیست'}, status=status.HTTP_400_BAD_REQUEST)
+        return response
 
 
 class AttendanceLogListCreateView(AdminEditOwnViewMixin, generics.ListCreateAPIView):

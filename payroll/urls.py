@@ -6,7 +6,7 @@ from .views import (
     LeaveBalanceListCreateView, LeaveBalanceDetailView,
     LeaveRequestListCreateView, LeaveRequestDetailView, LeaveRequestDecideView,
     MyAttendanceTodayView, CheckInView, CheckOutView,
-    AttendanceLogListCreateView, AttendanceLogDetailView, AttendanceSummaryView,
+    AttendanceLogListCreateView, AttendanceLogDetailView, AttendanceSummaryView, OfficeQrGenerateView, OfficeQrAttendanceView,
     OfficialHolidayListCreateView, OfficialHolidayDetailView, HolidayWorkAssignmentListCreateView, HolidayWorkAssignmentDetailView,
 )
 
@@ -35,6 +35,8 @@ urlpatterns = [
     path('attendance/', AttendanceLogListCreateView.as_view(), name='attendance_list'),
     path('attendance/<int:pk>/', AttendanceLogDetailView.as_view(), name='attendance_detail'),
     path('attendance/summary/', AttendanceSummaryView.as_view(), name='attendance_summary'),
+    path('attendance/office-qr/generate/', OfficeQrGenerateView.as_view(), name='office_qr_generate'),
+    path('attendance/office-qr/', OfficeQrAttendanceView.as_view(), name='office_qr_attendance'),
 
     path('official-holidays/', OfficialHolidayListCreateView.as_view(), name='official_holiday_list'),
     path('official-holidays/<int:pk>/', OfficialHolidayDetailView.as_view(), name='official_holiday_detail'),

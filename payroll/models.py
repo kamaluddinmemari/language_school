@@ -2,6 +2,7 @@ from django.conf import settings
 from django.db import models
 from django.utils import timezone
 import jdatetime
+import uuid
 
 PERSIAN_MONTHS = ['فروردین', 'اردیبهشت', 'خرداد', 'تیر', 'مرداد', 'شهریور',
                    'مهر', 'آبان', 'آذر', 'دی', 'بهمن', 'اسفند']
@@ -578,6 +579,24 @@ class AttendanceLog(models.Model):
 
     def __str__(self):
         return f"حضور {self.user.get_full_name()} — {self.date_jalali}"
+
+
+class OfficeQrToken(models.Model):
+    """توکن فعال QR محل ورود و خروج کارکنان اداری؛ با تولید QR جدید قبلی غیرفعال می‌شود."""
+    token = models.UUIDField(default=uuid.uuid4, unique=True, editable=False)
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-created_at']
+
+    def rotate(self):
+        self.token = uuid.uuid4()
+        self.save(update_fields=['token', 'updated_at'])
+
+    def __str__(self):
+        return f'QR ورود و خروج اداری — {self.created_at:%Y-%m-%d %H:%M}'
 
 
 class LeaveBalance(models.Model):
