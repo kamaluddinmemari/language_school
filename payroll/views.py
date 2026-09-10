@@ -310,15 +310,17 @@ class CheckInView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
+        method = getattr(request, '_attendance_method', 'manual')
         today = timezone.localtime(timezone.now()).date()
         leave = approved_daily_leave(request.user.id, today)
         if leave:
             return Response({'error': 'کارمند در مرخصی می‌باشد', 'on_leave': True, 'leave_shift': getattr(leave, 'leave_shift', 'full_day'), 'leave_credited_hours': getattr(leave, 'credited_hours_label', ''),}, status=status.HTTP_400_BAD_REQUEST)
         log, created = AttendanceLog.objects.get_or_create(user=request.user, date=today)
         if log.check_in:
-            return Response({'error': f'شما امروز ساعت {log.check_in_time_jalali} ورودتان ثبت شده — هر روز فقط یک‌بار قابل ثبت است'}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({'error': f'شما قبلاً امروز ساعت {log.check_in_time_jalali} ورودتان را با {log.check_in_method_label or "دکمه"} ثبت کرده‌اید — هر روز فقط یک‌بار قابل ثبت است'}, status=status.HTTP_400_BAD_REQUEST)
         log.check_in = timezone.now()
-        log.save(update_fields=['check_in', 'updated_at'])
+        log.check_in_method = method
+        log.save(update_fields=['check_in', 'check_in_method', 'updated_at'])
         return Response(AttendanceLogSerializer(log).data, status=status.HTTP_201_CREATED)
 
 
@@ -327,14 +329,16 @@ class CheckOutView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
+        method = getattr(request, '_attendance_method', 'manual')
         today = timezone.localtime(timezone.now()).date()
         log = AttendanceLog.objects.filter(user=request.user, date=today).first()
         if not log or not log.check_in:
             return Response({'error': 'اول باید ورودتان را ثبت کنید'}, status=status.HTTP_400_BAD_REQUEST)
         if log.check_out:
-            return Response({'error': f'شما امروز ساعت {log.check_out_time_jalali} خروجتان ثبت شده — هر روز فقط یک‌بار قابل ثبت است'}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({'error': f'شما قبلاً امروز ساعت {log.check_out_time_jalali} خروجتان را با {log.check_out_method_label or "دکمه"} ثبت کرده‌اید — هر روز فقط یک‌بار قابل ثبت است'}, status=status.HTTP_400_BAD_REQUEST)
         log.check_out = timezone.now()
-        log.save(update_fields=['check_out', 'updated_at'])
+        log.check_out_method = method
+        log.save(update_fields=['check_out', 'check_out_method', 'updated_at'])
         return Response(AttendanceLogSerializer(log).data)
 
 
@@ -407,6 +411,7 @@ class OfficeQrAttendanceView(APIView):
                 'leave_shift': getattr(leave, 'leave_shift', 'full_day'),
                 'leave_credited_hours': getattr(leave, 'credited_hours_label', ''),
             }, status=status.HTTP_400_BAD_REQUEST)
+        request._attendance_method = 'qr'
         if action == 'check_in':
             response = CheckInView().post(request)
         elif action == 'check_out':

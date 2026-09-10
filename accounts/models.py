@@ -117,6 +117,43 @@ class AttendanceAccessSettings(models.Model):
         return 'تنظیمات دسترسی ثبت حضور و غیاب با QR'
 
 
+class AppAccessSettings(models.Model):
+    """
+    کلید خاموش/روشن سراسریِ مدیر برای کل اپ موبایل — جداگانه برای هرکدام از سه سطح:
+    اپ استاد (teacher/evaluator)، اپ دانش‌آموز (student)، اپ اداری (office/employee).
+    غیرفعال‌کردن هرکدام، هم جلوی ورود (لاگین) کاربران آن سطح را در همان لحظه می‌گیرد
+    (در TrackedTokenObtainPairSerializer چک می‌شود) و هم کاربرانی که از قبل لاگین بودند،
+    با باز کردن مجدد اپ (صفحه‌ی خانه) بیرون انداخته می‌شوند. نقش مدیر هرگز مسدود نمی‌شود.
+    """
+    key = models.CharField(max_length=32, unique=True, default='default')
+    teacher_app_enabled = models.BooleanField(default=True, help_text='اپ استاد (teacher و evaluator)')
+    student_app_enabled = models.BooleanField(default=True, help_text='اپ دانش‌آموز')
+    office_app_enabled = models.BooleanField(default=True, help_text='اپ اداری (office و employee)')
+    updated_at = models.DateTimeField(auto_now=True)
+    updated_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='app_access_updates')
+
+    @classmethod
+    def get_current(cls):
+        obj, _ = cls.objects.get_or_create(key='default')
+        return obj
+
+    @classmethod
+    def is_role_enabled(cls, role):
+        obj = cls.get_current()
+        if role == 'admin':
+            return True
+        if role in ('teacher', 'evaluator'):
+            return obj.teacher_app_enabled
+        if role == 'student':
+            return obj.student_app_enabled
+        if role in ('office', 'employee'):
+            return obj.office_app_enabled
+        return True
+
+    def __str__(self):
+        return 'تنظیمات فعال/غیرفعال‌بودن اپ (استاد/دانش‌آموز/اداری)'
+
+
 class PriceSetting(models.Model):
     one_hour_price = models.PositiveIntegerField(default=400000)
     one_half_hour_price = models.PositiveIntegerField(default=550000)

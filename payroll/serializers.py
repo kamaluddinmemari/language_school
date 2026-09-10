@@ -100,6 +100,8 @@ class AttendanceLogSerializer(serializers.ModelSerializer):
     date_jalali = serializers.ReadOnlyField()
     check_in_time_jalali = serializers.ReadOnlyField()
     check_out_time_jalali = serializers.ReadOnlyField()
+    check_in_method_label = serializers.ReadOnlyField()
+    check_out_method_label = serializers.ReadOnlyField()
     worked_hours = serializers.ReadOnlyField()
     user_full_name = serializers.SerializerMethodField()
 
@@ -107,7 +109,8 @@ class AttendanceLogSerializer(serializers.ModelSerializer):
         model = AttendanceLog
         fields = [
             'id', 'user', 'user_full_name', 'date', 'date_jalali', 'check_in', 'check_out',
-            'check_in_time_jalali', 'check_out_time_jalali', 'worked_hours', 'edited_by_admin',
+            'check_in_time_jalali', 'check_out_time_jalali', 'check_in_method', 'check_out_method',
+            'check_in_method_label', 'check_out_method_label', 'worked_hours', 'edited_by_admin',
             'created_at', 'updated_at',
         ]
         read_only_fields = ['id', 'created_at', 'updated_at']

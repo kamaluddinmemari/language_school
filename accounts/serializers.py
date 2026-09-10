@@ -1,7 +1,7 @@
 from rest_framework import serializers
 from django.contrib.auth.password_validation import validate_password
 from django.db import IntegrityError
-from .models import User, PriceSetting, AppearanceSettings, AttendanceAccessSettings
+from .models import User, PriceSetting, AppearanceSettings, AttendanceAccessSettings, AppAccessSettings
 from .validators import username_validator, password_validator
 
 
@@ -181,6 +181,13 @@ class AttendanceAccessSettingsSerializer(serializers.ModelSerializer):
     class Meta:
         model = AttendanceAccessSettings
         fields = ['id', 'key', 'office_attendance_enabled', 'teacher_attendance_enabled', 'updated_at']
+        read_only_fields = ['id', 'key', 'updated_at']
+
+
+class AppAccessSettingsSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = AppAccessSettings
+        fields = ['id', 'key', 'teacher_app_enabled', 'student_app_enabled', 'office_app_enabled', 'updated_at']
         read_only_fields = ['id', 'key', 'updated_at']
 
 

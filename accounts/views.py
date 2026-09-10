@@ -13,7 +13,7 @@ try:
     import openpyxl
 except ImportError:
     openpyxl = None
-from .models import User, OTPCode, PriceSetting, AppearanceSettings, MenuPermission, AttendanceAccessSettings
+from .models import User, OTPCode, PriceSetting, AppearanceSettings, MenuPermission, AttendanceAccessSettings, AppAccessSettings
 from .menu_permissions import MENU_ITEMS, MENU_KEYS, CONFIGURABLE_ROLES, EDIT_ENFORCED_MENUS, VIEW_ENFORCED_ONLY_MENUS, get_effective_permissions, get_all_effective_permissions, can_edit_menu, can_view_menu
 import string
 from .serializers import (
@@ -27,7 +27,8 @@ from .serializers import (
     StudentSerializer,
     UserRoleSerializer,
     AppearanceSettingsSerializer,
-    AttendanceAccessSettingsSerializer
+    AttendanceAccessSettingsSerializer,
+    AppAccessSettingsSerializer
 )
 
 
@@ -240,6 +241,27 @@ class AttendanceAccessSettingsView(APIView):
         serializer.is_valid(raise_exception=True)
         obj = serializer.save(updated_by=request.user)
         return Response(AttendanceAccessSettingsSerializer(obj).data)
+
+
+class AppAccessSettingsView(APIView):
+    """
+    GET: هر کاربر لاگین‌شده می‌خواند — اپ موبایل هنگام باز شدن صفحه‌ی خانه چک می‌کند که آیا
+    نقش خودش هنوز فعال است یا نه (برای بیرون‌انداختن کاربرانی که از قبل لاگین بودند).
+    PATCH: فقط مدیر، از صفحه‌ی «تنظیمات دسترسی» — کلید خاموش/روشن کل اپ استاد/دانش‌آموز/اداری.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        return Response(AppAccessSettingsSerializer(AppAccessSettings.get_current()).data)
+
+    def patch(self, request):
+        if request.user.role != 'admin':
+            return Response({'error': 'فقط مدیر می‌تواند این تنظیمات را تغییر دهد'}, status=status.HTTP_403_FORBIDDEN)
+        obj = AppAccessSettings.get_current()
+        serializer = AppAccessSettingsSerializer(obj, data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        obj = serializer.save(updated_by=request.user)
+        return Response(AppAccessSettingsSerializer(obj).data)
 
 
 class PriceSettingView(APIView):

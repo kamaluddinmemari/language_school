@@ -546,6 +546,9 @@ class AttendanceLog(models.Model):
     date = models.DateField(help_text='تاریخ (میلادی ذخیره می‌شود) — روزی که این ثبت مربوط به آن است')
     check_in = models.DateTimeField(null=True, blank=True)
     check_out = models.DateTimeField(null=True, blank=True)
+    METHOD_CHOICES = [('manual', 'دکمه'), ('qr', 'QR')]
+    check_in_method = models.CharField(max_length=10, choices=METHOD_CHOICES, blank=True, help_text='با دکمه‌ی داشبورد ثبت شده یا با اسکن QR')
+    check_out_method = models.CharField(max_length=10, choices=METHOD_CHOICES, blank=True, help_text='با دکمه‌ی داشبورد ثبت شده یا با اسکن QR')
     edited_by_admin = models.BooleanField(default=False, help_text='اگر مدیر دستی این رکورد را اصلاح کرده باشد True می‌شود')
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -569,6 +572,14 @@ class AttendanceLog(models.Model):
         if not self.check_out:
             return None
         return jdatetime.datetime.fromgregorian(datetime=timezone.localtime(self.check_out)).strftime('%H:%M')
+
+    @property
+    def check_in_method_label(self):
+        return dict(self.METHOD_CHOICES).get(self.check_in_method) or ''
+
+    @property
+    def check_out_method_label(self):
+        return dict(self.METHOD_CHOICES).get(self.check_out_method) or ''
 
     @property
     def worked_hours(self):
