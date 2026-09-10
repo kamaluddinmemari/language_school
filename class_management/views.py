@@ -3063,7 +3063,11 @@ class TeacherQrAttendanceView(APIView):
 
     def post(self, request):
         from django.contrib.auth import get_user_model
+        from accounts.models import AttendanceAccessSettings
         User = get_user_model()
+        toggle = AttendanceAccessSettings.get_current()
+        if not toggle.teacher_attendance_enabled:
+            return Response({'error': 'ثبت حضور با QR فعلاً توسط مدیر غیرفعال شده است'}, status=403)
         if request.user.role not in User.TEACHER_LIKE_ROLES and not can_edit_menu(request.user, 'class-management'):
             return Response({'error': 'این بخش فقط برای استاد یا مدیر است'}, status=403)
         raw = str(request.data.get('qr_token') or '').strip()

@@ -13,7 +13,7 @@ try:
     import openpyxl
 except ImportError:
     openpyxl = None
-from .models import User, OTPCode, PriceSetting, AppearanceSettings, MenuPermission
+from .models import User, OTPCode, PriceSetting, AppearanceSettings, MenuPermission, AttendanceAccessSettings
 from .menu_permissions import MENU_ITEMS, MENU_KEYS, CONFIGURABLE_ROLES, EDIT_ENFORCED_MENUS, VIEW_ENFORCED_ONLY_MENUS, get_effective_permissions, get_all_effective_permissions, can_edit_menu, can_view_menu
 import string
 from .serializers import (
@@ -26,7 +26,8 @@ from .serializers import (
     PriceSettingSerializer,
     StudentSerializer,
     UserRoleSerializer,
-    AppearanceSettingsSerializer
+    AppearanceSettingsSerializer,
+    AttendanceAccessSettingsSerializer
 )
 
 
@@ -218,6 +219,27 @@ class AppearanceSettingsView(APIView):
         serializer.is_valid(raise_exception=True)
         obj = serializer.save(updated_by=request.user)
         return Response(AppearanceSettingsSerializer(obj).data)
+
+
+class AttendanceAccessSettingsView(APIView):
+    """
+    GET: هر کاربر لاگین‌شده (اپ موبایل کارمند/کارشناس اداری/استاد) می‌خواند تا تصمیم بگیرد
+    دکمه‌ی ثبت حضور و غیاب با QR را نشان بدهد یا نه.
+    PATCH: فقط مدیر، از صفحه‌ی «تنظیمات دسترسی».
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        return Response(AttendanceAccessSettingsSerializer(AttendanceAccessSettings.get_current()).data)
+
+    def patch(self, request):
+        if request.user.role != 'admin':
+            return Response({'error': 'فقط مدیر می‌تواند این تنظیمات را تغییر دهد'}, status=status.HTTP_403_FORBIDDEN)
+        obj = AttendanceAccessSettings.get_current()
+        serializer = AttendanceAccessSettingsSerializer(obj, data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        obj = serializer.save(updated_by=request.user)
+        return Response(AttendanceAccessSettingsSerializer(obj).data)
 
 
 class PriceSettingView(APIView):

@@ -94,6 +94,29 @@ class AppearanceSettings(models.Model):
         return 'تنظیمات ظاهر سامانه'
 
 
+class AttendanceAccessSettings(models.Model):
+    """
+    سوییچ سراسریِ مدیر (از «تنظیمات دسترسی»): دکمه‌ی ثبت حضور و غیاب با QR در اپ موبایل
+    برای کارمندان/کارشناسان اداری و برای استادها به‌صورت جداگانه قابل مخفی/غیرفعال‌کردن است.
+    غیرفعال‌کردن هم دکمه را در اپ مخفی می‌کند (سمت فرانت) و هم واقعاً endpoint ثبت را در
+    بک‌اند مسدود می‌کند (نه فقط ظاهری) — طبق همان قاعده‌ای که در OfficeQrAttendanceView و
+    TeacherQrAttendanceView چک می‌شود.
+    """
+    key = models.CharField(max_length=32, unique=True, default='default')
+    office_attendance_enabled = models.BooleanField(default=True, help_text='ثبت ورود/خروج با QR برای کارمندان و کارشناسان اداری در اپ')
+    teacher_attendance_enabled = models.BooleanField(default=True, help_text='ثبت حضور با QR برای استادها در اپ')
+    updated_at = models.DateTimeField(auto_now=True)
+    updated_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='attendance_access_updates')
+
+    @classmethod
+    def get_current(cls):
+        obj, _ = cls.objects.get_or_create(key='default')
+        return obj
+
+    def __str__(self):
+        return 'تنظیمات دسترسی ثبت حضور و غیاب با QR'
+
+
 class PriceSetting(models.Model):
     one_hour_price = models.PositiveIntegerField(default=400000)
     one_half_hour_price = models.PositiveIntegerField(default=550000)

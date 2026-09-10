@@ -339,23 +339,48 @@ class CheckOutView(APIView):
 
 
 class OfficeQrGenerateView(APIView):
-    """مدیر QR محل ورود/خروج کارکنان را تولید یا چرخش می‌دهد."""
+    """مدیر QR محل ورود/خروج کارکنان را تولید، چرخش یا غیرفعال می‌کند."""
     permission_classes = [IsAuthenticated]
+
+    @staticmethod
+    def _payload(token):
+        return {
+            'qr_token': str(token.token),
+            'payload': f'LSCHOOL-OFFICE:{token.token}',
+            'is_active': token.is_active,
+            'created_at': token.created_at,
+        }
+
+    def get(self, request):
+        """فقط QR فعالِ فعلی را برمی‌گرداند — بدون چرخش. برای نمایش/چاپ QR قبلی وقتی صفحه دوباره باز می‌شود."""
+        if not is_admin(request.user):
+            return Response({'error': 'فقط مدیر می‌تواند QR اداری را ببیند'}, status=status.HTTP_403_FORBIDDEN)
+        token = OfficeQrToken.objects.filter(is_active=True).order_by('-created_at').first()
+        if not token:
+            token = OfficeQrToken.objects.create()
+        return Response(self._payload(token))
 
     def post(self, request):
         if not is_admin(request.user):
             return Response({'error': 'فقط مدیر می‌تواند QR اداری تولید کند'}, status=status.HTTP_403_FORBIDDEN)
+
+        action = request.data.get('action')
+
+        if action == 'disable':
+            token = OfficeQrToken.objects.filter(is_active=True).order_by('-created_at').first()
+            if not token:
+                return Response({'error': 'QR فعالی برای غیرفعال‌کردن وجود ندارد'}, status=status.HTTP_400_BAD_REQUEST)
+            token.is_active = False
+            token.save(update_fields=['is_active', 'updated_at'])
+            return Response(self._payload(token))
+
+        # پیش‌فرض: تولید/چرخش QR جدید (دکمه‌ی «تولید QR جدید و غیرفعال‌کردن قبلی»)
         token = OfficeQrToken.objects.filter(is_active=True).order_by('-created_at').first()
         if token:
             token.rotate()
         else:
             token = OfficeQrToken.objects.create()
-        return Response({
-            'qr_token': str(token.token),
-            'payload': f'LSCHOOL-OFFICE:{token.token}',
-            'is_active': token.is_active,
-            'created_at': token.created_at,
-        })
+        return Response(self._payload(token))
 
 
 class OfficeQrAttendanceView(APIView):
@@ -363,6 +388,10 @@ class OfficeQrAttendanceView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
+        from accounts.models import AttendanceAccessSettings
+        toggle = AttendanceAccessSettings.get_current()
+        if not toggle.office_attendance_enabled:
+            return Response({'error': 'ثبت حضور و غیاب با QR فعلاً توسط مدیر غیرفعال شده است'}, status=status.HTTP_403_FORBIDDEN)
         raw = str(request.data.get('qr_token') or '').strip()
         parts = raw.split(':')
         token = parts[-1] if len(parts) == 2 and parts[0] == 'LSCHOOL-OFFICE' else raw
