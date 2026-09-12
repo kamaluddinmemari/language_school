@@ -155,18 +155,3 @@ CORS_ALLOWED_ORIGIN_REGEXES = [
     r'^http://10\.\d{1,3}\.\d{1,3}\.\d{1,3}:(3000|8081)$',
     r'^http://172\.(1[6-9]|2\d|3[0-1])\.\d{1,3}\.\d{1,3}:(3000|8081)$',
 ]
-
-# ---- Web Push (اعلان ناتیو صدادار ویندوز/مک برای ادمین/اداری، حتی وقتی پنل بسته است) ----
-# این کلیدها یک‌بار تولید و اینجا ثابت شده‌اند — اگر روزی خواستید عوضشان کنید، هر اشتراکِ
-# مرورگرِ قبلی باطل می‌شود و کاربران باید یک‌بار دیگر «فعال‌سازی اعلان» را بزنند.
-# ⚠️ توجه مهم: Web Push فقط روی HTTPS یا روی «localhost» کار می‌کند — روی آی‌پی شبکه‌ی محلی
-# با HTTP ساده (مثل http://192.168.x.x:3000) مرورگرها اجازه‌ی subscribe نمی‌دهند. برای تست
-# محلی از خودِ کامپیوتر سرور با «localhost:3000» وارد شوید؛ روی دامنه‌ی نهاییِ HTTPS در آینده
-# بدون هیچ تغییری کار خواهد کرد.
-VAPID_PRIVATE_KEY = """-----BEGIN PRIVATE KEY-----
-MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgMxJPy6qwbSfda/De
-eWBP1LitPuBHze6UyzSVoYXy1fyhRANCAAR2CtHwGYq7MgqRyLB6XMMUnEjDwKuf
-f/WEaaPqfSkDUz18esUcp9WfPl4iMdXiSrOTpv2ROCgjYodiyVFiuZTs
------END PRIVATE KEY-----"""
-VAPID_PUBLIC_KEY = 'BHYK0fAZirsyCpHIsHpcwxScSMPAq59_9YRpo-p9KQNTPXx6xRyn1Z8-XiIx1eJKs5Om_ZE4KCNih2LJUWK5lOw'
-VAPID_CLAIM_EMAIL = 'mailto:admin@example.com'
