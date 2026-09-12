@@ -5,6 +5,7 @@ from .views import (
     MarkAsReadView,
     ContactFeedbackCreateView, MyContactFeedbackListView,
     AdminContactFeedbackListView, AdminContactFeedbackDetailView, MarkContactFeedbackSeenView,
+    WebPushPublicKeyView, WebPushSubscribeView, WebPushUnsubscribeView,
 )
 
 urlpatterns = [
@@ -17,4 +18,8 @@ urlpatterns = [
     path('feedback/admin/', AdminContactFeedbackListView.as_view(), name='feedback_admin_list'),
     path('feedback/admin/<int:pk>/', AdminContactFeedbackDetailView.as_view(), name='feedback_admin_detail'),
     path('feedback/admin/<int:pk>/seen/', MarkContactFeedbackSeenView.as_view(), name='feedback_admin_seen'),
+
+    path('web-push/public-key/', WebPushPublicKeyView.as_view(), name='web_push_public_key'),
+    path('web-push/subscribe/', WebPushSubscribeView.as_view(), name='web_push_subscribe'),
+    path('web-push/unsubscribe/', WebPushUnsubscribeView.as_view(), name='web_push_unsubscribe'),
 ]

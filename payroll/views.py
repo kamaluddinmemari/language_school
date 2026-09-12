@@ -299,14 +299,23 @@ class MyAttendanceTodayView(APIView):
         # پاسخ 400 در GET باعث می‌شد frontend خطا را نادیده بگیرد و وضعیت قبلی کاربر
         # (از جمله مرخصی کارمند دیگر) روی صفحه باقی بماند.
         leave = approved_daily_leave(request.user.id, today)
-        log = AttendanceLog.objects.filter(user_id=request.user.id, date=today).first()
-        payload = AttendanceLogSerializer(log).data if log else {'date': today.isoformat(), 'check_in': None, 'check_out': None}
+        # برای کارمندان چند-ثبتی ممکن است چند رکورد امروز باشد؛ با مرتب‌سازی بر اساس ساعت ورود،
+        # آخرین رکورد (باز یا بسته) برای فعال/غیرفعال‌کردن دکمه‌ها معیار قرار می‌گیرد.
+        logs_today = list(AttendanceLog.objects.filter(user_id=request.user.id, date=today).order_by('check_in', 'id'))
+        latest = logs_today[-1] if logs_today else None
+        payload = AttendanceLogSerializer(latest).data if latest else {'date': today.isoformat(), 'check_in': None, 'check_out': None}
+        allow_multiple = getattr(getattr(request.user, 'employee_profile', None), 'allows_multiple_daily_attendance', False)
+        if allow_multiple:
+            payload['sessions_today'] = AttendanceLogSerializer(logs_today, many=True).data
+            payload['total_hours_today'] = round(sum(float(l.worked_hours or 0) for l in logs_today), 2)
         payload.update({'on_leave': bool(leave), 'leave_message': 'کارمند در مرخصی می‌باشد' if leave else None, 'leave_shift': getattr(leave, 'leave_shift', 'full_day') if leave else None, 'leave_credited_hours': getattr(leave, 'credited_hours_label', '') if leave else None})
         return Response(payload)
 
 
 class CheckInView(APIView):
-    """POST: دکمه‌ی سبز «ثبت ورود» — فقط یک‌بار در روز، توسط خودِ کارمند، غیرقابل‌ویرایش برای خودش"""
+    """POST: دکمه‌ی سبز «ثبت ورود» — عادی فقط یک‌بار در روز؛ برای کارمندانی با پرچم
+    allows_multiple_daily_attendance (نقش‌هایی مثل خدمات)، هر بار که خروجِ قبلی ثبت شده باشد
+    اجازه‌ی یک ورودِ جدید (رکورد جدید) هم داده می‌شود."""
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
@@ -315,6 +324,15 @@ class CheckInView(APIView):
         leave = approved_daily_leave(request.user.id, today)
         if leave:
             return Response({'error': 'کارمند در مرخصی می‌باشد', 'on_leave': True, 'leave_shift': getattr(leave, 'leave_shift', 'full_day'), 'leave_credited_hours': getattr(leave, 'credited_hours_label', ''),}, status=status.HTTP_400_BAD_REQUEST)
+
+        allow_multiple = getattr(getattr(request.user, 'employee_profile', None), 'allows_multiple_daily_attendance', False)
+        if allow_multiple:
+            open_log = AttendanceLog.objects.filter(user=request.user, date=today, check_in__isnull=False, check_out__isnull=True).order_by('-check_in').first()
+            if open_log:
+                return Response({'error': f'یک ورودِ بازِ ثبت‌نشده از ساعت {open_log.check_in_time_jalali} دارید — اول باید همان را خروج بزنید'}, status=status.HTTP_400_BAD_REQUEST)
+            log = AttendanceLog.objects.create(user=request.user, date=today, check_in=timezone.now(), check_in_method=method)
+            return Response(AttendanceLogSerializer(log).data, status=status.HTTP_201_CREATED)
+
         log, created = AttendanceLog.objects.get_or_create(user=request.user, date=today)
         if log.check_in:
             return Response({'error': f'شما قبلاً امروز ساعت {log.check_in_time_jalali} ورودتان را با {log.check_in_method_label or "دکمه"} ثبت کرده‌اید — هر روز فقط یک‌بار قابل ثبت است'}, status=status.HTTP_400_BAD_REQUEST)
@@ -325,12 +343,24 @@ class CheckInView(APIView):
 
 
 class CheckOutView(APIView):
-    """POST: دکمه‌ی قرمز «ثبت خروج» — فقط یک‌بار در روز، توسط خودِ کارمند، غیرقابل‌ویرایش برای خودش"""
+    """POST: دکمه‌ی قرمز «ثبت خروج» — عادی فقط یک‌بار در روز؛ برای کارمندان چند-ثبتی، همیشه
+    روی آخرین ورودِ بازِ (بدون خروج) همان روز اعمال می‌شود."""
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
         method = getattr(request, '_attendance_method', 'manual')
         today = timezone.localtime(timezone.now()).date()
+
+        allow_multiple = getattr(getattr(request.user, 'employee_profile', None), 'allows_multiple_daily_attendance', False)
+        if allow_multiple:
+            log = AttendanceLog.objects.filter(user=request.user, date=today, check_in__isnull=False, check_out__isnull=True).order_by('-check_in').first()
+            if not log:
+                return Response({'error': 'اول باید ورودتان را ثبت کنید'}, status=status.HTTP_400_BAD_REQUEST)
+            log.check_out = timezone.now()
+            log.check_out_method = method
+            log.save(update_fields=['check_out', 'check_out_method', 'updated_at'])
+            return Response(AttendanceLogSerializer(log).data)
+
         log = AttendanceLog.objects.filter(user=request.user, date=today).first()
         if not log or not log.check_in:
             return Response({'error': 'اول باید ورودتان را ثبت کنید'}, status=status.HTTP_400_BAD_REQUEST)
@@ -502,9 +532,9 @@ class AttendanceSummaryView(APIView):
 
         logs = AttendanceLog.objects.filter(user=target_user).order_by('-date')
 
-        # امروز
-        today_log = logs.filter(date=today).first()
-        today_hours = today_log.worked_hours if today_log else 0
+        # امروز — برای کارمندان چند-ثبتی ممکن است چند رکورد در همین روز باشد؛ همه جمع می‌شوند.
+        today_logs = [l for l in logs if l.date == today]
+        today_hours = round(sum(float(l.worked_hours or 0) for l in today_logs), 2)
 
         # همین هفته‌ی شمسی (شنبه تا امروز)
         weekday = (today_jalali.weekday() + 1) % 7  # jdatetime: شنبه=0

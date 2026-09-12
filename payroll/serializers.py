@@ -9,7 +9,7 @@ class EmployeeProfileSerializer(serializers.ModelSerializer):
         model = EmployeeProfile
         fields = ['id', 'user', 'education_degree', 'education_field', 'hire_date', 'hire_date_jalali', 'minimum_monthly_hours',
                    'address', 'marital_status', 'children_count', 'sheba_number', 'bank_account_number',
-                   'card_number', 'updated_at']
+                   'card_number', 'allows_multiple_daily_attendance', 'updated_at']
         read_only_fields = ['id', 'updated_at']
 
 

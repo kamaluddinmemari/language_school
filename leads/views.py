@@ -45,6 +45,10 @@ class NewLeadListView(generics.ListCreateAPIView):
         if not can_edit_menu(request.user, "new-leads"):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         data = request.data.copy()
+        # تاریخ تولد اختیاری است — اگر فرانت‌اند رشته‌ی خالی فرستاد (نه null)، DRF آن را برای
+        # یک فیلد تاریخ نامعتبر می‌داند؛ اینجا صراحتاً به None تبدیل می‌شود تا این خطا هرگز رخ ندهد.
+        if data.get('birth_date') == '':
+            data['birth_date'] = None
         confirmed = str(data.pop('confirm_new_term', '')).lower() in ('1', 'true', 'yes')
         term = data.get('term') or get_current_term()
         data['term'] = getattr(term, 'pk', term) if term else None
@@ -75,7 +79,16 @@ class NewLeadDetailView(generics.RetrieveUpdateDestroyAPIView):
     def update(self, request, *args, **kwargs):
         if self._forbidden_if_not_admin(request):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
-        return super().update(request, *args, **kwargs)
+        # تاریخ تولد اختیاری است — رشته‌ی خالی برای فیلد تاریخ در DRF نامعتبر محسوب می‌شود.
+        data = request.data.copy()
+        if data.get('birth_date') == '':
+            data['birth_date'] = None
+        partial = kwargs.pop('partial', False)
+        instance = self.get_object()
+        serializer = self.get_serializer(instance, data=data, partial=partial)
+        serializer.is_valid(raise_exception=True)
+        self.perform_update(serializer)
+        return Response(serializer.data)
 
     def destroy(self, request, *args, **kwargs):
         if self._forbidden_if_not_admin(request):

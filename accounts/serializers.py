@@ -1,7 +1,7 @@
 from rest_framework import serializers
 from django.contrib.auth.password_validation import validate_password
 from django.db import IntegrityError
-from .models import User, PriceSetting, AppearanceSettings, AttendanceAccessSettings, AppAccessSettings
+from .models import User, PriceSetting, AppearanceSettings, AttendanceAccessSettings, AppAccessSettings, MobileMenuVisibility
 from .validators import username_validator, password_validator
 
 
@@ -189,6 +189,23 @@ class AppAccessSettingsSerializer(serializers.ModelSerializer):
         model = AppAccessSettings
         fields = ['id', 'key', 'teacher_app_enabled', 'student_app_enabled', 'office_app_enabled', 'updated_at']
         read_only_fields = ['id', 'key', 'updated_at']
+
+
+class MobileMenuVisibilitySerializer(serializers.ModelSerializer):
+    class Meta:
+        model = MobileMenuVisibility
+        fields = ['id', 'key', 'hidden_keys', 'updated_at']
+        read_only_fields = ['id', 'key', 'updated_at']
+
+    def validate_hidden_keys(self, value):
+        from .mobile_menus import all_mobile_menu_keys
+        if not isinstance(value, list):
+            raise serializers.ValidationError('باید یک لیست باشد')
+        valid = set(all_mobile_menu_keys())
+        for k in value:
+            if k not in valid:
+                raise serializers.ValidationError(f'کلید نامعتبر: {k}')
+        return value
 
 
 class PriceSettingSerializer(serializers.ModelSerializer):

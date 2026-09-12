@@ -89,6 +89,13 @@ class ClassRequestListCreateView(generics.ListCreateAPIView):
                 body=f'دانش‌آموز {self.request.user.get_full_name()} یک درخواست کلاس {instance.get_class_type_display()} ثبت کرد',
                 notif_type='general'
             )
+            from notifications.utils import send_web_push_to_roles
+            send_web_push_to_roles(
+                roles=('admin', 'office', 'employee'),
+                title='درخواست کلاس خصوصی جدید',
+                body=f'{self.request.user.get_full_name()} — کلاس {instance.get_class_type_display()}',
+                url='/students',
+            )
 
 
 class ClassRequestDetailView(generics.RetrieveUpdateDestroyAPIView):

@@ -96,6 +96,10 @@ class EmployeeProfile(models.Model):
     sheba_number = models.CharField(max_length=26, blank=True, help_text='شماره شبا (بدون IR)')
     bank_account_number = models.CharField(max_length=30, blank=True, help_text='شماره حساب بانکی')
     card_number = models.CharField(max_length=16, blank=True, help_text='شماره کارت بانکی')
+    allows_multiple_daily_attendance = models.BooleanField(
+        default=False,
+        help_text='برای نقش‌هایی مثل خدمات که ممکن است چندبار در روز ورود/خروج بزنند (مثلاً صبح و عصر جدا) — در حالت عادی هرکس فقط یک‌بار ورود و یک‌بار خروج در روز می‌تواند ثبت کند.'
+    )
     updated_at = models.DateTimeField(auto_now=True)
 
     @property
@@ -554,7 +558,12 @@ class AttendanceLog(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
-        constraints = [models.UniqueConstraint(fields=['user', 'date'], name='unique_attendance_per_user_day')]
+        # توجه: قبلاً اینجا UniqueConstraint(user, date) بود که اجازه‌ی بیش از یک رکورد در روز
+        # برای هر کارمند را نمی‌داد. برداشته شد تا کارمندانی با پرچم
+        # allows_multiple_daily_attendance (مثل نقش خدمات) بتوانند چندبار در روز ورود/خروج بزنند؛
+        # برای بقیه‌ی کارمندان، این محدودیت حالا فقط در CheckInView/CheckOutView اعمال می‌شود
+        # (نه در سطح دیتابیس).
+        indexes = [models.Index(fields=['user', 'date'], name='attendance_user_date_idx')]
         ordering = ['-date']
 
     @property

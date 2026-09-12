@@ -209,6 +209,13 @@ class EntryExitRequestListView(generics.ListCreateAPIView):
                 body=f"{request.user.first_name} {request.user.last_name} برای «{req.student_name}» درخواست {req.get_permission_type_display()} ثبت کرد.",
                 notif_type='general',
             )
+            from notifications.utils import send_web_push_to_roles
+            send_web_push_to_roles(
+                roles=('admin', 'office'),
+                title='درخواست مجوز ورود/خروج جدید',
+                body=f"{request.user.get_full_name()} برای «{req.student_name}» {req.get_permission_type_display()} درخواست کرد",
+                url='/staff-messages',
+            )
         return Response(EntryExitPermissionRequestSerializer(req).data, status=status.HTTP_201_CREATED)
 
 

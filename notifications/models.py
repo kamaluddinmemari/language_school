@@ -71,3 +71,19 @@ class ContactFeedback(models.Model):
 
     def __str__(self):
         return f"{self.sender.get_full_name()} — {self.subject or self.message[:30]}"
+
+
+class WebPushSubscription(models.Model):
+    """
+    اشتراک Web Push مرورگر ادمین/اداری — برای نمایش ناتیو صدادار سیستم‌عامل (ویندوز/مک) حتی
+    وقتی پنل بسته است. هر مرورگر/دستگاه یک اشتراک جدا دارد (یک کاربر می‌تواند چند دستگاه داشته باشد).
+    """
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='web_push_subscriptions')
+    endpoint = models.URLField(max_length=500, unique=True)
+    p256dh = models.CharField(max_length=200)
+    auth = models.CharField(max_length=200)
+    user_agent = models.CharField(max_length=255, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f"اشتراک push {self.user} — {self.endpoint[:40]}..."

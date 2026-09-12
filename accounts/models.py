@@ -154,6 +154,27 @@ class AppAccessSettings(models.Model):
         return 'تنظیمات فعال/غیرفعال‌بودن اپ (استاد/دانش‌آموز/اداری)'
 
 
+class MobileMenuVisibility(models.Model):
+    """
+    تیک قابل‌مشاهده/غیرقابل‌مشاهده برای تک‌تکِ دکمه‌های منوی صفحه‌ی خانه‌ی اپ موبایل —
+    جداگانه برای اپ اداری/استاد/دانش‌آموز. فقط ظاهری است (مخفی‌کردن دکمه)، مثل سوییچ‌های
+    QR بالا endpoint را در بک‌اند نمی‌بندد. کلیدها به فرم "group:route" هستند
+    (مثلاً "office:office-debtors")، در accounts/mobile_menus.py تعریف شده‌اند.
+    """
+    key = models.CharField(max_length=32, unique=True, default='default')
+    hidden_keys = models.JSONField(default=list, blank=True, help_text='لیست کلیدهای دکمه‌هایی که باید مخفی شوند')
+    updated_at = models.DateTimeField(auto_now=True)
+    updated_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='mobile_menu_visibility_updates')
+
+    @classmethod
+    def get_current(cls):
+        obj, _ = cls.objects.get_or_create(key='default')
+        return obj
+
+    def __str__(self):
+        return 'تنظیمات نمایش منوهای اپ موبایل'
+
+
 class PriceSetting(models.Model):
     one_hour_price = models.PositiveIntegerField(default=400000)
     one_half_hour_price = models.PositiveIntegerField(default=550000)
