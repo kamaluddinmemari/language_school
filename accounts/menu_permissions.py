@@ -46,13 +46,14 @@ EDIT_ENFORCED_MENUS = {
     'group-classes', 'level-tests', 'teachers', 'students',
     'library', 'feedback', 'staff-messages',
     'new-leads', 'followups', 'dropout-students', 'grading',
+    'payroll', 'leaves', 'working-hours',
 }
 # منوهایی که فقط بُعد view واقعاً چک می‌شه (نه edit) — برای نشونه‌ی ⚡ جدا از بالا لازمه
 VIEW_ENFORCED_ONLY_MENUS = {'stats'}
 
 CONFIGURABLE_ROLES = ['employee', 'office', 'evaluator']
 
-_EVALUATOR_BLOCKED = {'teachers', 'stats', 'students', 'new-leads', 'followups', 'dropout-students'}
+_EVALUATOR_BLOCKED = {'teachers', 'stats', 'students', 'followups', 'dropout-students'}
 # «تعریف سطوح استاندارد» یه استثنای قدیمیه: حتی با اینکه کارشناس اداری همه‌جا دسترسی کامل
 # داشت، این یکی رو هیچ‌وقت نمی‌تونست حتی ببینه (فقط مدیر/کارشناس آموزش) — این رفتار حفظ شد.
 _OFFICE_VIEW_EXCEPTIONS = {'standard-levels'}
@@ -88,12 +89,20 @@ _DEFAULT_EDIT_OVERRIDES = {
     'library': {'office': True, 'evaluator': True, 'employee': True},
     'feedback': {'office': True, 'evaluator': True, 'employee': True},
     'staff-messages': {'office': True, 'evaluator': False, 'employee': False},
-    # این سه تا (اپ leads) قبلاً فقط (admin,office) بودن، کارشناس آموزش اصلاً توشون نبود
-    'new-leads': {'office': True, 'evaluator': False, 'employee': True},
+    # این سه تا (اپ leads) قبلاً فقط (admin,office) بودن؛ حالا new-leads برای هر سه نقش
+    # باز است (طبق تصمیم کارفرما برای امکان ثبت داوطلب/کلاس خصوصی جدید توسط کارشناس آموزش هم).
+    'new-leads': {'office': True, 'evaluator': True, 'employee': True},
     'followups': {'office': True, 'evaluator': False, 'employee': True},
     'dropout-students': {'office': True, 'evaluator': False, 'employee': True},
     # بخش نمرات: طبق تصمیم کارفرما کاملاً در اختیار کارشناس اداری و کارشناس آموزش است
     'grading': {'office': True, 'evaluator': True, 'employee': True},
+    # این سه تا (payroll/leaves/working-hours) قبلاً همه‌جا فقط با یک چک ثابت is_admin()
+    # کنترل می‌شدن (نه سیستم تنظیمات دسترسی) — پیش‌فرض False گذاشته شده تا با سیم‌کشی‌شدنِ
+    # enforcement واقعیِ این سه منو، رفتار فعلی (فقط مدیر) برای هیچ‌کس ناگهان عوض نشود؛ مدیر
+    # از صفحه‌ی «تنظیمات دسترسی» می‌تواند برای هر نقش جداگانه این‌ها را باز کند.
+    'payroll': {'office': False, 'evaluator': False, 'employee': False},
+    'leaves': {'office': False, 'evaluator': False, 'employee': False},
+    'working-hours': {'office': False, 'evaluator': False, 'employee': False},
 }
 
 

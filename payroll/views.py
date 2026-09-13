@@ -21,18 +21,29 @@ def is_admin(user):
 
 class AdminEditOwnViewMixin:
     """
-    قاعده‌ی مشترک همه‌ی endpointهای این اپ: مدیر کنترل کامل روی همه دارد (ساخت/ویرایش/حذف برای هر کارمند)؛
+    قاعده‌ی مشترک بیشتر endpointهای این اپ: مدیر کنترل کامل روی همه دارد (ساخت/ویرایش/حذف برای هر کارمند)؛
     خودِ کارمند (نقش اداری) فقط می‌تواند رکوردهای خودش را ببیند — نه ویرایش، نه رکورد کس دیگری.
+    اگر زیرکلاس یک menu_key تعریف کند (مطابق «تنظیمات دسترسی»)، کارمند/کارشناسی که ادمین برایش
+    دسترسی edit همان منو را روشن کرده هم می‌تواند ویرایش کند؛ در غیر این صورت (menu_key تعریف
+    نشده، مثل پروفایل خودِ کارمندان) فقط مدیر مجاز است.
     """
+    menu_key = None
+
     def get_queryset(self):
         qs = self.queryset_base()
-        if is_admin(self.request.user):
+        if is_admin(self.request.user) or (self.menu_key and self._has_menu_edit()):
             user_id = self.request.query_params.get('user')
             return qs.filter(user_id=user_id) if user_id else qs
         return qs.filter(user=self.request.user)
 
+    def _has_menu_edit(self):
+        from accounts.menu_permissions import can_edit_menu
+        return can_edit_menu(self.request.user, self.menu_key)
+
     def check_write_permission(self):
-        return is_admin(self.request.user)
+        if is_admin(self.request.user):
+            return True
+        return bool(self.menu_key) and self._has_menu_edit()
 
 
 class EmployeeProfileListCreateView(AdminEditOwnViewMixin, generics.ListCreateAPIView):
@@ -69,8 +80,10 @@ class EmployeeProfileDetailView(AdminEditOwnViewMixin, generics.RetrieveUpdateDe
 class SalaryProfileListCreateView(AdminEditOwnViewMixin, generics.ListCreateAPIView):
     """
     تنظیمات پایه‌ی حقوق — مشترک برای همه‌ی کارمندان، نه مخصوص یک نفر؛ همه (مدیر و کارمند) می‌توانند
-    ببینند، فقط مدیر می‌تواند ثبت/ویرایش کند. یک رکورد به ازای هر سال کاری (work_year یکتاست).
+    ببینند، فقط مدیر یا کسی‌که ادمین دسترسی ویرایش «حقوق و دستمزد» را برایش باز کرده می‌تواند ثبت/ویرایش کند.
+    یک رکورد به ازای هر سال کاری (work_year یکتاست).
     """
+    menu_key = 'payroll'
     serializer_class = SalaryProfileSerializer
     permission_classes = [IsAuthenticated]
 
@@ -84,6 +97,7 @@ class SalaryProfileListCreateView(AdminEditOwnViewMixin, generics.ListCreateAPIV
 
 
 class SalaryProfileDetailView(AdminEditOwnViewMixin, generics.RetrieveUpdateDestroyAPIView):
+    menu_key = 'payroll'
     serializer_class = SalaryProfileSerializer
     permission_classes = [IsAuthenticated]
 
@@ -102,6 +116,7 @@ class SalaryProfileDetailView(AdminEditOwnViewMixin, generics.RetrieveUpdateDest
 
 
 class MonthlyPayrollListCreateView(AdminEditOwnViewMixin, generics.ListCreateAPIView):
+    menu_key = 'payroll'
     serializer_class = MonthlyPayrollSerializer
     permission_classes = [IsAuthenticated]
 
@@ -130,6 +145,7 @@ class MonthlyPayrollListCreateView(AdminEditOwnViewMixin, generics.ListCreateAPI
 
 
 class MonthlyPayrollDetailView(AdminEditOwnViewMixin, generics.RetrieveUpdateDestroyAPIView):
+    menu_key = 'payroll'
     serializer_class = MonthlyPayrollSerializer
     permission_classes = [IsAuthenticated]
 
@@ -148,6 +164,7 @@ class MonthlyPayrollDetailView(AdminEditOwnViewMixin, generics.RetrieveUpdateDes
 
 
 class LeaveBalanceListCreateView(AdminEditOwnViewMixin, generics.ListCreateAPIView):
+    menu_key = 'leaves'
     serializer_class = LeaveBalanceSerializer
     permission_classes = [IsAuthenticated]
 
@@ -161,6 +178,7 @@ class LeaveBalanceListCreateView(AdminEditOwnViewMixin, generics.ListCreateAPIVi
 
 
 class LeaveBalanceDetailView(AdminEditOwnViewMixin, generics.RetrieveUpdateDestroyAPIView):
+    menu_key = 'leaves'
     serializer_class = LeaveBalanceSerializer
     permission_classes = [IsAuthenticated]
 
@@ -180,22 +198,27 @@ class LeaveBalanceDetailView(AdminEditOwnViewMixin, generics.RetrieveUpdateDestr
 
 class LeaveRequestListCreateView(generics.ListCreateAPIView):
     """
-    GET: مدیر همه‌ی درخواست‌ها را می‌بیند (با فیلتر اختیاری user)، کارمند فقط درخواست‌های خودش را.
-    POST: مدیر برای هر کارمندی می‌تواند ثبت کند؛ کارمند فقط برای خودش (با تاریخ/ساعت همان لحظه) — بدون امکان ویرایش بعدی.
+    GET: مدیر یا کسی‌که ادمین دسترسی «مرخصی» را برایش باز کرده، همه‌ی درخواست‌ها را می‌بیند
+    (با فیلتر اختیاری user)؛ در غیر این صورت فقط درخواست‌های خودش را.
+    POST: همان‌ها برای هر کارمندی می‌توانند ثبت کنند؛ کارمند عادی فقط برای خودش (با تاریخ/ساعت همان لحظه) — بدون امکان ویرایش بعدی.
     """
     serializer_class = LeaveRequestSerializer
     permission_classes = [IsAuthenticated]
 
+    def _can_manage(self, user):
+        from accounts.menu_permissions import can_edit_menu
+        return is_admin(user) or can_edit_menu(user, 'leaves')
+
     def get_queryset(self):
         qs = LeaveRequest.objects.select_related('user', 'decided_by')
-        if is_admin(self.request.user):
+        if self._can_manage(self.request.user):
             user_id = self.request.query_params.get('user')
             return qs.filter(user_id=user_id) if user_id else qs
         return qs.filter(user=self.request.user)
 
     def create(self, request, *args, **kwargs):
         data = request.data.copy()
-        if not is_admin(request.user):
+        if not self._can_manage(request.user):
             # کارمند فقط می‌تواند برای خودش درخواست ثبت کند
             data['user'] = request.user.id
         serializer = self.get_serializer(data=data)
@@ -205,34 +228,39 @@ class LeaveRequestListCreateView(generics.ListCreateAPIView):
 
 
 class LeaveRequestDetailView(generics.RetrieveUpdateDestroyAPIView):
-    """فقط مدیر می‌تواند درخواست مرخصی را ویرایش/حذف کند (خودِ کارمند فقط ثبت‌کننده است، نه ویرایشگر)."""
+    """مدیر یا کسی‌که ادمین دسترسی «مرخصی» را برایش باز کرده می‌تواند ویرایش/حذف کند (خودِ کارمند فقط ثبت‌کننده است، نه ویرایشگر)."""
     serializer_class = LeaveRequestSerializer
     permission_classes = [IsAuthenticated]
 
+    def _can_manage(self, user):
+        from accounts.menu_permissions import can_edit_menu
+        return is_admin(user) or can_edit_menu(user, 'leaves')
+
     def get_queryset(self):
         qs = LeaveRequest.objects.select_related('user', 'decided_by')
-        if is_admin(self.request.user):
+        if self._can_manage(self.request.user):
             return qs
         return qs.filter(user=self.request.user)
 
     def update(self, request, *args, **kwargs):
-        if not is_admin(request.user):
-            return Response({'error': 'فقط مدیر می‌تواند ویرایش کند'}, status=status.HTTP_403_FORBIDDEN)
+        if not self._can_manage(request.user):
+            return Response({'error': 'دسترسی ویرایش ندارید'}, status=status.HTTP_403_FORBIDDEN)
         return super().update(request, *args, **kwargs)
 
     def destroy(self, request, *args, **kwargs):
-        if not is_admin(request.user):
-            return Response({'error': 'فقط مدیر می‌تواند حذف کند'}, status=status.HTTP_403_FORBIDDEN)
+        if not self._can_manage(request.user):
+            return Response({'error': 'دسترسی حذف ندارید'}, status=status.HTTP_403_FORBIDDEN)
         return super().destroy(request, *args, **kwargs)
 
 
 class LeaveRequestDecideView(APIView):
-    """POST: تایید یا رد یک درخواست مرخصی توسط مدیر — فقط مدیر."""
+    """POST: تایید یا رد یک درخواست مرخصی — مدیر یا کسی‌که ادمین دسترسی «مرخصی» را برایش باز کرده."""
     permission_classes = [IsAuthenticated]
 
     def post(self, request, pk):
-        if not is_admin(request.user):
-            return Response({'error': 'فقط مدیر می‌تواند تصمیم بگیرد'}, status=status.HTTP_403_FORBIDDEN)
+        from accounts.menu_permissions import can_edit_menu
+        if not (is_admin(request.user) or can_edit_menu(request.user, 'leaves')):
+            return Response({'error': 'دسترسی تصمیم‌گیری ندارید'}, status=status.HTTP_403_FORBIDDEN)
         try:
             leave = LeaveRequest.objects.get(pk=pk)
         except LeaveRequest.DoesNotExist:
@@ -452,7 +480,8 @@ class OfficeQrAttendanceView(APIView):
 
 
 class AttendanceLogListCreateView(AdminEditOwnViewMixin, generics.ListCreateAPIView):
-    """GET: مدیر لیست کامل (با فیلتر user/تاریخ)، کارمند فقط لیست خودش. POST: فقط مدیر (برای اصلاح دستی/افزودن رکورد فراموش‌شده)"""
+    """GET: مدیر یا دارنده‌ی دسترسی ویرایش «ساعت کاری» لیست کامل (با فیلتر user/تاریخ)، کارمند فقط لیست خودش. POST: همان‌ها (برای اصلاح دستی/افزودن رکورد فراموش‌شده)"""
+    menu_key = 'working-hours'
     serializer_class = AttendanceLogSerializer
     permission_classes = [IsAuthenticated]
 
@@ -482,7 +511,8 @@ class AttendanceLogListCreateView(AdminEditOwnViewMixin, generics.ListCreateAPIV
 
 
 class AttendanceLogDetailView(AdminEditOwnViewMixin, generics.RetrieveUpdateDestroyAPIView):
-    """فقط مدیر می‌تواند ساعت/تاریخ ورود-خروج ثبت‌شده را دستی اصلاح یا حذف کند"""
+    """مدیر یا دارنده‌ی دسترسی ویرایش «ساعت کاری» می‌تواند ساعت/تاریخ ورود-خروج ثبت‌شده را دستی اصلاح یا حذف کند"""
+    menu_key = 'working-hours'
     serializer_class = AttendanceLogSerializer
     permission_classes = [IsAuthenticated]
 
@@ -571,13 +601,17 @@ class OfficialHolidayListCreateView(generics.ListCreateAPIView):
     serializer_class = OfficialHolidaySerializer
     permission_classes = [IsAuthenticated]
 
+    def _can_manage(self, user):
+        from accounts.menu_permissions import can_edit_menu
+        return is_admin(user) or can_edit_menu(user, 'payroll')
+
     def get_queryset(self):
-        return OfficialHoliday.objects.all() if is_admin(self.request.user) else OfficialHoliday.objects.none()
+        return OfficialHoliday.objects.all() if self._can_manage(self.request.user) else OfficialHoliday.objects.none()
 
     def perform_create(self, serializer):
-        if not is_admin(self.request.user):
+        if not self._can_manage(self.request.user):
             from rest_framework.exceptions import PermissionDenied
-            raise PermissionDenied('فقط مدیر می‌تواند تعطیلی رسمی ثبت کند')
+            raise PermissionDenied('دسترسی ثبت تعطیلی رسمی ندارید')
         serializer.save()
 
 
@@ -586,18 +620,24 @@ class OfficialHolidayDetailView(generics.RetrieveUpdateDestroyAPIView):
     permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
-        return OfficialHoliday.objects.all() if is_admin(self.request.user) else OfficialHoliday.objects.none()
+        from accounts.menu_permissions import can_edit_menu
+        can_manage = is_admin(self.request.user) or can_edit_menu(self.request.user, 'payroll')
+        return OfficialHoliday.objects.all() if can_manage else OfficialHoliday.objects.none()
 
 
 class HolidayWorkAssignmentListCreateView(generics.ListCreateAPIView):
     serializer_class = HolidayWorkAssignmentSerializer
     permission_classes = [IsAuthenticated]
 
+    def _can_manage(self, user):
+        from accounts.menu_permissions import can_edit_menu
+        return is_admin(user) or can_edit_menu(user, 'payroll')
+
     def get_queryset(self):
-        return HolidayWorkAssignment.objects.select_related('holiday', 'user').all() if is_admin(self.request.user) else HolidayWorkAssignment.objects.none()
+        return HolidayWorkAssignment.objects.select_related('holiday', 'user').all() if self._can_manage(self.request.user) else HolidayWorkAssignment.objects.none()
 
     def perform_create(self, serializer):
-        if not is_admin(self.request.user):
+        if not self._can_manage(self.request.user):
             from rest_framework.exceptions import PermissionDenied
             raise PermissionDenied('فقط مدیر می‌تواند کارکرد تعطیلی رسمی را ثبت کند')
         serializer.save()
@@ -608,4 +648,6 @@ class HolidayWorkAssignmentDetailView(generics.RetrieveUpdateDestroyAPIView):
     permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
-        return HolidayWorkAssignment.objects.select_related('holiday', 'user').all() if is_admin(self.request.user) else HolidayWorkAssignment.objects.none()
+        from accounts.menu_permissions import can_edit_menu
+        can_manage = is_admin(self.request.user) or can_edit_menu(self.request.user, 'payroll')
+        return HolidayWorkAssignment.objects.select_related('holiday', 'user').all() if can_manage else HolidayWorkAssignment.objects.none()

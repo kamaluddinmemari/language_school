@@ -12,6 +12,11 @@ class NewLeadSerializer(serializers.ModelSerializer):
     followup1_by_name = serializers.SerializerMethodField()
     followup2_by_name = serializers.SerializerMethodField()
     birth_date_jalali = serializers.ReadOnlyField()
+    age = serializers.ReadOnlyField()
+    level_test_date_jalali = serializers.SerializerMethodField()
+
+    def get_level_test_date_jalali(self, obj):
+        return obj.level_test.test_date_jalali if obj.level_test_id else None
 
     def get_followup1_by_name(self, obj):
         return obj.followup1_by.get_full_name() if obj.followup1_by else None
@@ -22,17 +27,18 @@ class NewLeadSerializer(serializers.ModelSerializer):
     class Meta:
         model = NewLead
         fields = [
-            'id', 'first_name', 'last_name', 'father_name', 'national_code', 'birth_date', 'birth_date_jalali', 'phone',
+            'id', 'first_name', 'last_name', 'father_name', 'national_code', 'birth_date', 'birth_date_jalali', 'age', 'phone',
             'status', 'status_display', 'term', 'term_title',
             'followup1_at', 'followup1_at_jalali', 'followup1_by_name',
             'followup2_at', 'followup2_at_jalali', 'followup2_by_name',
             'registered_at', 'registered_at_jalali', 'cancelled_at', 'cancelled_at_jalali',
             'deposit_amount', 'deposit_paid_at', 'deposit_paid_at_jalali',
+            'needs_level_test', 'level_test', 'level_test_date_jalali',
             'created_at', 'created_at_jalali', 'updated_at',
         ]
         read_only_fields = [
             'status', 'term_title', 'followup1_at', 'followup2_at', 'registered_at', 'cancelled_at',
-            'deposit_paid_at', 'created_at', 'updated_at',
+            'deposit_paid_at', 'created_at', 'updated_at', 'needs_level_test', 'level_test',
         ]
 
 

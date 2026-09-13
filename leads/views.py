@@ -130,6 +130,26 @@ class NewLeadActionView(APIView):
             except (TypeError, ValueError):
                 return Response({'error': 'مبلغ بیعانه نامعتبر است'}, status=status.HTTP_400_BAD_REQUEST)
             lead.deposit_paid_at = now
+        elif action == 'schedule-level-test':
+            from level_tests.models import LevelTest
+            test_date = request.data.get('test_date')
+            if not test_date:
+                return Response({'error': 'زمان تعیین سطح را انتخاب کنید'}, status=status.HTTP_400_BAD_REQUEST)
+            if lead.level_test_id:
+                # قبلاً یک وقت برای همین سرنخ رزرو شده — فقط زمانش به‌روزرسانی می‌شود (رکورد جدید ساخته نمی‌شود)
+                lt = lead.level_test
+                lt.test_date = test_date
+                lt.save(update_fields=['test_date', 'updated_at'])
+            else:
+                lt = LevelTest.objects.create(
+                    first_name=lead.first_name, last_name=lead.last_name, father_name=lead.father_name or '',
+                    birth_date=lead.birth_date, national_code=lead.national_code or '', phone=lead.phone,
+                    test_date=test_date, created_by=request.user,
+                )
+                lead.level_test = lt
+            lead.needs_level_test = True
+        elif action == 'unschedule-level-test':
+            lead.needs_level_test = False
         else:
             return Response({'error': 'اکشن نامعتبر است'}, status=status.HTTP_400_BAD_REQUEST)
         lead.save()

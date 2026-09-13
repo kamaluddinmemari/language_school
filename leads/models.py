@@ -68,6 +68,9 @@ class NewLead(models.Model):
     deposit_amount = models.PositiveIntegerField(null=True, blank=True, help_text='مبلغ بیعانه (تومان)')
     deposit_paid_at = models.DateTimeField(null=True, blank=True)
 
+    needs_level_test = models.BooleanField(default=False, help_text='این فرد نیاز به تعیین سطح دارد — با تیک‌خوردن، یک وقت تعیین سطح برایش رزرو و در صف تعیین سطح ثبت می‌شود')
+    level_test = models.ForeignKey('level_tests.LevelTest', on_delete=models.SET_NULL, null=True, blank=True, related_name='source_lead')
+
     created_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -93,6 +96,17 @@ class NewLead(models.Model):
         if not self.birth_date:
             return None
         return jdatetime.date.fromgregorian(date=self.birth_date).strftime('%Y/%m/%d')
+
+    @property
+    def age(self):
+        """سن فعلی (به سال) — محاسبه‌ی خودکار از روی تاریخ تولد"""
+        if not self.birth_date:
+            return None
+        today = timezone.localdate()
+        years = today.year - self.birth_date.year
+        if (today.month, today.day) < (self.birth_date.month, self.birth_date.day):
+            years -= 1
+        return years
 
     @property
     def followup1_at_jalali(self):
