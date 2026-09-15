@@ -46,28 +46,61 @@ def _slot_weekdays(slot):
     return DAY_TYPE_WEEKDAYS.get(slot.day_type, ())
 
 
+def session_dates_for_slot_detailed(slot, session_count=DEFAULT_SESSION_COUNT):
+    """مثل session_dates_for_slot اما جفتِ (تاریخ‌های جلسات، تعطیلات رسمیِ همین ترم که دقیقاً
+    روی یکی از روزهای برگزاری این کلاس افتاده‌اند و به همین دلیل از تقویم حذف شده‌اند) را
+    برمی‌گرداند — برای نمایش هشدار «فلان تاریخ تعطیلی رسمی می‌باشد» در پنل و اپ‌ها.
+    """
+    if not slot.term_id or not slot.term.start_date or not slot.term.end_date:
+        return [], []
+    if slot.term.end_date < slot.term.start_date:
+        return [], []
+
+    weekdays = _slot_weekdays(slot)
+    if not weekdays:
+        return [], []
+
+    holidays_by_date = {h.date: h for h in slot.term.holidays.all()}
+
+    dates = []
+    skipped_holidays = []
+    cursor = slot.term.start_date
+    while cursor <= slot.term.end_date and len(dates) < session_count:
+        if cursor.weekday() in weekdays:
+            holiday = holidays_by_date.get(cursor)
+            if holiday:
+                skipped_holidays.append(holiday)
+            else:
+                dates.append(cursor)
+        cursor += timedelta(days=1)
+    return dates, skipped_holidays
+
+
 def session_dates_for_slot(slot, session_count=DEFAULT_SESSION_COUNT):
     """تا سقف تعداد جلسات، تاریخ‌های برگزاری را در بازهٔ ترم می‌سازد.
 
     تاریخ‌ها در پایگاه داده میلادی باقی می‌مانند. اگر کلاس ترم نداشته باشد یا برای
     نوع برنامهٔ آن روز برگزاری تعیین نشده باشد، لیست خالی است تا تاریخ ساختگی ثبت نشود.
+    هر تاریخی که در تعطیلات رسمیِ ثبت‌شده‌ی همان ترم باشد و روی روز برگزاری این کلاس بیفتد،
+    نادیده گرفته می‌شود و جلسه‌ی بعدیِ همان الگوی روز جایگزینش می‌شود.
     """
-    if not slot.term_id or not slot.term.start_date or not slot.term.end_date:
-        return []
-    if slot.term.end_date < slot.term.start_date:
-        return []
-
-    weekdays = _slot_weekdays(slot)
-    if not weekdays:
-        return []
-
-    dates = []
-    cursor = slot.term.start_date
-    while cursor <= slot.term.end_date and len(dates) < session_count:
-        if cursor.weekday() in weekdays:
-            dates.append(cursor)
-        cursor += timedelta(days=1)
+    dates, _skipped_holidays = session_dates_for_slot_detailed(slot, session_count=session_count)
     return dates
+
+
+def term_holiday_warnings_for_slot(slot, session_count=DEFAULT_SESSION_COUNT):
+    """لیست هشدارهای تعطیلی رسمی برای همین کلاس (فقط تعطیلاتی که واقعاً روی یکی از
+    جلسات محاسبه‌شده‌ی این کلاس افتاده و حذف شده‌اند)."""
+    _dates, skipped_holidays = session_dates_for_slot_detailed(slot, session_count=session_count)
+    return [
+        {
+            'date': h.date.isoformat(),
+            'date_jalali': h.date_jalali,
+            'description': h.description,
+            'message': f"تاریخ {h.date_jalali} تعطیلی رسمی می‌باشد" + (f" ({h.description})" if h.description else "") + " و جلسه‌ی آن حذف و جابه‌جا شد",
+        }
+        for h in skipped_holidays
+    ]
 
 
 def attendance_session_dates_for_slot(slot, session_count=DEFAULT_SESSION_COUNT):
@@ -175,6 +208,8 @@ def roster_attendance_payload(slot, session_count=DEFAULT_SESSION_COUNT):
     elif not sessions:
         warning = 'برای این کلاس روز برگزاری مشخص نیست؛ در ویرایش کلاس، روزهای برگزاری را تکمیل کنید تا تاریخ جلسه خودکار شود.'
 
+    holiday_warnings = term_holiday_warnings_for_slot(slot, session_count=session_count)
+
     return {
         'class_slot': slot.id,
         'class_number': slot.number,
@@ -194,4 +229,5 @@ def roster_attendance_payload(slot, session_count=DEFAULT_SESSION_COUNT):
         'roster': roster,
         'raw_row_count': max(20, len(roster)),
         'schedule_warning': warning,
+        'holiday_warnings': holiday_warnings,
     }

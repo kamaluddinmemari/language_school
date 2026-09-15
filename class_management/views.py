@@ -12,7 +12,7 @@ from rest_framework.response import Response
 from rest_framework.parsers import MultiPartParser, FormParser
 from rest_framework.permissions import IsAuthenticated
 import jdatetime
-from .models import ClassSlot, ClassSlotEnrollment, TuitionSetting, DiscountedPerson, EnrollmentRefund, WalletTransaction, infer_age_group_from_level, _jalali, LevelRenewalApproval, Term, OnlineCourse, OnlineCourseEnrollment, PaymentSettings, ClassAttendance, OnlineCourseActionRequest
+from .models import ClassSlot, ClassSlotEnrollment, TuitionSetting, DiscountedPerson, EnrollmentRefund, WalletTransaction, infer_age_group_from_level, _jalali, LevelRenewalApproval, Term, TermHoliday, OnlineCourse, OnlineCourseEnrollment, PaymentSettings, ClassAttendance, OnlineCourseActionRequest
 from .models import THREE_DAY_TIME_SLOTS, THURSDAY_MORNING_SLOT, THURSDAY_EVENING_SLOT, FRIDAY_SLOT
 
 # QR و جلسات استادان فعلاً غیرفعال هستند؛ نبودن مدل‌های این بخش‌ها نباید مانع اجرای ترم و کلاس شود.
@@ -28,7 +28,7 @@ from .serializers import (
     TransferSurplusSerializer, SpinOffSurplusSerializer,
     BulkCreatePhysicalClassesSerializer, EnrollStudentSerializer, ClassSlotEnrollmentSerializer,
     TuitionSettingSerializer, DiscountedPersonSerializer, RefundEnrollmentSerializer, TransferEnrollmentSerializer,
-    SplitClassSerializer, LevelRenewalApprovalSerializer, TermSerializer,
+    SplitClassSerializer, LevelRenewalApprovalSerializer, TermSerializer, TermHolidaySerializer,
     OnlineCourseSerializer, OnlineCourseEnrollmentSerializer, OnlineCourseEnrollSerializer, PaymentSettingsSerializer,
     ClassAttendanceSerializer, OnlineCourseTransferSerializer, OnlineCourseActionRequestSerializer,
     OnlineCourseActionRequestCreateSerializer, OnlineCourseActionRequestReviewSerializer,
@@ -36,7 +36,7 @@ from .serializers import (
 from level_tests.models import LevelTest
 from accounts.menu_permissions import can_edit_menu, can_view_menu
 from .allocation import allocate_classes
-from .attendance import DEFAULT_SESSION_COUNT, jalali_date, roster_attendance_payload, session_dates_for_slot
+from .attendance import DEFAULT_SESSION_COUNT, jalali_date, roster_attendance_payload, session_dates_for_slot, term_holiday_warnings_for_slot
 
 # منسوخ — از تنظیمات دسترسی (accounts.menu_permissions.can_edit_menu) جایگزین شد.
 # فقط برای مرجع/سازگاری با کد قدیمی نگه داشته شده؛ جایی از این فایل استفاده نمی‌شود.
@@ -248,6 +248,48 @@ class TermDetailView(generics.RetrieveUpdateDestroyAPIView):
         if not can_edit_menu(request.user, 'class-management'):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         return super().update(request, *args, **kwargs)
+
+    def destroy(self, request, *args, **kwargs):
+        if not can_edit_menu(request.user, 'class-management'):
+            return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
+        return super().destroy(request, *args, **kwargs)
+
+
+class TermHolidayListView(generics.ListCreateAPIView):
+    """
+    GET: لیست تعطیلات رسمیِ ثبت‌شده برای یک ترم / POST: ثبت یک تاریخ تعطیلی رسمیِ جدید برای آن ترم.
+    هر تاریخی که اینجا ثبت شود و روی روز برگزاریِ یکی از کلاس‌های آن ترم بیفتد (زوج/فرد/یک‌روزه)،
+    خودکار از محاسبه‌ی تاریخ جلسات آن کلاس حذف می‌شود — همه‌جا: پنل، اپ استاد، اپ دانش‌آموز،
+    حضور و غیاب آنلاین (QR) و جلسات ساب استادان.
+    """
+    permission_classes = [IsAuthenticated]
+    serializer_class = TermHolidaySerializer
+
+    def get_queryset(self):
+        if not can_edit_menu(self.request.user, 'class-management'):
+            return TermHoliday.objects.none()
+        return TermHoliday.objects.filter(term_id=self.kwargs['term_id'])
+
+    def perform_create(self, serializer):
+        serializer.save(term_id=self.kwargs['term_id'])
+
+    def create(self, request, *args, **kwargs):
+        if not can_edit_menu(request.user, 'class-management'):
+            return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
+        if not Term.objects.filter(pk=self.kwargs['term_id']).exists():
+            return Response({'error': 'ترم پیدا نشد'}, status=status.HTTP_404_NOT_FOUND)
+        from django.db import IntegrityError
+        try:
+            return super().create(request, *args, **kwargs)
+        except IntegrityError:
+            return Response({'error': 'این تاریخ قبلاً به‌عنوان تعطیلی رسمیِ همین ترم ثبت شده است'}, status=status.HTTP_400_BAD_REQUEST)
+
+
+class TermHolidayDetailView(generics.DestroyAPIView):
+    """DELETE: حذف یک تاریخ تعطیلی رسمی از ترم — با حذف آن، جلسه‌ی حذف‌شده دوباره به تقویم برمی‌گردد."""
+    permission_classes = [IsAuthenticated]
+    serializer_class = TermHolidaySerializer
+    queryset = TermHoliday.objects.all()
 
     def destroy(self, request, *args, **kwargs):
         if not can_edit_menu(request.user, 'class-management'):
@@ -2962,6 +3004,7 @@ def _teacher_report_payload(slot, events):
         'substitution_count': substitution_count, 'absence_count': absence_count,
         'makeup_count': makeup_count, 'repaired_absence_count': makeup_count,
         'participants': participants, 'session_statuses': status_rows,
+        'holiday_warnings': term_holiday_warnings_for_slot(slot),
     }
 
 

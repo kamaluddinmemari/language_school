@@ -1,8 +1,18 @@
 from rest_framework import serializers
-from .models import ClassSlot, ClassSlotEnrollment, TuitionSetting, DiscountedPerson, LevelRenewalApproval, Term, OnlineCourse, OnlineCourseEnrollment, PaymentSettings, ClassAttendance, OnlineCourseActionRequest
+from .models import ClassSlot, ClassSlotEnrollment, TuitionSetting, DiscountedPerson, LevelRenewalApproval, Term, TermHoliday, OnlineCourse, OnlineCourseEnrollment, PaymentSettings, ClassAttendance, OnlineCourseActionRequest
+
+
+class TermHolidaySerializer(serializers.ModelSerializer):
+    date_jalali = serializers.ReadOnlyField()
+
+    class Meta:
+        model = TermHoliday
+        fields = ['id', 'term', 'date', 'date_jalali', 'description', 'created_at']
+        read_only_fields = ['id', 'term', 'created_at']
 
 
 class TermSerializer(serializers.ModelSerializer):
+    holidays = TermHolidaySerializer(many=True, read_only=True)
     start_date_jalali = serializers.ReadOnlyField()
     end_date_jalali = serializers.ReadOnlyField()
     title = serializers.ReadOnlyField()
@@ -12,7 +22,7 @@ class TermSerializer(serializers.ModelSerializer):
         model = Term
         fields = [
             'id', 'year', 'term_number', 'start_date', 'end_date',
-            'start_date_jalali', 'end_date_jalali', 'title', 'class_count', 'created_at',
+            'start_date_jalali', 'end_date_jalali', 'title', 'class_count', 'holidays', 'created_at',
         ]
         read_only_fields = ['id', 'created_at']
 

@@ -92,6 +92,35 @@ class Term(models.Model):
         return self.title
 
 
+class TermHoliday(models.Model):
+    """
+    تاریخ تعطیلی رسمی در بازه‌ی یک ترم. با تعریف هر تعطیلی، هر جلسه‌ای که طبق چیدمان هفتگیِ
+    کلاس (روز زوج/فرد یا یک‌روزه‌ی هفتگی) دقیقاً روی همین تاریخ بیفتد، خودکار از تقویم جلسات آن
+    کلاس/ترم حذف می‌شود (session_dates_for_slot در attendance.py) و به‌جایش جلسه‌ی بعدیِ همان
+    الگوی روز جایگزین می‌شود — همین منبع واحد در همه‌جا استفاده می‌شود: لیست کلاسی و حضور و غیاب
+    ادمین، اپ استاد، اپ دانش‌آموز، حضور و غیاب آنلاین (QR) و جلسات ساب استادان.
+    """
+    term = models.ForeignKey(Term, on_delete=models.CASCADE, related_name='holidays')
+    date = models.DateField(help_text='تاریخ تعطیلی رسمی (میلادی ذخیره می‌شود؛ در پنل شمسی وارد/نمایش می‌شود)')
+    description = models.CharField(max_length=200, blank=True, help_text='توضیح تعطیلی، مثلاً «روز طبیعت» یا «تعطیل رسمی»')
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['date']
+        constraints = [
+            models.UniqueConstraint(fields=['term', 'date'], name='unique_holiday_per_term_date')
+        ]
+
+    @property
+    def date_jalali(self):
+        if not self.date:
+            return None
+        return jdatetime.date.fromgregorian(date=self.date).strftime('%Y/%m/%d')
+
+    def __str__(self):
+        return f"{self.term.title} — {self.date_jalali}" + (f" ({self.description})" if self.description else "")
+
+
 class ClassSlot(models.Model):
     """
     یک کلاس، که مدیر یکی‌یکی وارد می‌کند — با روز/نوع برگزاری هفتگی، ساعت جاری (از لیست
