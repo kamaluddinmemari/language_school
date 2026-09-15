@@ -2,7 +2,7 @@ from django.urls import path
 from .views import (
     LevelChoicesView, LevelTestListCreateView, LevelTestDetailView, LevelTestPriceSettingView,
     StudentRequestLevelTestView, MyLevelTestsView, LevelTestPaymentInfoView,
-    StandardLevelListView, StandardLevelDetailView,
+    StandardLevelListView, StandardLevelDetailView, LevelTestActionView,
 )
 
 urlpatterns = [
@@ -14,5 +14,6 @@ urlpatterns = [
     path('level-tests/request/', StudentRequestLevelTestView.as_view(), name='level_test_student_request'),
     path('level-tests/mine/', MyLevelTestsView.as_view(), name='level_test_mine'),
     path('level-tests/', LevelTestListCreateView.as_view(), name='level_test_list'),
+    path('level-tests/<int:pk>/<str:action>/', LevelTestActionView.as_view(), name='level_test_action'),
     path('level-tests/<int:pk>/', LevelTestDetailView.as_view(), name='level_test_detail'),
 ]

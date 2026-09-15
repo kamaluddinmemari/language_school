@@ -40,15 +40,33 @@ class NewLeadListView(generics.ListCreateAPIView):
             return NewLead.objects.none()
         return NewLead.objects.all()
 
+    def get_serializer_context(self):
+        """
+        همه‌ی آزمون‌های تعیین‌سطح را یک‌بار می‌خوانیم و بر اساس کد ملی/موبایلِ نرمال‌شده
+        (ارقام فارسی/عربی، صفر ابتدایی، پیش‌شماره ۹۸) نگاشت می‌کنیم، تا سریالایزر برای
+        هر سرنخ به‌جای یک کوئری جداگانه، فقط از این دیکشنری در حافظه استفاده کند
+        (جلوگیری از N+1 روی لیست ورودی‌های جدید).
+        """
+        context = super().get_serializer_context()
+        from level_tests.models import LevelTest
+        from .models import normalize_national_code, normalize_phone
+        by_national, by_phone = {}, {}
+        for t in LevelTest.objects.all().order_by('id'):
+            national = normalize_national_code(t.national_code)
+            phone = normalize_phone(t.phone)
+            if national:
+                by_national.setdefault(national, []).append(t)
+            if phone:
+                by_phone.setdefault(phone, []).append(t)
+        context['level_test_by_national'] = by_national
+        context['level_test_by_phone'] = by_phone
+        return context
+
     def create(self, request, *args, **kwargs):
         from accounts.services import sync_student_from_lead
         if not can_edit_menu(request.user, "new-leads"):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         data = request.data.copy()
-        # تاریخ تولد اختیاری است — اگر فرانت‌اند رشته‌ی خالی فرستاد (نه null)، DRF آن را برای
-        # یک فیلد تاریخ نامعتبر می‌داند؛ اینجا صراحتاً به None تبدیل می‌شود تا این خطا هرگز رخ ندهد.
-        if data.get('birth_date') == '':
-            data['birth_date'] = None
         confirmed = str(data.pop('confirm_new_term', '')).lower() in ('1', 'true', 'yes')
         term = data.get('term') or get_current_term()
         data['term'] = getattr(term, 'pk', term) if term else None
@@ -79,16 +97,7 @@ class NewLeadDetailView(generics.RetrieveUpdateDestroyAPIView):
     def update(self, request, *args, **kwargs):
         if self._forbidden_if_not_admin(request):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
-        # تاریخ تولد اختیاری است — رشته‌ی خالی برای فیلد تاریخ در DRF نامعتبر محسوب می‌شود.
-        data = request.data.copy()
-        if data.get('birth_date') == '':
-            data['birth_date'] = None
-        partial = kwargs.pop('partial', False)
-        instance = self.get_object()
-        serializer = self.get_serializer(instance, data=data, partial=partial)
-        serializer.is_valid(raise_exception=True)
-        self.perform_update(serializer)
-        return Response(serializer.data)
+        return super().update(request, *args, **kwargs)
 
     def destroy(self, request, *args, **kwargs):
         if self._forbidden_if_not_admin(request):
@@ -97,7 +106,7 @@ class NewLeadDetailView(generics.RetrieveUpdateDestroyAPIView):
 
 
 class NewLeadActionView(APIView):
-    """POST: یکی از اکشن‌های followup1 / followup2 / register / cancel روی یک سرنخ"""
+    """POST: یکی از اکشن‌های followup1 / followup2 / register / cancel / flag_level_test / unflag_level_test روی یک سرنخ"""
     permission_classes = [IsAuthenticated]
 
     def post(self, request, pk, action):
@@ -121,6 +130,51 @@ class NewLeadActionView(APIView):
         elif action == 'cancel':
             lead.status = NewLead.Status.CANCELLED
             lead.cancelled_at = now
+        elif action == 'flag_level_test':
+            from level_tests.models import LevelTest
+            from .models import normalize_national_code, normalize_phone
+            from django.utils.dateparse import parse_datetime
+
+            # تاریخ/ساعتِ تیک را کاربر دستی وارد می‌کند (نه لزوماً همین لحظه)؛ اگر نفرستد یا
+            # نامعتبر باشد، به لحظه‌ی فعلی برمی‌گردیم.
+            marked_at = now
+            raw_marked_at = request.data.get('marked_at')
+            if raw_marked_at:
+                parsed = parse_datetime(raw_marked_at)
+                if parsed is not None:
+                    if timezone.is_naive(parsed):
+                        parsed = timezone.make_aware(parsed)
+                    marked_at = parsed
+            lead.needs_level_test = True
+            lead.needs_level_test_marked_at = marked_at
+            if not lead.level_test:
+                try:
+                    test = LevelTest.objects.create(
+                        first_name=lead.first_name, last_name=lead.last_name, father_name=lead.father_name,
+                        birth_date=lead.birth_date,
+                        # نرمال‌سازی و کوتاه‌کردن به حداکثر طول فیلدهای LevelTest تا با کد ملی/موبایلِ
+                        # دارای فاصله یا خط تیره یا رقم فارسی، خطای «مقدار طولانی‌تر از فیلد» رخ ندهد.
+                        national_code=normalize_national_code(lead.national_code)[:10],
+                        phone=normalize_phone(lead.phone)[:11],
+                        created_by=request.user,
+                    )
+                    # created_at با auto_now_add پر می‌شود و مستقیم قابل ست‌کردن نیست؛ برای اینکه صفِ
+                    # تعیین سطح بر اساس همان تاریخ/ساعتِ دستیِ انتخاب‌شده مرتب شود (نه لحظه‌ی کلیک)،
+                    # با یک UPDATE جداگانه (که auto_now_add را دور می‌زند) اصلاحش می‌کنیم.
+                    LevelTest.objects.filter(pk=test.pk).update(created_at=marked_at)
+                    test.created_at = marked_at
+                    lead.level_test = test
+                except Exception as exc:
+                    return Response({'error': f'ساخت آزمون تعیین‌سطح ناموفق بود: {exc}'}, status=status.HTTP_400_BAD_REQUEST)
+        elif action == 'unflag_level_test':
+            from level_tests.models import LevelTest
+            # اگر آزمونی که خودکار ساخته شده هنوز دست‌نخورده و در انتظار است، پاکش می‌کنیم؛
+            # اگر مدیر آموزش رویش کار کرده (تکمیل شده)، برای جلوگیری از گم‌شدن نتیجه فقط لینکش را نگه می‌داریم.
+            if lead.level_test and lead.level_test.status == LevelTest.Status.PENDING and not lead.level_test.self_requested:
+                lead.level_test.delete()
+                lead.level_test = None
+            lead.needs_level_test = False
+            lead.needs_level_test_marked_at = None
         elif action == 'deposit':
             amount = request.data.get('amount')
             if amount in (None, ''):
@@ -130,26 +184,6 @@ class NewLeadActionView(APIView):
             except (TypeError, ValueError):
                 return Response({'error': 'مبلغ بیعانه نامعتبر است'}, status=status.HTTP_400_BAD_REQUEST)
             lead.deposit_paid_at = now
-        elif action == 'schedule-level-test':
-            from level_tests.models import LevelTest
-            test_date = request.data.get('test_date')
-            if not test_date:
-                return Response({'error': 'زمان تعیین سطح را انتخاب کنید'}, status=status.HTTP_400_BAD_REQUEST)
-            if lead.level_test_id:
-                # قبلاً یک وقت برای همین سرنخ رزرو شده — فقط زمانش به‌روزرسانی می‌شود (رکورد جدید ساخته نمی‌شود)
-                lt = lead.level_test
-                lt.test_date = test_date
-                lt.save(update_fields=['test_date', 'updated_at'])
-            else:
-                lt = LevelTest.objects.create(
-                    first_name=lead.first_name, last_name=lead.last_name, father_name=lead.father_name or '',
-                    birth_date=lead.birth_date, national_code=lead.national_code or '', phone=lead.phone,
-                    test_date=test_date, created_by=request.user,
-                )
-                lead.level_test = lt
-            lead.needs_level_test = True
-        elif action == 'unschedule-level-test':
-            lead.needs_level_test = False
         else:
             return Response({'error': 'اکشن نامعتبر است'}, status=status.HTTP_400_BAD_REQUEST)
         lead.save()
@@ -183,29 +217,16 @@ class UnregisteredStudentListView(generics.ListCreateAPIView):
                 Q(term_id=term_id) |
                 (Q(term__in=earlier_terms) & ~Q(status=UnregisteredStudent.Status.REGISTERED))
             )
-        status_filter = self.request.query_params.get('status', '').strip()
-        if status_filter in (UnregisteredStudent.Status.TRACKING, UnregisteredStudent.Status.REGISTERED):
-            qs = qs.filter(status=status_filter)
-        query = self.request.query_params.get('q', '').strip()
-        if query:
-            qs = qs.filter(Q(first_name__icontains=query) | Q(last_name__icontains=query) | Q(phone__icontains=query) | Q(national_code__icontains=query) | Q(class_level__icontains=query))
         return qs
 
     def create(self, request, *args, **kwargs):
         from accounts.models import User
         from accounts.services import sync_student_from_lead
         from .models import get_current_term
-        if request.user.role not in User.TEACHER_LIKE_ROLES and request.user.role not in ('admin', 'office', 'employee'):
-            return Response({'error': 'فقط استاد یا کاربر اداری می‌تواند ثبت کند'}, status=status.HTTP_403_FORBIDDEN)
+        if request.user.role not in User.TEACHER_LIKE_ROLES and request.user.role not in ('admin', 'office'):
+            return Response({'error': 'فقط استاد یا مدیر می‌تواند ثبت کند'}, status=status.HTTP_403_FORBIDDEN)
         data = request.data.copy()
         confirmed = str(data.pop('confirm_new_term', '')).lower() in ('1', 'true', 'yes')
-        class_slot_id = data.get('class_slot')
-        if class_slot_id:
-            from class_management.models import ClassSlot
-            class_slot = ClassSlot.objects.filter(pk=class_slot_id).select_related('term').first()
-            if not class_slot:
-                return Response({'error': 'کلاس انتخاب‌شده پیدا نشد'}, status=status.HTTP_404_NOT_FOUND)
-            data['term'] = class_slot.term_id
         term = data.get('term') or get_current_term()
         data['term'] = getattr(term, 'pk', term) if term else None
         identity = build_identity_key(data.get('national_code'), data.get('phone'), data.get('first_name'), data.get('last_name'), data.get('class_level'))
@@ -425,12 +446,6 @@ class DebtorListView(generics.ListCreateAPIView):
                 Q(term_id=term_id) |
                 (Q(term__in=earlier_terms) & ~Q(status=Debtor.Status.SETTLED))
             )
-        status_filter = self.request.query_params.get('status', '').strip()
-        if status_filter in (Debtor.Status.PENDING, Debtor.Status.SETTLED):
-            qs = qs.filter(status=status_filter)
-        query = self.request.query_params.get('q', '').strip()
-        if query:
-            qs = qs.filter(Q(first_name__icontains=query) | Q(last_name__icontains=query) | Q(phone__icontains=query) | Q(national_code__icontains=query) | Q(class_level__icontains=query))
         return qs
 
     def create(self, request, *args, **kwargs):

@@ -109,6 +109,10 @@ class LevelTest(models.Model):
     )
     evaluator_name = models.CharField(max_length=150, blank=True, help_text='برای وقتی ارزیاب حساب کاربری ندارد و مدیر به‌جایش وارد می‌کند')
     notes = models.TextField(blank=True)
+    natoos_registered = models.BooleanField(default=False, help_text='آیا این تعیین سطح در سامانه‌ی ناتوس هم ثبت شده است')
+    reminder_24h_followed_at = models.DateTimeField(null=True, blank=True, help_text='زمان ثبت پیگیری هشدار ۲۴ ساعت قبل')
+    reminder_2h_followed_at = models.DateTimeField(null=True, blank=True, help_text='زمان ثبت پیگیری هشدار ۲ ساعت قبل')
+    followup_lead = models.ForeignKey('leads.NewLead', on_delete=models.SET_NULL, null=True, blank=True, related_name='source_level_tests', help_text='ورودی جدید ساخته‌شده برای پیگیری این تعیین سطح')
 
     created_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='level_tests_created')
     created_at = models.DateTimeField(auto_now_add=True)
@@ -140,6 +144,16 @@ class LevelTest(models.Model):
             return None
         local_dt = timezone.localtime(self.test_date)
         return jdatetime.datetime.fromgregorian(datetime=local_dt).strftime('%Y/%m/%d - %H:%M')
+
+    @property
+    def reminder_24h_followed_at_jalali(self):
+        if not self.reminder_24h_followed_at: return None
+        return jdatetime.datetime.fromgregorian(datetime=timezone.localtime(self.reminder_24h_followed_at)).strftime('%Y/%m/%d - %H:%M')
+
+    @property
+    def reminder_2h_followed_at_jalali(self):
+        if not self.reminder_2h_followed_at: return None
+        return jdatetime.datetime.fromgregorian(datetime=timezone.localtime(self.reminder_2h_followed_at)).strftime('%Y/%m/%d - %H:%M')
 
     @property
     def created_at_jalali(self):

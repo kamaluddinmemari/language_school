@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from .models import NewLead, UnregisteredStudent, UnregisteredStudentFollowup, Debtor, DebtorFollowup, DiscountedPerson
+from .models import NewLead, UnregisteredStudent, UnregisteredStudentFollowup, Debtor, DebtorFollowup, DiscountedPerson, normalize_national_code, normalize_phone
 
 
 class NewLeadSerializer(serializers.ModelSerializer):
@@ -12,17 +12,54 @@ class NewLeadSerializer(serializers.ModelSerializer):
     followup1_by_name = serializers.SerializerMethodField()
     followup2_by_name = serializers.SerializerMethodField()
     birth_date_jalali = serializers.ReadOnlyField()
+    needs_level_test_marked_at_jalali = serializers.ReadOnlyField()
     age = serializers.ReadOnlyField()
-    level_test_date_jalali = serializers.SerializerMethodField()
-
-    def get_level_test_date_jalali(self, obj):
-        return obj.level_test.test_date_jalali if obj.level_test_id else None
+    level_test = serializers.SerializerMethodField()
 
     def get_followup1_by_name(self, obj):
         return obj.followup1_by.get_full_name() if obj.followup1_by else None
 
     def get_followup2_by_name(self, obj):
         return obj.followup2_by.get_full_name() if obj.followup2_by else None
+
+    def get_level_test(self, obj):
+        """
+        اولویت با آزمونی است که مستقیماً از طریق تیک «نیاز به تعیین سطح دارد» برای همین
+        سرنخ ساخته شده (obj.level_test). اگر چنین چیزی نبود (سرنخ‌های قدیمی‌تر یا کسی که
+        خودش جدا از این‌جا در صف تعیین سطح ثبت شده)، بر اساس کد ملی و در نبود آن شماره
+        موبایل (هر دو پس از نرمال‌سازی) به‌صورت حدسی تطبیق داده می‌شود.
+        رنگ: pending → زرد، completed+paid → سبز، completed+unpaid → قرمز.
+        """
+        from level_tests.models import LevelTest
+        match = obj.level_test
+        if not match:
+            national = normalize_national_code(obj.national_code)
+            phone = normalize_phone(obj.phone)
+            by_national = self.context.get('level_test_by_national')
+            by_phone = self.context.get('level_test_by_phone')
+            if by_national is not None or by_phone is not None:
+                candidates = by_national.get(national, []) if national else []
+                if not candidates and phone:
+                    candidates = by_phone.get(phone, [])
+            else:
+                all_tests = list(LevelTest.objects.all())
+                candidates = [t for t in all_tests if national and normalize_national_code(t.national_code) == national]
+                if not candidates and phone:
+                    candidates = [t for t in all_tests if normalize_phone(t.phone) == phone]
+            if not candidates:
+                return None
+            match = sorted(candidates, key=lambda t: (t.status == LevelTest.Status.COMPLETED, t.id))[-1]
+        if match.status == LevelTest.Status.COMPLETED:
+            badge = 'paid' if match.payment_status == LevelTest.PaymentStatus.PAID else 'unpaid'
+        else:
+            badge = 'pending'
+        return {
+            'id': match.id, 'status': match.status, 'status_display': match.get_status_display(),
+            'payment_status': match.payment_status, 'level': match.level, 'age_group': match.age_group,
+            'age_group_display': match.get_age_group_display() if match.age_group else None,
+            'test_date': match.test_date, 'test_date_jalali': match.test_date_jalali,
+            'badge': badge,
+        }
 
     class Meta:
         model = NewLead
@@ -33,12 +70,13 @@ class NewLeadSerializer(serializers.ModelSerializer):
             'followup2_at', 'followup2_at_jalali', 'followup2_by_name',
             'registered_at', 'registered_at_jalali', 'cancelled_at', 'cancelled_at_jalali',
             'deposit_amount', 'deposit_paid_at', 'deposit_paid_at_jalali',
-            'needs_level_test', 'level_test', 'level_test_date_jalali',
-            'created_at', 'created_at_jalali', 'updated_at',
+            'needs_level_test', 'needs_level_test_marked_at', 'needs_level_test_marked_at_jalali',
+            'created_at', 'created_at_jalali', 'updated_at', 'level_test',
         ]
         read_only_fields = [
             'status', 'term_title', 'followup1_at', 'followup2_at', 'registered_at', 'cancelled_at',
-            'deposit_paid_at', 'created_at', 'updated_at', 'needs_level_test', 'level_test',
+            'deposit_paid_at', 'created_at', 'updated_at',
+            'needs_level_test', 'needs_level_test_marked_at',
         ]
 
 
@@ -65,11 +103,6 @@ class UnregisteredStudentSerializer(serializers.ModelSerializer):
     submitted_by_name = serializers.SerializerMethodField()
     followups = UnregisteredFollowupSerializer(many=True, read_only=True)
     term_title = serializers.ReadOnlyField()
-    class_slot_number = serializers.IntegerField(source='class_slot.number', read_only=True)
-    class_slot_teacher = serializers.CharField(source='class_slot.teacher_name', read_only=True, allow_null=True)
-    class_slot_day = serializers.CharField(source='class_slot.day_type_display', read_only=True, allow_null=True)
-    class_slot_time = serializers.CharField(source='class_slot.time_slot', read_only=True, allow_null=True)
-    class_slot_level = serializers.CharField(source='class_slot.assigned_level', read_only=True, allow_null=True)
 
     class Meta:
         model = UnregisteredStudent
@@ -77,7 +110,7 @@ class UnregisteredStudentSerializer(serializers.ModelSerializer):
             'id', 'first_name', 'last_name', 'class_level', 'national_code', 'phone', 'tuition_price',
             'status', 'status_display', 'registered_at', 'registered_at_jalali',
             'followup_count', 'last_followup_at_jalali', 'latest_level', 'followups',
-            'submitted_by_name', 'term', 'term_title', 'class_slot', 'class_slot_number', 'class_slot_teacher', 'class_slot_day', 'class_slot_time', 'class_slot_level', 'created_at', 'created_at_jalali', 'updated_at',
+            'submitted_by_name', 'term', 'term_title', 'created_at', 'created_at_jalali', 'updated_at',
         ]
         read_only_fields = ['status', 'registered_at', 'created_at', 'updated_at']
 
@@ -113,7 +146,7 @@ class DebtorSerializer(serializers.ModelSerializer):
     class Meta:
         model = Debtor
         fields = [
-            'id', 'first_name', 'last_name', 'phone', 'national_code', 'class_level', 'debt_amount', 'description',
+            'id', 'first_name', 'last_name', 'phone', 'class_level', 'debt_amount', 'description',
             'status', 'status_display', 'settled_at', 'settled_at_jalali',
             'followup_count', 'last_followup_at_jalali', 'followups',
             'term', 'term_title', 'created_at', 'created_at_jalali', 'updated_at',

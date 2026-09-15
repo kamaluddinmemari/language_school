@@ -1,4 +1,6 @@
 from rest_framework import serializers
+from django.utils import timezone
+from datetime import timedelta
 from .models import LevelTest, LevelTestPriceSetting
 from .levels import LEVELS_BY_AGE_GROUP
 
@@ -35,6 +37,22 @@ class LevelTestSerializer(serializers.ModelSerializer):
     mode_display = serializers.CharField(source='get_mode_display', read_only=True)
     payment_method_display = serializers.CharField(source='get_payment_method_display', read_only=True)
     payment_status_display = serializers.CharField(source='get_payment_status_display', read_only=True)
+    reminder_24h_at = serializers.SerializerMethodField()
+    reminder_2h_at = serializers.SerializerMethodField()
+    reminder_24h_due = serializers.SerializerMethodField()
+    reminder_2h_due = serializers.SerializerMethodField()
+    reminder_24h_followed_at_jalali = serializers.SerializerMethodField()
+    reminder_2h_followed_at_jalali = serializers.SerializerMethodField()
+
+    def _reminder_at(self, obj, hours):
+        return obj.test_date - timedelta(hours=hours) if obj.test_date else None
+
+    def get_reminder_24h_at(self, obj): return self._reminder_at(obj, 24)
+    def get_reminder_2h_at(self, obj): return self._reminder_at(obj, 2)
+    def get_reminder_24h_due(self, obj): return bool(obj.status == LevelTest.Status.PENDING and self._reminder_at(obj, 24) and self._reminder_at(obj, 24) <= timezone.now())
+    def get_reminder_2h_due(self, obj): return bool(obj.status == LevelTest.Status.PENDING and self._reminder_at(obj, 2) and self._reminder_at(obj, 2) <= timezone.now())
+    def get_reminder_24h_followed_at_jalali(self, obj): return obj.reminder_24h_followed_at_jalali
+    def get_reminder_2h_followed_at_jalali(self, obj): return obj.reminder_2h_followed_at_jalali
 
     class Meta:
         model = LevelTest
@@ -45,7 +63,9 @@ class LevelTestSerializer(serializers.ModelSerializer):
             'payment_method', 'payment_method_display', 'receipt_image',
             'age_group', 'level', 'test_date', 'test_date_jalali',
             'evaluator', 'evaluator_name', 'display_evaluator_name', 'notes', 'created_by',
-            'created_at', 'created_at_jalali', 'updated_at',
+            'created_at', 'created_at_jalali', 'updated_at', 'natoos_registered',
+            'reminder_24h_at', 'reminder_2h_at', 'reminder_24h_due', 'reminder_2h_due',
+            'reminder_24h_followed_at_jalali', 'reminder_2h_followed_at_jalali', 'followup_lead',
         ]
         read_only_fields = ['created_by', 'created_at', 'updated_at', 'status', 'self_requested']
 

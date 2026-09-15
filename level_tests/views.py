@@ -50,7 +50,7 @@ class StandardLevelSerializer(drf_serializers.ModelSerializer):
 
     class Meta:
         model = StandardLevel
-        fields = ['id', 'code', 'age_group', 'age_group_display', 'order', 'is_terminal', 'book', 'midterm_units', 'final_units', 'created_at']
+        fields = ['id', 'code', 'age_group', 'age_group_display', 'order', 'is_terminal', 'created_at']
         read_only_fields = ['id', 'created_at']
 
 
@@ -264,6 +264,35 @@ class LevelTestPriceSettingView(APIView):
         return Response(serializer.data)
 
 
+class LevelTestActionView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, pk, action):
+        if not can_edit_menu(request.user, 'level-tests'):
+            return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
+        try: obj = LevelTest.objects.get(pk=pk)
+        except LevelTest.DoesNotExist: return Response({'error': 'پیدا نشد'}, status=status.HTTP_404_NOT_FOUND)
+        now = timezone.now()
+        if action == 'natoos':
+            obj.natoos_registered = True
+        elif action == 'reminder-24h':
+            obj.reminder_24h_followed_at = now
+        elif action == 'reminder-2h':
+            obj.reminder_2h_followed_at = now
+        elif action == 'followup':
+            from leads.models import NewLead
+            lead = obj.followup_lead
+            if not lead:
+                lead = NewLead.objects.create(first_name=obj.first_name, last_name=obj.last_name, father_name=obj.father_name, national_code=obj.national_code, birth_date=obj.birth_date, phone=obj.phone, created_by=request.user)
+                obj.followup_lead = lead
+            obj.save(update_fields=['followup_lead', 'updated_at'])
+            return Response({'lead_id': lead.id, 'message': 'برای پیگیری به ورودی‌های جدید اضافه شد'})
+        else:
+            return Response({'error': 'اکشن نامعتبر است'}, status=status.HTTP_400_BAD_REQUEST)
+        obj.save()
+        return Response(LevelTestSerializer(obj).data)
+
+
 class LevelTestDetailView(APIView):
     """
     GET/PATCH/DELETE: مدیر و مدیر آموزش دسترسی کامل و یکسان دارند (هم مشخصات اولیه هم نتیجه،
@@ -386,5 +415,8 @@ class LevelTestDetailView(APIView):
             obj = LevelTest.objects.get(pk=pk)
         except LevelTest.DoesNotExist:
             return Response({'error': 'پیدا نشد'}, status=status.HTTP_404_NOT_FOUND)
+        # اگر این آزمون از طریق تیک «نیاز به تعیین سطح دارد» برای یک سرنخ ساخته شده بود،
+        # با حذفش تیک همان سرنخ هم خاموش شود تا در «ورودی‌های جدید» یتیم/گمراه‌کننده نماند.
+        obj.new_leads.update(needs_level_test=False, needs_level_test_marked_at=None, level_test=None)
         obj.delete()
         return Response({'message': 'حذف شد'})

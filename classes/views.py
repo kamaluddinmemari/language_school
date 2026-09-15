@@ -209,6 +209,9 @@ class TeacherDeclineView(APIView):
 
         class_request.assigned_teachers.remove(request.user)
         class_request.accepted_teachers.remove(request.user)
+        if not class_request.assigned_teachers.exists() and not class_request.teacher:
+            class_request.status = ClassRequest.Status.PENDING
+            class_request.save(update_fields=['status'])
 
         admins = User.objects.filter(role='admin')
         send_notification(
@@ -272,6 +275,57 @@ class DirectAssignClassView(APIView):
             notif_type='class_accepted'
         )
         return Response({'message': 'کلاس مستقیماً به استاد انتخاب‌شده ارجاع نهایی شد'})
+
+
+class ReturnToPendingView(APIView):
+    """
+    مدیر/کارمند می‌تواند کلاسی را که ارجاع شده (referred) یا تایید نهایی شده (confirmed)
+    را دوباره به بخش «درخواست‌های جدید» برگرداند: تمام ارجاع‌های فعلی (استاد نهایی،
+    استادهای ارجاع‌شده، استادهای تاییدکننده) پاک می‌شود تا در اپ آن استادها هم دیگر دیده نشود.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, pk):
+        if request.user.role not in ('admin', 'office'):
+            return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
+        try:
+            class_request = ClassRequest.objects.get(pk=pk)
+        except ClassRequest.DoesNotExist:
+            return Response({'error': 'درخواست پیدا نشد'}, status=status.HTTP_404_NOT_FOUND)
+
+        if class_request.status not in [ClassRequest.Status.REFERRED, ClassRequest.Status.CONFIRMED]:
+            return Response(
+                {'error': 'این کلاس در مرحله‌ای نیست که قابل بازگشت به درخواست‌های جدید باشد'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        if class_request.is_completed:
+            return Response(
+                {'error': 'این کلاس توسط استاد تمام‌شده ثبت شده و قابل بازگشت نیست'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        previous_teacher_ids = set(class_request.assigned_teachers.values_list('pk', flat=True))
+        if class_request.teacher_id:
+            previous_teacher_ids.add(class_request.teacher_id)
+        previous_teachers = list(User.objects.filter(pk__in=previous_teacher_ids))
+
+        class_request.assigned_teachers.clear()
+        class_request.accepted_teachers.clear()
+        class_request.teacher = None
+        class_request.status = ClassRequest.Status.PENDING
+        class_request.seen_by_admin = False
+        class_request.save()
+
+        if previous_teachers:
+            send_notification(
+                sender=request.user,
+                recipients=previous_teachers,
+                title='بازگشت کلاس به درخواست‌های جدید',
+                body='ارجاع این کلاس توسط مدیر لغو شد و کلاس به درخواست‌های جدید بازگردانده شد',
+                notif_type='class_rejected'
+            )
+        return Response({'message': 'کلاس به درخواست‌های جدید بازگردانده شد'})
 
 
 class FinalizeClassView(APIView):

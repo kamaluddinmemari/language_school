@@ -338,6 +338,17 @@ class MonthlyPayroll(models.Model):
         return round(total, 2)
 
     @property
+    def effective_worked_hours(self):
+        """ساعت مبنای فیش؛ با وجود رکورد تردد، مجموع خودکار منبع اصلی است."""
+        month_logs = AttendanceLog.objects.filter(user=self.user)
+        has_attendance = any(
+            (jdatetime.date.fromgregorian(date=log.date).year == self.jalali_year and
+             jdatetime.date.fromgregorian(date=log.date).month == self.jalali_month)
+            for log in month_logs
+        )
+        return self.auto_worked_hours if has_attendance else round(float(self.worked_hours or 0), 2)
+
+    @property
     def minimum_monthly_hours(self):
         try:
             configured = float(self.user.employee_profile.minimum_monthly_hours or 0)
@@ -347,11 +358,11 @@ class MonthlyPayroll(models.Model):
 
     @property
     def automatic_shortfall_hours(self):
-        return round(max(0.0, self.minimum_monthly_hours - float(self.worked_hours or 0)), 2)
+        return round(max(0.0, self.minimum_monthly_hours - float(self.effective_worked_hours or 0)), 2)
 
     @property
     def automatic_overtime_hours(self):
-        return round(max(0.0, float(self.worked_hours or 0) - self.minimum_monthly_hours), 2)
+        return round(max(0.0, float(self.effective_worked_hours or 0) - self.minimum_monthly_hours), 2)
 
     @property
     def effective_undertime_hours(self):
@@ -407,7 +418,7 @@ class MonthlyPayroll(models.Model):
         if not sp:
             return {}
         std_hours = self.standard_monthly_hours_this_month
-        ratio = (float(self.worked_hours) / std_hours) if std_hours else 0
+        ratio = (float(self.effective_worked_hours) / std_hours) if std_hours else 0
         breakdown = {
             'base_salary': sp._component_breakdown(sp.base_salary),
             'food_allowance': sp._component_breakdown(sp.food_allowance),
@@ -508,7 +519,7 @@ class MonthlyPayroll(models.Model):
     @property
     def gross_pay(self):
         """حقوق ناخالص = (حقوق ساعتی × ساعت کارکرد) + اضافه‌کاری + پاداش + اضافه‌پرداخت"""
-        base = round(self.hourly_wage * float(self.worked_hours))
+        base = round(self.hourly_wage * float(self.effective_worked_hours))
         return base + self.overtime_pay + self.holiday_work_pay + self.bonus_amount + self.extra_payment
 
     @property
@@ -662,6 +673,14 @@ class LeaveBalance(models.Model):
     def hours_remaining_in_month(self, jalali_month):
         return float(self.monthly_hourly_allowance) - self.hours_used_in_month(jalali_month)
 
+    def days_used_in_month(self, jalali_month):
+        total = 0
+        for r in self._approved_requests().filter(leave_type=LeaveRequest.LeaveType.DAILY):
+            jd = jdatetime.date.fromgregorian(date=r.start_date)
+            if jd.year == self.jalali_year and jd.month == jalali_month:
+                total += r.days_count
+        return total
+
     @property
     def monthly_hourly_breakdown(self):
         """مصرف/باقیمانده‌ی مرخصی ساعتی به‌تفکیک هر ۱۲ ماه سال جاری"""
@@ -670,6 +689,7 @@ class LeaveBalance(models.Model):
                 'jalali_month': m, 'month_label': PERSIAN_MONTHS[m - 1],
                 'used_hours': self.hours_used_in_month(m),
                 'remaining_hours': self.hours_remaining_in_month(m),
+                'used_days': self.days_used_in_month(m),
             }
             for m in range(1, 13)
         ]

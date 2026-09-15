@@ -11,6 +11,40 @@ def _jalali(dt):
     return jdatetime.datetime.fromgregorian(datetime=local_dt).strftime('%Y/%m/%d - %H:%M')
 
 
+_PERSIAN_ARABIC_DIGITS = '۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩'
+_DIGIT_TRANSLATION = str.maketrans(_PERSIAN_ARABIC_DIGITS, '01234567890123456789')
+
+
+def normalize_digits(value):
+    """ارقام فارسی/عربی را به انگلیسی تبدیل و هر کاراکتر غیرعددی (فاصله، خط تیره،...) را حذف می‌کند."""
+    if not value:
+        return ''
+    translated = str(value).translate(_DIGIT_TRANSLATION)
+    return ''.join(ch for ch in translated if ch.isdigit())
+
+
+def normalize_national_code(value):
+    return normalize_digits(value)
+
+
+def normalize_phone(value):
+    """
+    شماره موبایل را به فرمت یکسان ۱۱ رقمیِ «۰۹xxxxxxxxx» برمی‌گرداند، تا نسخه‌های
+    مختلف نوشتنِ یک شماره (با/بدون صفر ابتدایی، با پیش‌شماره ۹۸ یا +۹۸، با فاصله
+    یا خط تیره) در تطبیق افراد یکی شناخته شوند.
+    """
+    digits = normalize_digits(value)
+    if not digits:
+        return ''
+    if digits.startswith('0098'):
+        digits = digits[4:]
+    elif digits.startswith('98') and len(digits) > 10:
+        digits = digits[2:]
+    if not digits.startswith('0'):
+        digits = '0' + digits
+    return digits
+
+
 def build_person_key(national_code, phone, first_name, last_name):
     national = ''.join(str(national_code or '').split()).strip()
     if national:
@@ -68,8 +102,12 @@ class NewLead(models.Model):
     deposit_amount = models.PositiveIntegerField(null=True, blank=True, help_text='مبلغ بیعانه (تومان)')
     deposit_paid_at = models.DateTimeField(null=True, blank=True)
 
-    needs_level_test = models.BooleanField(default=False, help_text='این فرد نیاز به تعیین سطح دارد — با تیک‌خوردن، یک وقت تعیین سطح برایش رزرو و در صف تعیین سطح ثبت می‌شود')
-    level_test = models.ForeignKey('level_tests.LevelTest', on_delete=models.SET_NULL, null=True, blank=True, related_name='source_lead')
+    needs_level_test = models.BooleanField(default=False, help_text='این فرد برای تعیین سطح به صف مدیر آموزش ارجاع داده شده')
+    needs_level_test_marked_at = models.DateTimeField(null=True, blank=True)
+    level_test = models.ForeignKey(
+        'level_tests.LevelTest', on_delete=models.SET_NULL, null=True, blank=True, related_name='new_leads',
+        help_text='آزمون تعیین‌سطحی که خودکار برای این سرنخ ساخته شده',
+    )
 
     created_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
     created_at = models.DateTimeField(auto_now_add=True)
@@ -98,17 +136,6 @@ class NewLead(models.Model):
         return jdatetime.date.fromgregorian(date=self.birth_date).strftime('%Y/%m/%d')
 
     @property
-    def age(self):
-        """سن فعلی (به سال) — محاسبه‌ی خودکار از روی تاریخ تولد"""
-        if not self.birth_date:
-            return None
-        today = timezone.localdate()
-        years = today.year - self.birth_date.year
-        if (today.month, today.day) < (self.birth_date.month, self.birth_date.day):
-            years -= 1
-        return years
-
-    @property
     def followup1_at_jalali(self):
         return _jalali(self.followup1_at)
 
@@ -127,6 +154,21 @@ class NewLead(models.Model):
     @property
     def deposit_paid_at_jalali(self):
         return _jalali(self.deposit_paid_at)
+
+    @property
+    def needs_level_test_marked_at_jalali(self):
+        return _jalali(self.needs_level_test_marked_at)
+
+    @property
+    def age(self):
+        """سن فعلی (به سال) — محاسبه‌ی خودکار از روی تاریخ تولد، برای نمایش در لیست ورودی‌های جدید"""
+        if not self.birth_date:
+            return None
+        today = timezone.localdate()
+        years = today.year - self.birth_date.year
+        if (today.month, today.day) < (self.birth_date.month, self.birth_date.day):
+            years -= 1
+        return years
 
     @property
     def term_title(self):
@@ -156,10 +198,6 @@ class UnregisteredStudent(models.Model):
     term = models.ForeignKey(
         'class_management.Term', on_delete=models.SET_NULL, null=True, blank=True, related_name='+',
         help_text='ترمی که این فرد در آن ثبت شده — برای فیلتر ترمی در صفحه‌ی پیگیری',
-    )
-    class_slot = models.ForeignKey(
-        'class_management.ClassSlot', on_delete=models.SET_NULL, null=True, blank=True, related_name='unregistered_students',
-        help_text='کلاسی که این فرد در آن خارج از فهرست رسمی گزارش شده است',
     )
 
     submitted_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='submitted_unregistered_students')
@@ -236,7 +274,6 @@ class Debtor(models.Model):
     first_name = models.CharField(max_length=150)
     last_name = models.CharField(max_length=150)
     phone = models.CharField(max_length=20)
-    national_code = models.CharField(max_length=20, blank=True)
     identity_key = models.CharField(max_length=255, blank=True, default='', editable=False)
     class_level = models.CharField(max_length=50, blank=True)
     debt_amount = models.PositiveIntegerField()

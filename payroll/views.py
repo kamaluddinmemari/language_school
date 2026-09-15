@@ -19,6 +19,24 @@ def is_admin(user):
     return user.role == 'admin'
 
 
+def allows_multiple_daily_attendance(user):
+    """فلگ را مستقیماً از EmployeeProfile بخوان؛ به reverse relation وابسته نباش."""
+    return EmployeeProfile.objects.filter(
+        user_id=getattr(user, 'id', user),
+        allows_multiple_daily_attendance=True,
+    ).exists()
+
+
+_ORDINAL_WORDS = ['اول', 'دوم', 'سوم', 'چهارم', 'پنجم', 'ششم', 'هفتم', 'هشتم', 'نهم', 'دهم']
+
+
+def _ordinal_fa(n):
+    """عدد ترتیبی فارسی — برای پیام «ورود اول»، «ورود دوم» و... (بعد از دهم، عدد ساده می‌نویسد)"""
+    if 1 <= n <= len(_ORDINAL_WORDS):
+        return _ORDINAL_WORDS[n - 1]
+    return f'شماره {n}'
+
+
 class AdminEditOwnViewMixin:
     """
     قاعده‌ی مشترک بیشتر endpointهای این اپ: مدیر کنترل کامل روی همه دارد (ساخت/ویرایش/حذف برای هر کارمند)؛
@@ -332,7 +350,11 @@ class MyAttendanceTodayView(APIView):
         logs_today = list(AttendanceLog.objects.filter(user_id=request.user.id, date=today).order_by('check_in', 'id'))
         latest = logs_today[-1] if logs_today else None
         payload = AttendanceLogSerializer(latest).data if latest else {'date': today.isoformat(), 'check_in': None, 'check_out': None}
-        allow_multiple = getattr(getattr(request.user, 'employee_profile', None), 'allows_multiple_daily_attendance', False)
+        allow_multiple = allows_multiple_daily_attendance(request.user)
+        # این فلگ باید مستقل از وجود رکورد امروز ارسال شود؛ کلاینت نباید از
+        # sessions_today برای تشخیص تنظیمات کارمند استفاده کند، چون در شروع
+        # روز هنوز هیچ رکوردی وجود ندارد.
+        payload['allows_multiple_daily_attendance'] = bool(allow_multiple)
         if allow_multiple:
             payload['sessions_today'] = AttendanceLogSerializer(logs_today, many=True).data
             payload['total_hours_today'] = round(sum(float(l.worked_hours or 0) for l in logs_today), 2)
@@ -353,13 +375,16 @@ class CheckInView(APIView):
         if leave:
             return Response({'error': 'کارمند در مرخصی می‌باشد', 'on_leave': True, 'leave_shift': getattr(leave, 'leave_shift', 'full_day'), 'leave_credited_hours': getattr(leave, 'credited_hours_label', ''),}, status=status.HTTP_400_BAD_REQUEST)
 
-        allow_multiple = getattr(getattr(request.user, 'employee_profile', None), 'allows_multiple_daily_attendance', False)
+        allow_multiple = allows_multiple_daily_attendance(request.user)
         if allow_multiple:
             open_log = AttendanceLog.objects.filter(user=request.user, date=today, check_in__isnull=False, check_out__isnull=True).order_by('-check_in').first()
             if open_log:
                 return Response({'error': f'یک ورودِ بازِ ثبت‌نشده از ساعت {open_log.check_in_time_jalali} دارید — اول باید همان را خروج بزنید'}, status=status.HTTP_400_BAD_REQUEST)
             log = AttendanceLog.objects.create(user=request.user, date=today, check_in=timezone.now(), check_in_method=method)
-            return Response(AttendanceLogSerializer(log).data, status=status.HTTP_201_CREATED)
+            check_in_number = AttendanceLog.objects.filter(user=request.user, date=today).count()
+            data = AttendanceLogSerializer(log).data
+            data['message'] = f'ورود {_ordinal_fa(check_in_number)} شما ثبت شد (ساعت {log.check_in_time_jalali})'
+            return Response(data, status=status.HTTP_201_CREATED)
 
         log, created = AttendanceLog.objects.get_or_create(user=request.user, date=today)
         if log.check_in:
@@ -379,7 +404,7 @@ class CheckOutView(APIView):
         method = getattr(request, '_attendance_method', 'manual')
         today = timezone.localtime(timezone.now()).date()
 
-        allow_multiple = getattr(getattr(request.user, 'employee_profile', None), 'allows_multiple_daily_attendance', False)
+        allow_multiple = allows_multiple_daily_attendance(request.user)
         if allow_multiple:
             log = AttendanceLog.objects.filter(user=request.user, date=today, check_in__isnull=False, check_out__isnull=True).order_by('-check_in').first()
             if not log:
@@ -387,7 +412,10 @@ class CheckOutView(APIView):
             log.check_out = timezone.now()
             log.check_out_method = method
             log.save(update_fields=['check_out', 'check_out_method', 'updated_at'])
-            return Response(AttendanceLogSerializer(log).data)
+            check_out_number = AttendanceLog.objects.filter(user=request.user, date=today, check_out__isnull=False).count()
+            data = AttendanceLogSerializer(log).data
+            data['message'] = f'خروج {_ordinal_fa(check_out_number)} شما ثبت شد (ساعت {log.check_out_time_jalali})'
+            return Response(data)
 
         log = AttendanceLog.objects.filter(user=request.user, date=today).first()
         if not log or not log.check_in:
