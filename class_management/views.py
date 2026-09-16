@@ -349,15 +349,12 @@ def _location_types_compatible(source, target):
 
 
 def _swap_locations_compatible(source, target):
-    """جابجایی فیزیکی فقط بین دو کلاس دقیقاً هم‌روز و هم‌ساعت انجام می‌شود."""
-    return (
-        source.term_id == target.term_id
-        and source.number != target.number
-        and source.day_type == target.day_type
-        and source.time_slot == target.time_slot
-        and source.gender == target.gender
-        and source.is_online == target.is_online
-    )
+    """جابجایی فیزیکی محل بین هر دو کلاس متفاوت از همان ترم مجاز است (در همه‌ی روزها و
+    ساعت‌ها) — فقط شماره‌ی محل بین دو رکورد جابجا می‌شود و بقیه‌ی مشخصات هر کلاس (روز،
+    ساعت، استاد، سطح، جنسیت، حالت آنلاین/حضوری) دست‌نخورده با همان رکورد می‌ماند؛ یعنی اگر
+    کلاس مقصد سطح/استاد داشته باشد، با همه‌ی مشخصاتش همراه محل جدید (شماره‌ی کلاس مبدا)
+    باقی می‌ماند."""
+    return source.term_id == target.term_id and source.number != target.number
 
 
 class SwapClassLocationView(APIView):
@@ -379,7 +376,7 @@ class SwapClassLocationView(APIView):
                 if source.number < 1 or source.number > 11 or target.number < 1 or target.number > 11:
                     return Response({'error': 'شمارهٔ محل هر دو کلاس باید بین ۱ تا ۱۱ باشد'}, status=status.HTTP_400_BAD_REQUEST)
                 if not _swap_locations_compatible(source, target):
-                    return Response({'error': 'برای جابجایی، کلاس مقصد باید دقیقاً در همان روز، همان ساعت، همان ترم، با جنسیت و حالت برگزاری یکسان باشد'}, status=status.HTTP_400_BAD_REQUEST)
+                    return Response({'error': 'کلاس مقصد باید متعلق به همان ترم کلاس مبدا باشد و شماره‌ی متفاوتی داشته باشد'}, status=status.HTTP_400_BAD_REQUEST)
                 source_number, target_number = source.number, target.number
                 temporary_number = (ClassSlot.objects.order_by('-number').values_list('number', flat=True).first() or 0) + 1000000
                 source.number = temporary_number
