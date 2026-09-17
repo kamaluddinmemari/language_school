@@ -6,6 +6,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.parsers import MultiPartParser, FormParser
 from django.utils import timezone
 from django.db.models import Q
+from django.db.models.functions import Coalesce
 from .models import LevelTest, LevelTestPriceSetting, StandardLevel
 from .serializers import LevelTestIntakeSerializer, LevelTestSerializer, LevelTestPriceSettingSerializer
 from accounts.menu_permissions import can_edit_menu, can_view_menu
@@ -134,7 +135,9 @@ class LevelTestListCreateView(APIView):
         if not can_view_menu(user, 'level-tests'):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
 
-        qs = LevelTest.objects.all()
+        # خواسته: صف همیشه بر اساس وقتِ تعیین‌شده از نزدیک‌ترین به دورترین چیده شود؛ برای کسانی
+        # که هنوز وقتی برایشان تعیین نشده، زمان ثبتشان در صف (created_at) ملاک مرتب‌سازی است.
+        qs = LevelTest.objects.annotate(_effective_sort_time=Coalesce('test_date', 'created_at')).order_by('_effective_sort_time')
 
         search = request.query_params.get('search', '').strip()
         if search:

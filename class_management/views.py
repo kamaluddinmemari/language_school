@@ -306,11 +306,21 @@ class ClassSlotDetailView(generics.RetrieveUpdateDestroyAPIView):
         if not can_edit_menu(request.user, 'class-management'):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
 
+        obj = self.get_object()
+
+        # خواسته: تا وقتی کلاس دانش‌آموز ثبت‌نام‌شده دارد (چه تاییدشده چه در انتظار تایید پرداخت)،
+        # اجازه‌ی ویرایش داده نمی‌شود — ابتدا باید دانش‌آموز(ها) از کلاس حذف یا مسترد شوند
+        enrolled_count = obj.enrollments.count()
+        if enrolled_count:
+            return Response(
+                {'error': f'این کلاس {enrolled_count} دانش‌آموز ثبت‌نام‌شده دارد — تا زمانی که دانش‌آموز(ها) از کلاس حذف یا مسترد نشوند، امکان ویرایش این کلاس وجود ندارد'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
         # خواسته: توی هر ردیفِ روز+ساعت (مثلاً همه‌ی کلاس‌های زوج ساعت ۳:۴۵ الی ۵:۱۵)، یک استاد
         # فقط می‌تواند همزمان روی یک کلاس باشد — نباید بین چند اتاق در همان روز/ساعت تداخل داشته باشد
         new_teacher = (request.data.get('teacher_name') or '').strip()
         if new_teacher:
-            obj = self.get_object()
             conflict = ClassSlot.objects.filter(
                 day_type=obj.day_type, time_slot=obj.time_slot, term=obj.term,
                 teacher_name__iexact=new_teacher,
@@ -326,6 +336,17 @@ class ClassSlotDetailView(generics.RetrieveUpdateDestroyAPIView):
     def destroy(self, request, *args, **kwargs):
         if not can_edit_menu(request.user, 'class-management'):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
+
+        obj = self.get_object()
+
+        # خواسته: تا وقتی کلاس دانش‌آموز ثبت‌نام‌شده دارد، اجازه‌ی حذف داده نمی‌شود
+        enrolled_count = obj.enrollments.count()
+        if enrolled_count:
+            return Response(
+                {'error': f'این کلاس {enrolled_count} دانش‌آموز ثبت‌نام‌شده دارد — تا زمانی که دانش‌آموز(ها) از کلاس حذف یا مسترد نشوند، امکان حذف این کلاس وجود ندارد'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
         return super().destroy(request, *args, **kwargs)
 
 
