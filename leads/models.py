@@ -102,6 +102,8 @@ class NewLead(models.Model):
     deposit_amount = models.PositiveIntegerField(null=True, blank=True, help_text='مبلغ بیعانه (تومان)')
     deposit_paid_at = models.DateTimeField(null=True, blank=True)
 
+    description = models.TextField(blank=True, default='', help_text='توضیحات آزاد ثبت‌شده توسط مدیر برای این سرنخ')
+
     needs_level_test = models.BooleanField(default=False, help_text='این فرد برای تعیین سطح به صف مدیر آموزش ارجاع داده شده')
     needs_level_test_marked_at = models.DateTimeField(null=True, blank=True)
     level_test = models.ForeignKey(

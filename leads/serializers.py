@@ -70,6 +70,7 @@ class NewLeadSerializer(serializers.ModelSerializer):
             'followup2_at', 'followup2_at_jalali', 'followup2_by_name',
             'registered_at', 'registered_at_jalali', 'cancelled_at', 'cancelled_at_jalali',
             'deposit_amount', 'deposit_paid_at', 'deposit_paid_at_jalali',
+            'description',
             'needs_level_test', 'needs_level_test_marked_at', 'needs_level_test_marked_at_jalali',
             'created_at', 'created_at_jalali', 'updated_at', 'level_test',
         ]
