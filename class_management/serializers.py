@@ -117,6 +117,7 @@ class RoomCapacitySerializer(serializers.Serializer):
     thursday_morning_gender = serializers.ChoiceField(choices=ClassSlot.Gender.choices)
     thursday_evening_gender = serializers.ChoiceField(choices=ClassSlot.Gender.choices)
     friday_gender = serializers.ChoiceField(choices=ClassSlot.Gender.choices)
+    friday_evening_gender = serializers.ChoiceField(choices=ClassSlot.Gender.choices, required=False, default=ClassSlot.Gender.MIXED)
 
 
 class BulkCreatePhysicalClassesSerializer(serializers.Serializer):
@@ -130,6 +131,7 @@ class BulkCreatePhysicalClassesSerializer(serializers.Serializer):
     include_thursday_morning = serializers.BooleanField(required=False, default=True)
     include_thursday_evening = serializers.BooleanField(required=False, default=True)
     include_friday = serializers.BooleanField(required=False, default=True)
+    include_friday_evening = serializers.BooleanField(required=False, default=True)
     is_online = serializers.BooleanField(required=False, default=False)
     schedule_kind = serializers.ChoiceField(choices=ClassSlot.ScheduleKind.choices, required=False, default=ClassSlot.ScheduleKind.STANDARD)
     two_day_days = serializers.ListField(child=serializers.CharField(), required=False, default=list)

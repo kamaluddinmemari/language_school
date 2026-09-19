@@ -28,6 +28,8 @@ DAY_TYPE_WEEKDAYS = {
     'thursday_morning': (3,),
     'thursday_evening': (3,),
     'friday': (4,),
+    'friday_morning': (4,),
+    'friday_evening': (4,),
     # کلاس‌های چرخشی/ترکیبی/آنلاین در صورت نداشتن روز اختصاصی، از تقویم سه‌روزهٔ
     # استاندارد استفاده می‌کنند؛ کلاس دو‌روزه فقط از schedule_days خودش استفاده می‌کند.
     'rotating': (5, 0, 2),
@@ -110,7 +112,7 @@ def attendance_session_dates_for_slot(slot, session_count=DEFAULT_SESSION_COUNT)
     بنابراین endpoint اپ نیز باید دقیقاً همان شماره جلسه و همان تاریخ را بدهد.
     """
     dates = session_dates_for_slot(slot, session_count=session_count)
-    one_day_types = {'thursday_morning', 'thursday_evening', 'friday'}
+    one_day_types = {'thursday_morning', 'thursday_evening', 'friday', 'friday_morning', 'friday_evening'}
     if slot.day_type not in one_day_types:
         return dates
     expanded = []

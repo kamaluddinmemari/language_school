@@ -13,7 +13,7 @@ from rest_framework.parsers import MultiPartParser, FormParser
 from rest_framework.permissions import IsAuthenticated
 import jdatetime
 from .models import ClassSlot, ClassSlotEnrollment, TuitionSetting, DiscountedPerson, EnrollmentRefund, WalletTransaction, infer_age_group_from_level, _jalali, LevelRenewalApproval, Term, TermHoliday, OnlineCourse, OnlineCourseEnrollment, PaymentSettings, ClassAttendance, OnlineCourseActionRequest
-from .models import THREE_DAY_TIME_SLOTS, THURSDAY_MORNING_SLOT, THURSDAY_EVENING_SLOT, FRIDAY_SLOT
+from .models import THREE_DAY_TIME_SLOTS, THURSDAY_MORNING_SLOT, THURSDAY_EVENING_SLOT, FRIDAY_SLOT, FRIDAY_MORNING_SLOT, FRIDAY_EVENING_SLOT
 
 # QR و جلسات استادان فعلاً غیرفعال هستند؛ نبودن مدل‌های این بخش‌ها نباید مانع اجرای ترم و کلاس شود.
 try:
@@ -122,6 +122,15 @@ def _auto_distribute_surplus(source, remainder):
 
 
 class ClassSlotListView(generics.ListCreateAPIView):
+    """
+    GET: لیست کلاس‌های فیزیکی/آنلاین — با فیلترهای اختیاری زیر (برای بخش «کلاس‌های ترم» و
+    فهرست‌های مشابه که نیاز به لیست فشرده‌ی کلاس‌های یک ترم مشخص با ترکیبی از فیلترها دارند):
+      term: شناسه‌ی ترم (یا legacy/unassigned/null برای کلاس‌های بدون ترم)
+      day_type: نوع روز (even/odd/thursday_morning/thursday_evening/friday_morning/friday_evening/...)
+      time_slot: ساعت دقیق (مثلاً 08:00-09:30)
+      assigned_level: سطح تخصیص‌داده‌شده
+      teacher_name: نام استاد (تطبیق دقیق—غیرحساس به بزرگی/کوچکی حروف)
+    """
     permission_classes = [IsAuthenticated]
     serializer_class = ClassSlotSerializer
 
@@ -134,6 +143,18 @@ class ClassSlotListView(generics.ListCreateAPIView):
             qs = qs.filter(term__isnull=True)
         elif term_id and str(term_id).isdigit():
             qs = qs.filter(term_id=int(term_id))
+        day_type = self.request.query_params.get('day_type')
+        if day_type:
+            qs = qs.filter(day_type=day_type)
+        time_slot = self.request.query_params.get('time_slot')
+        if time_slot:
+            qs = qs.filter(time_slot=time_slot)
+        assigned_level = self.request.query_params.get('assigned_level')
+        if assigned_level:
+            qs = qs.filter(assigned_level__iexact=assigned_level)
+        teacher_name = self.request.query_params.get('teacher_name')
+        if teacher_name:
+            qs = qs.filter(teacher_name__iexact=teacher_name)
         return qs
 
     def create(self, request, *args, **kwargs):
@@ -213,7 +234,10 @@ class CarryClassesToNextTermView(APIView):
                 if gender not in ClassSlot.Gender.values:
                     skipped.append({'source_id': source.id, 'reason': 'جنسیت کلاس مقصد معتبر نیست'})
                     continue
-                fixed_time = {ClassSlot.DayType.THURSDAY_MORNING: THURSDAY_MORNING_SLOT, ClassSlot.DayType.THURSDAY_EVENING: THURSDAY_EVENING_SLOT, ClassSlot.DayType.FRIDAY: FRIDAY_SLOT}.get(day_type)
+                fixed_time = {
+                    ClassSlot.DayType.THURSDAY_MORNING: THURSDAY_MORNING_SLOT, ClassSlot.DayType.THURSDAY_EVENING: THURSDAY_EVENING_SLOT,
+                    ClassSlot.DayType.FRIDAY: FRIDAY_SLOT, ClassSlot.DayType.FRIDAY_MORNING: FRIDAY_MORNING_SLOT, ClassSlot.DayType.FRIDAY_EVENING: FRIDAY_EVENING_SLOT,
+                }.get(day_type)
                 if fixed_time:
                     time_slot = fixed_time
                 automatic_level, level_warning = _next_level_for_carryover(source.assigned_level, terminal_levels)
@@ -351,7 +375,10 @@ class ClassSlotDetailView(generics.RetrieveUpdateDestroyAPIView):
 
 
 THREE_DAY_TYPES = {ClassSlot.DayType.EVEN, ClassSlot.DayType.ODD}
-ONE_DAY_TYPES = {ClassSlot.DayType.THURSDAY_MORNING, ClassSlot.DayType.THURSDAY_EVENING, ClassSlot.DayType.FRIDAY}
+ONE_DAY_TYPES = {
+    ClassSlot.DayType.THURSDAY_MORNING, ClassSlot.DayType.THURSDAY_EVENING,
+    ClassSlot.DayType.FRIDAY, ClassSlot.DayType.FRIDAY_MORNING, ClassSlot.DayType.FRIDAY_EVENING,
+}
 
 
 def _location_types_compatible(source, target):
@@ -778,6 +805,7 @@ class BulkCreatePhysicalClassesView(APIView):
         include_thu_morning = serializer.validated_data.get('include_thursday_morning', True)
         include_thu_evening = serializer.validated_data.get('include_thursday_evening', True)
         include_friday = serializer.validated_data.get('include_friday', True)
+        include_friday_evening = serializer.validated_data.get('include_friday_evening', True)
         is_online = serializer.validated_data.get('is_online', False)
         schedule_kind = serializer.validated_data.get('schedule_kind', ClassSlot.ScheduleKind.STANDARD)
         two_day_days = serializer.validated_data.get('two_day_days') or []
@@ -813,7 +841,9 @@ class BulkCreatePhysicalClassesView(APIView):
                 if include_thu_evening:
                     combos.append((ClassSlot.DayType.THURSDAY_EVENING, THURSDAY_EVENING_SLOT, room['thursday_evening_gender'], [], [], ''))
                 if include_friday:
-                    combos.append((ClassSlot.DayType.FRIDAY, FRIDAY_SLOT, room['friday_gender'], [], [], ''))
+                    combos.append((ClassSlot.DayType.FRIDAY_MORNING, FRIDAY_MORNING_SLOT, room['friday_gender'], [], [], ''))
+                if include_friday_evening:
+                    combos.append((ClassSlot.DayType.FRIDAY_EVENING, FRIDAY_EVENING_SLOT, room.get('friday_evening_gender') or ClassSlot.Gender.MIXED, [], [], ''))
 
             for day_type, time_slot, gender, schedule_days, row_delivery_pattern, rotation_group in combos:
                 # get_or_create با term و is_online در ورودی جستجو، یعنی هر ترم و هر حالت
@@ -2961,7 +2991,7 @@ def _teacher_event_payload(event):
 def _teacher_report_session_dates(slot):
     """تقویم گزارش استادان: هر نوبت یک‌روزدرهفته، سه جلسهٔ متوالی در همان تاریخ دارد."""
     dates = session_dates_for_slot(slot)
-    one_day_types = {'thursday_morning', 'thursday_evening', 'friday'}
+    one_day_types = {'thursday_morning', 'thursday_evening', 'friday', 'friday_morning', 'friday_evening'}
     if slot.day_type not in one_day_types:
         return dates
     expanded = []
@@ -3030,7 +3060,7 @@ def _teacher_attendance_data(record):
     setting = getattr(record.teacher, 'teacher_compensation_setting', None)
     multiplier = 1.0
     if setting:
-        if record.class_slot.day_type == ClassSlot.DayType.FRIDAY: multiplier = float(setting.friday_multiplier)
+        if record.class_slot.day_type in (ClassSlot.DayType.FRIDAY, ClassSlot.DayType.FRIDAY_MORNING, ClassSlot.DayType.FRIDAY_EVENING): multiplier = float(setting.friday_multiplier)
         elif record.class_slot.day_type in (ClassSlot.DayType.THURSDAY_MORNING, ClassSlot.DayType.THURSDAY_EVENING): multiplier = float(setting.thursday_multiplier)
     base = (setting.session_price if setting and record.check_out_at else 0) * multiplier
     allowed = max(1, int(setting.allowed_minutes_per_session)) if setting else 90

@@ -36,7 +36,8 @@ def allocate_classes(levels, tolerance=0, thursday_only_count=0, friday_only_cou
         s.current_count = 0
 
     thursday_slots = [s for s in slots if s.day_type in (ClassSlot.DayType.THURSDAY_MORNING, ClassSlot.DayType.THURSDAY_EVENING)]
-    friday_slots = [s for s in slots if s.day_type == ClassSlot.DayType.FRIDAY]
+    friday_slots = [s for s in slots if s.day_type in (
+        ClassSlot.DayType.FRIDAY, ClassSlot.DayType.FRIDAY_MORNING, ClassSlot.DayType.FRIDAY_EVENING)]
     category_slots = [s for s in slots if s.day_type in (
         ClassSlot.DayType.EVEN, ClassSlot.DayType.ODD, ClassSlot.DayType.TWO_DAY, ClassSlot.DayType.ROTATING, ClassSlot.DayType.ONLINE, ClassSlot.DayType.HYBRID)]
 

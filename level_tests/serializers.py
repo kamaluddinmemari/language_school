@@ -13,11 +13,12 @@ class LevelTestPriceSettingSerializer(serializers.ModelSerializer):
 
 
 class LevelTestIntakeSerializer(serializers.ModelSerializer):
-    """برای مرحله‌ی اول — فقط مدیر/کانتر، فقط مشخصات اولیه‌ی داوطلب (بدون نتیجه)"""
+    """برای مرحله‌ی اول — فقط مدیر/کانتر، فقط مشخصات اولیه‌ی داوطلب (بدون نتیجه).
+    test_date اختیاری است — همان‌جا هم می‌توان وقت تعیین سطح را رزرو کرد."""
 
     class Meta:
         model = LevelTest
-        fields = ['id', 'first_name', 'last_name', 'father_name', 'birth_date', 'national_code', 'phone', 'gender', 'student', 'price', 'payment_status']
+        fields = ['id', 'first_name', 'last_name', 'father_name', 'birth_date', 'national_code', 'phone', 'gender', 'student', 'price', 'payment_status', 'test_date']
 
     def validate(self, attrs):
         for field in ['first_name', 'last_name', 'father_name', 'birth_date', 'national_code', 'phone', 'gender']:

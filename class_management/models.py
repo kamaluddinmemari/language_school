@@ -42,15 +42,22 @@ EVENING_LATE_TIME_SLOTS = ['17:30-19:00', '19:00-20:30']  # برای زبان‌
 THREE_DAY_TIME_SLOTS = ['09:45-11:15', '11:30-13:00', '15:45-17:15', '17:30-19:00', '19:00-20:30']
 THURSDAY_MORNING_SLOT = '08:00-13:00'
 THURSDAY_EVENING_SLOT = '13:00-17:30'
-FRIDAY_SLOT = '08:30-13:15'
+FRIDAY_SLOT = '08:30-13:15'  # منسوخ — فقط برای کلاس‌های قدیمی با day_type='friday' نگه داشته شده
+# تایم‌های استاندارد جدید جمعه — مثل پنجشنبه، به صبح و عصر تفکیک شده‌اند
+FRIDAY_MORNING_SLOT = '08:30-13:15'  # همان ساعتِ واقعیِ «جمعه» قدیمی — کلاس‌های واقعیِ موجود دقیقاً همین ساعت را دارند
+FRIDAY_EVENING_SLOT = '13:15-18:00'  # ساعتِ جدید و مستقل جمعه عصر — بلافاصله بعد از پایان جمعه صبح
 
 # بازه‌های مجاز برای ثبت ساب/غیبت/جبرانیِ کلاس‌های یک‌روزه.
 # خودِ ClassSlot بازهٔ کلی روز را نگه می‌دارد، اما هر رویداد جلسه‌ای بازهٔ واقعی همان جلسه را ثبت می‌کند.
 THURSDAY_MORNING_EVENT_SLOTS = ['08:00-13:00', '08:00-09:30', '09:45-11:15', '11:30-13:00']
 THURSDAY_EVENING_EVENT_SLOTS = ['13:00-17:30', '13:00-14:15', '14:30-15:45', '16:00-17:30']
-FRIDAY_EVENT_SLOTS = ['08:30-13:15']
+FRIDAY_EVENT_SLOTS = ['08:30-13:15']  # منسوخ — برای کلاس‌های قدیمی day_type='friday'
+FRIDAY_MORNING_EVENT_SLOTS = ['08:30-13:15']
+FRIDAY_EVENING_EVENT_SLOTS = ['13:15-18:00']
 
-ALL_STANDARD_TIME_SLOTS = MORNING_TIME_SLOTS + EVENING_TIME_SLOTS + [THURSDAY_MORNING_SLOT, THURSDAY_EVENING_SLOT, FRIDAY_SLOT]
+ALL_STANDARD_TIME_SLOTS = MORNING_TIME_SLOTS + EVENING_TIME_SLOTS + [
+    THURSDAY_MORNING_SLOT, THURSDAY_EVENING_SLOT, FRIDAY_SLOT, FRIDAY_MORNING_SLOT, FRIDAY_EVENING_SLOT,
+]
 
 
 class Term(models.Model):
@@ -138,7 +145,9 @@ class ClassSlot(models.Model):
         ODD = 'odd', 'روز فرد (سه روز در هفته)'
         THURSDAY_MORNING = 'thursday_morning', 'یک روز در هفته - پنجشنبه صبح'
         THURSDAY_EVENING = 'thursday_evening', 'یک روز در هفته - پنجشنبه عصر'
-        FRIDAY = 'friday', 'یک روز در هفته - جمعه'
+        FRIDAY = 'friday', 'یک روز در هفته - جمعه'  # منسوخ — فقط برای سازگاری با کلاس‌های قدیمی
+        FRIDAY_MORNING = 'friday_morning', 'یک روز در هفته - جمعه صبح'
+        FRIDAY_EVENING = 'friday_evening', 'یک روز در هفته - جمعه عصر'
         ONLINE = 'online', 'آنلاین'
         HYBRID = 'hybrid', 'ترکیبی (آنلاین و حضوری)'
 
@@ -264,6 +273,8 @@ class ClassSlot(models.Model):
             self.DayType.THURSDAY_MORNING: THURSDAY_MORNING_SLOT,
             self.DayType.THURSDAY_EVENING: THURSDAY_EVENING_SLOT,
             self.DayType.FRIDAY: FRIDAY_SLOT,
+            self.DayType.FRIDAY_MORNING: FRIDAY_MORNING_SLOT,
+            self.DayType.FRIDAY_EVENING: FRIDAY_EVENING_SLOT,
         }.get(self.day_type)
 
     def time_category(self):

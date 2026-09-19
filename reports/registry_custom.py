@@ -251,7 +251,8 @@ register_source(DataSource(
         SourceField('number', 'شماره کلاس', 'number', 'number'),
         SourceField('day_type', 'نوع روز', 'day_type', 'choice', {
             'even': 'زوج', 'odd': 'فرد', 'thursday_morning': 'پنجشنبه صبح',
-            'thursday_evening': 'پنجشنبه عصر', 'friday': 'جمعه', 'online': 'آنلاین', 'hybrid': 'ترکیبی'}),
+            'thursday_evening': 'پنجشنبه عصر', 'friday': 'جمعه', 'friday_morning': 'جمعه صبح',
+            'friday_evening': 'جمعه عصر', 'online': 'آنلاین', 'hybrid': 'ترکیبی'}),
         SourceField('time_slot', 'ساعت', 'time_slot'),
         SourceField('is_online', 'آنلاین؟', 'is_online', 'choice', {'True': 'آنلاین', 'False': 'حضوری'}),
         SourceField('gender', 'جنسیت', 'gender', 'choice', {'girls': 'دخترانه', 'boys': 'پسرانه', 'mixed': 'مختلط'}),
