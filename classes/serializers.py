@@ -44,7 +44,7 @@ class ClassRequestAdminSerializer(serializers.ModelSerializer):
             'accepted_teachers', 'accepted_teachers_info',
             'class_type', 'custom_class_type', 'is_online', 'meeting_link', 'language_level',
             'proposed_time', 'class_date', 'class_date_jalali', 'class_date_approved',
-            'suggested_teacher_name',
+            'suggested_teacher_name', 'group_key',
             'session_duration', 'session_count', 'sessions',
             'total_price', 'teacher_share', 'school_share',
             'teacher_payment_status', 'teacher_payment_date', 'teacher_payment_amount',
@@ -77,6 +77,8 @@ class ClassRequestAdminCreateSerializer(serializers.Serializer):
     meeting_link = serializers.CharField(max_length=500, required=False, allow_blank=True)
     language_level = serializers.CharField(max_length=50)
     proposed_time = serializers.CharField(max_length=100, required=False, allow_blank=True)
+    class_date = serializers.DateTimeField(required=False, allow_null=True)
+    group_key = serializers.CharField(max_length=40, required=False, allow_blank=True)
     session_count = serializers.IntegerField(min_value=1)
     session_duration = serializers.ChoiceField(
         choices=ClassRequest.SessionDuration.choices,

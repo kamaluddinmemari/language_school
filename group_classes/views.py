@@ -5,7 +5,7 @@ from rest_framework.permissions import IsAuthenticated
 from django.utils import timezone
 from django.db.models import Q
 from django.core.exceptions import ValidationError as DjangoValidationError
-from accounts.models import User
+from accounts.models import User, ClassRequest
 from accounts.validators import username_validator, password_validator
 from notifications.utils import send_notification
 from accounts.menu_permissions import can_edit_menu
@@ -178,6 +178,21 @@ class JoinGroupSessionView(APIView):
             return Response({'error': 'این نفر قبلاً ثبت‌نام کرده'}, status=status.HTTP_400_BAD_REQUEST)
 
         participant = GroupSessionParticipant.objects.create(group_session=group_session, student=student)
+
+        # خواسته: هرکس در یک جلسه‌ی «خصوصی گروهی» ثبت‌نام می‌شود، خودکار در فهرست کلاس‌های
+        # خصوصیِ معمولیِ صفحه‌ی اصلی (ClassRequest با class_type='private') هم اضافه شود.
+        if group_session.session_type == GroupSession.SessionType.PRIVATE_GROUP:
+            ClassRequest.objects.create(
+                student=student,
+                class_type=ClassRequest.ClassType.PRIVATE,
+                is_online=group_session.is_online,
+                meeting_link=group_session.meeting_link,
+                language_level=group_session.language_level,
+                class_date=group_session.class_date,
+                session_duration=group_session.session_duration,
+                session_count=group_session.session_count,
+                notes=f'ثبت‌نام خودکار از کلاس خصوصی گروهی #{group_session.id}' + (f' — {group_session.notes}' if group_session.notes else ''),
+            )
 
         serializer_cls = _serializer_for(request)
         return Response(serializer_cls(group_session, context={'request': request}).data, status=status.HTTP_201_CREATED)

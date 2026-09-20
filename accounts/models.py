@@ -217,6 +217,9 @@ class ClassRequest(models.Model):
     accepted_teachers = models.ManyToManyField(User, blank=True, related_name='accepted_classes', limit_choices_to={'role__in': User.TEACHER_LIKE_ROLES})
     class_type = models.CharField(max_length=10, choices=ClassType.choices, default=ClassType.PRIVATE)
     custom_class_type = models.CharField(max_length=100, blank=True)
+    # خواسته: کلاس خصوصی چند نفره — چند ClassRequest که با هم ثبت شده‌اند (هرکدام برای یک نفر)
+    # با یک کلید مشترک به هم مرتبط می‌شوند تا در لیست کلاس‌ها به‌صورت یک ردیف با چند اسم نشان داده شوند.
+    group_key = models.CharField(max_length=40, blank=True, db_index=True, help_text='برای کلاس خصوصی چند نفره — همه‌ی اعضای یک کلاس مشترک، این مقدار را یکسان دارند')
     is_online = models.BooleanField(default=False, help_text='کلاس آنلاین است — دقیقاً همان شرایط کلاس‌های آنلاین ترمیک را دارد؛ بعد از تایید نهایی، لینک به اپ استاد و دانش‌آموز نمایش داده می‌شود')
     meeting_link = models.URLField(max_length=500, blank=True)
     language_level = models.CharField(max_length=50)
