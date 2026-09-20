@@ -215,6 +215,8 @@ class PriceSettingSerializer(serializers.ModelSerializer):
         model = PriceSetting
         fields = [
             'id', 'one_hour_price', 'one_half_hour_price',
+            'two_person_one_hour_price', 'two_person_one_half_hour_price',
+            'three_plus_person_one_hour_price', 'three_plus_person_one_half_hour_price',
             'teacher_share_percent', 'school_share_percent', 'updated_at'
         ]
         read_only_fields = ['updated_at']

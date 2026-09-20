@@ -58,11 +58,15 @@ class MonthlyPayrollSerializer(serializers.ModelSerializer):
     work_adjustment_explanation = serializers.ReadOnlyField()
     marital_status_display = serializers.ReadOnlyField()
     children_count = serializers.ReadOnlyField()
+    seniority_base_annual = serializers.ReadOnlyField()
     seniority_base_monthly = serializers.ReadOnlyField()
     seniority_base_daily = serializers.ReadOnlyField()
     seniority_base_hourly = serializers.ReadOnlyField()
     is_seniority_eligible = serializers.ReadOnlyField()
     component_amounts_this_month = serializers.ReadOnlyField()
+    approved_daily_leave_hours_this_month = serializers.ReadOnlyField()
+    approved_hourly_leave_hours_this_month = serializers.ReadOnlyField()
+    leave_shift_breakdown_this_month = serializers.ReadOnlyField()
     holiday_work_hours = serializers.ReadOnlyField()
     holiday_work_explanation = serializers.ReadOnlyField()
     holiday_work_pay = serializers.ReadOnlyField()
@@ -80,8 +84,9 @@ class MonthlyPayrollSerializer(serializers.ModelSerializer):
             'days_in_month', 'standard_monthly_hours_this_month',
             'hourly_wage', 'daily_wage', 'insurance_base_30days', 'insurance_amount', 'overtime_pay',
             'absence_deduction', 'undertime_deduction', 'total_deductions', 'gross_pay', 'net_pay',
-            'net_pay_words', 'approved_leave_days_this_month', 'approved_leave_hours_this_month', 'leave_credit_explanation',
-            'is_seniority_eligible', 'seniority_base_monthly', 'seniority_base_daily', 'seniority_base_hourly',
+            'net_pay_words', 'approved_leave_days_this_month', 'approved_daily_leave_hours_this_month',
+            'approved_hourly_leave_hours_this_month', 'approved_leave_hours_this_month', 'leave_shift_breakdown_this_month', 'leave_credit_explanation',
+            'is_seniority_eligible', 'seniority_base_annual', 'seniority_base_monthly', 'seniority_base_daily', 'seniority_base_hourly',
             'component_amounts_this_month', 'holiday_work_hours', 'holiday_work_explanation', 'holiday_work_pay',
             'acknowledged_at', 'acknowledged_at_jalali', 'created_at', 'updated_at',
         ]

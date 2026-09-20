@@ -178,6 +178,12 @@ class MobileMenuVisibility(models.Model):
 class PriceSetting(models.Model):
     one_hour_price = models.PositiveIntegerField(default=400000)
     one_half_hour_price = models.PositiveIntegerField(default=550000)
+    # خواسته: قیمت خصوصی چند نفره — سهم هرنفر وقتی کلاس خصوصی دقیقاً ۲ نفره یا ۳نفر‌به‌بالا باشد
+    # (با کلاس خصوصی تک‌نفره‌ی معمولی که همان one_hour_price/one_half_hour_price بالا را دارد فرق می‌کند)
+    two_person_one_hour_price = models.PositiveIntegerField(default=400000, help_text='سهم هرنفر — کلاس خصوصی دقیقاً ۲نفره، یک‌ساعته')
+    two_person_one_half_hour_price = models.PositiveIntegerField(default=550000, help_text='سهم هرنفر — کلاس خصوصی دقیقاً ۲نفره، یک‌ونیم‌ساعته')
+    three_plus_person_one_hour_price = models.PositiveIntegerField(default=400000, help_text='سهم هرنفر — کلاس خصوصی ۳نفر و بیشتر، یک‌ساعته')
+    three_plus_person_one_half_hour_price = models.PositiveIntegerField(default=550000, help_text='سهم هرنفر — کلاس خصوصی ۳نفر و بیشتر، یک‌ونیم‌ساعته')
     teacher_share_percent = models.PositiveIntegerField(default=70)
     school_share_percent = models.PositiveIntegerField(default=30)
     updated_at = models.DateTimeField(auto_now=True)
@@ -220,6 +226,10 @@ class ClassRequest(models.Model):
     # خواسته: کلاس خصوصی چند نفره — چند ClassRequest که با هم ثبت شده‌اند (هرکدام برای یک نفر)
     # با یک کلید مشترک به هم مرتبط می‌شوند تا در لیست کلاس‌ها به‌صورت یک ردیف با چند اسم نشان داده شوند.
     group_key = models.CharField(max_length=40, blank=True, db_index=True, help_text='برای کلاس خصوصی چند نفره — همه‌ی اعضای یک کلاس مشترک، این مقدار را یکسان دارند')
+    # خواسته: تعداد کل نفراتِ همین کلاس خصوصی چند نفره (شامل خودش) — برای انتخاب سهم قیمتِ درست
+    # (۱=تک‌نفره‌ی معمولی، ۲=دونفره، ۳به‌بالا=گروهی) از سمت فرانت‌اند فرستاده می‌شود، چون در لحظه‌ی
+    # ثبتِ اولین نفرِ گروه، بقیه‌ی اعضا هنوز در دیتابیس ساخته نشده‌اند و شمارش مستقیم امکان‌پذیر نیست.
+    group_size = models.PositiveSmallIntegerField(default=1)
     is_online = models.BooleanField(default=False, help_text='کلاس آنلاین است — دقیقاً همان شرایط کلاس‌های آنلاین ترمیک را دارد؛ بعد از تایید نهایی، لینک به اپ استاد و دانش‌آموز نمایش داده می‌شود')
     meeting_link = models.URLField(max_length=500, blank=True)
     language_level = models.CharField(max_length=50)
@@ -282,10 +292,22 @@ class ClassRequest(models.Model):
                 price_setting = PriceSetting.objects.latest('updated_at')
             except PriceSetting.DoesNotExist:
                 price_setting = None
-            if self.session_duration == '1':
-                price_per_session = price_setting.one_hour_price if price_setting else 400000
+            # خواسته: قیمت خصوصی چند نفره — سهم هرنفر بسته به تعداد کل نفراتِ همین کلاس مشترک
+            # (۲نفره یا ۳نفر‌به‌بالا) با کلاس خصوصی تک‌نفره‌ی معمولی فرق دارد.
+            group_size = self.group_size or 1
+            if group_size >= 3:
+                one_hour_field, one_half_field = 'three_plus_person_one_hour_price', 'three_plus_person_one_half_hour_price'
+                default_one_hour, default_one_half = 400000, 550000
+            elif group_size == 2:
+                one_hour_field, one_half_field = 'two_person_one_hour_price', 'two_person_one_half_hour_price'
+                default_one_hour, default_one_half = 400000, 550000
             else:
-                price_per_session = price_setting.one_half_hour_price if price_setting else 550000
+                one_hour_field, one_half_field = 'one_hour_price', 'one_half_hour_price'
+                default_one_hour, default_one_half = 400000, 550000
+            if self.session_duration == '1':
+                price_per_session = getattr(price_setting, one_hour_field) if price_setting else default_one_hour
+            else:
+                price_per_session = getattr(price_setting, one_half_field) if price_setting else default_one_half
             teacher_percent = price_setting.teacher_share_percent if price_setting else 70
             school_percent = price_setting.school_share_percent if price_setting else 30
             self.total_price = price_per_session * self.session_count

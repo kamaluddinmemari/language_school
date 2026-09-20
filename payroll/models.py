@@ -1,3 +1,5 @@
+from datetime import timedelta
+
 from django.conf import settings
 from django.db import models
 from django.utils import timezone
@@ -326,14 +328,18 @@ class MonthlyPayroll(models.Model):
         logs = AttendanceLog.objects.filter(user=self.user)
         total = 0.0
         holiday_dates = {a.holiday.date for a in _holiday_work_for_payroll(self)}
-        approved_daily = list(self.user.leave_requests.filter(status='approved', leave_type='daily').values_list('start_date', 'end_date'))
         for log in logs:
             jd = jdatetime.date.fromgregorian(date=log.date)
             if jd.year == self.jalali_year and jd.month == self.jalali_month:
-                covered_by_leave = any(start <= log.date <= (end or start) for start, end in approved_daily)
-                if not covered_by_leave and log.date not in holiday_dates:
+                # مرخصی صبح/عصر نباید کل رکورد ورود و خروج همان روز را حذف کند؛
+                # کارکرد ثبت‌شده‌ی شیفت دیگر باید حفظ شود و اعتبار مرخصی جداگانه
+                # به آن اضافه شود. مرخصی تمام‌روز در این مدل وجود ندارد و هر
+                # مرخصی روزانه یکی از شیفت‌های صبح، عصر یا ترکیبی است.
+                if log.date not in holiday_dates:
                     total += log.worked_hours
-        total += self.approved_leave_hours_this_month
+        # فقط مرخصی روزانه‌ی صبح/عصر/ترکیبی جزو کارکرد است؛
+        # مرخصی ساعتی صرفاً گزارش می‌شود و نباید به مجموع کارکرد ماهانه اضافه شود.
+        total += self.approved_daily_leave_hours_this_month
         total += self.holiday_work_hours
         return round(total, 2)
 
@@ -444,8 +450,8 @@ class MonthlyPayroll(models.Model):
     @property
     def standard_monthly_hours_this_month(self):
         """ساعت استاندارد ماهانه، متناسب با تعداد روزهای واقعی همین ماه (نه فرض ثابت ۲۲۰ ساعت) —
-        این دقیقاً همون چیزیه که باعث می‌شه ماه ۳۰ و ۳۱ روزه به‌صورت خودکار در محاسبات لحاظ بشه."""
-        return round(self.days_in_month * STANDARD_DAILY_HOURS, 2)
+        این دقیقاً همون چیزی است که باعث می‌شود ماه ۳۰ و ۳۱ روزه به‌صورت خودکار در محاسبات لحاظ بشه."""
+        return round(STANDARD_MONTHLY_HOURS * self.days_in_month / 30, 2)
 
     @property
     def hourly_wage(self):
@@ -495,26 +501,80 @@ class MonthlyPayroll(models.Model):
         این روزها جزو ساعات کاری حساب می‌شوند (کسر نمی‌شوند)."""
         total = 0
         for r in self.user.leave_requests.filter(status='approved', leave_type='daily'):
-            jd = jdatetime.date.fromgregorian(date=r.start_date)
-            if jd.year == self.jalali_year and jd.month == self.jalali_month:
-                total += r.days_count
+            day = r.start_date
+            end = r.end_date or r.start_date
+            while day <= end:
+                jd = jdatetime.date.fromgregorian(date=day)
+                if jd.year == self.jalali_year and jd.month == self.jalali_month:
+                    total += 1
+                day += timedelta(days=1)
         return total
 
     @property
-    def approved_leave_hours_this_month(self):
-        """جمع مرخصی ساعتی تاییدشده در همین ماه — این هم جزو ساعات کاری حساب می‌شود."""
+    def approved_daily_leave_hours_this_month(self):
+        """جمع ساعات اعتبار مرخصی‌های روزانه صبح/عصر/ترکیبی در همین ماه."""
         total = 0
-        for r in self.user.leave_requests.filter(status='approved'):
+        for r in self.user.leave_requests.filter(status='approved', leave_type=LeaveRequest.LeaveType.DAILY):
+            day = r.start_date
+            end = r.end_date or day
+            while day <= end:
+                jd = jdatetime.date.fromgregorian(date=day)
+                if jd.year == self.jalali_year and jd.month == self.jalali_month:
+                    total += float(r.credited_hours_for_date(day))
+                day += timedelta(days=1)
+        return round(total, 2)
+
+    @property
+    def approved_hourly_leave_hours_this_month(self):
+        """جمع فقط مرخصی‌های ساعتی ثبت‌شده در همین ماه."""
+        total = 0
+        for r in self.user.leave_requests.filter(status='approved', leave_type=LeaveRequest.LeaveType.HOURLY):
             jd = jdatetime.date.fromgregorian(date=r.start_date)
             if jd.year == self.jalali_year and jd.month == self.jalali_month:
-                total += float(r.credited_hours)
+                total += float(r.hours or 0)
         return round(total, 2)
+
+    @property
+    def approved_leave_hours_this_month(self):
+        """فقط ساعات مرخصی روزانه که به‌عنوان کارکرد منظور می‌شود.
+
+        مرخصی ساعتی صرفاً برای گزارش نمایش داده می‌شود و نباید به کارکرد،
+        حداقل ساعت، اضافه‌کاری یا کسری کارکرد اضافه شود.
+        """
+        return self.approved_daily_leave_hours_this_month
+
+    @property
+    def leave_shift_breakdown_this_month(self):
+        """ریز ساعات مرخصی روزانه به تفکیک صبح و عصر برای نمایش در فیش."""
+        morning = 0
+        evening = 0
+        for r in self.user.leave_requests.filter(status='approved', leave_type=LeaveRequest.LeaveType.DAILY):
+            day = r.start_date
+            end = r.end_date or day
+            while day <= end:
+                jd = jdatetime.date.fromgregorian(date=day)
+                if jd.year == self.jalali_year and jd.month == self.jalali_month:
+                    hours = float(r.credited_hours_for_date(day))
+                    is_morning = r.leave_shift == LeaveRequest.LeaveShift.MORNING
+                    if r.leave_shift == LeaveRequest.LeaveShift.MIXED:
+                        is_morning = (day - r.start_date).days < int(r.morning_days or 0)
+                    if is_morning:
+                        morning += hours
+                    else:
+                        evening += hours
+                day += timedelta(days=1)
+        return {'morning': round(morning, 2), 'evening': round(evening, 2), 'total': round(morning + evening, 2)}
 
     @property
     def leave_credit_explanation(self):
         if not self.approved_leave_hours_this_month:
             return ''
-        return f'ساعات مرخصی تاییدشده به‌عنوان کارکرد محاسبه شد: {self.approved_leave_hours_this_month:g} ساعت (مرخصی روزانه بر اساس نوع صبح/عصر و تنظیمات سالانه).'
+        breakdown = self.leave_shift_breakdown_this_month
+        return (
+            f'مرخصی روزانه: صبح {breakdown["morning"]:g} ساعت، عصر {breakdown["evening"]:g} ساعت؛ '
+            f'مرخصی ساعتی: {self.approved_hourly_leave_hours_this_month:g} ساعت (جزو کارکرد نیست)؛ '
+            f'ساعات مرخصی روزانه منظورشده به‌عنوان کارکرد: {self.approved_leave_hours_this_month:g} ساعت.'
+        )
 
     @property
     def gross_pay(self):
@@ -737,22 +797,28 @@ class LeaveRequest(models.Model):
 
     @property
     def credited_hours(self):
-        if self.leave_type == self.LeaveType.HOURLY:
-            return float(self.hours or 0)
-        try:
-            jd = jdatetime.date.fromgregorian(date=self.start_date)
-            profile = SalaryProfile.objects.filter(work_year=jd.year).first() or SalaryProfile.objects.order_by('-work_year').first()
-            morning = float(profile.morning_leave_hours if profile else DEFAULT_MORNING_LEAVE_HOURS)
-            evening = float(profile.evening_leave_hours if profile else DEFAULT_EVENING_LEAVE_HOURS)
-            if self.leave_shift == self.LeaveShift.MIXED:
-                morning_days = int(self.morning_days or 0)
-                evening_days = int(self.evening_days or 0)
-                if morning_days + evening_days != self.days_count:
-                    return 0
-                return morning_days * morning + evening_days * evening
-            return self.days_count * (evening if self.leave_shift == self.LeaveShift.EVENING else morning)
-        except Exception:
+        end = self.end_date or self.start_date
+        total = 0
+        day = self.start_date
+        while day <= end:
+            total += self.credited_hours_for_date(day)
+            day += timedelta(days=1)
+        return round(total, 2)
+
+    def credited_hours_for_date(self, day):
+        """ساعت اعتبار مرخصی در یک روز مشخص؛ برای محاسبه ماه‌های عبوری هم دقیق است."""
+        if day < self.start_date or day > (self.end_date or self.start_date):
             return 0
+        if self.leave_type == self.LeaveType.HOURLY:
+            return float(self.hours or 0) if day == self.start_date else 0
+        jd = jdatetime.date.fromgregorian(date=day)
+        profile = SalaryProfile.objects.filter(work_year=jd.year).first() or SalaryProfile.objects.order_by('-work_year').first()
+        morning = float(profile.morning_leave_hours if profile else DEFAULT_MORNING_LEAVE_HOURS)
+        evening = float(profile.evening_leave_hours if profile else DEFAULT_EVENING_LEAVE_HOURS)
+        if self.leave_shift == self.LeaveShift.MIXED:
+            day_index = (day - self.start_date).days
+            return morning if day_index < int(self.morning_days or 0) else evening
+        return evening if self.leave_shift == self.LeaveShift.EVENING else morning
 
     @property
     def credited_hours_label(self):
