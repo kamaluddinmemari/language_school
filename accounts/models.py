@@ -357,3 +357,22 @@ class MenuPermission(models.Model):
 
     def __str__(self):
         return f"{self.role} / {self.menu_key} = {self.enabled}"
+
+
+class DailyActivity(models.Model):
+    """
+    خواسته: مدت زمان حضور در سایت هر کاربر، در هر روز — با پینگ دوره‌ای از فرانت‌اند
+    (هر یک دقیقه، فقط وقتی تب باز و در حال دیدن است) به‌روزرسانی می‌شود.
+    """
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='daily_activities')
+    date = models.DateField()
+    total_seconds = models.PositiveIntegerField(default=0)
+    last_ping_at = models.DateTimeField()
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=['user', 'date'], name='unique_user_daily_activity'),
+        ]
+
+    def __str__(self):
+        return f"{self.user} — {self.date} — {self.total_seconds}s"

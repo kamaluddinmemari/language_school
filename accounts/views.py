@@ -17,7 +17,7 @@ try:
     import xlrd  # فقط برای خواندن فرمت قدیمی .xls (پیش از Excel 2007) — openpyxl فقط .xlsx می‌خواند
 except ImportError:
     xlrd = None
-from .models import User, OTPCode, PriceSetting, AppearanceSettings, MenuPermission, AttendanceAccessSettings, AppAccessSettings, MobileMenuVisibility
+from .models import User, OTPCode, PriceSetting, AppearanceSettings, MenuPermission, AttendanceAccessSettings, AppAccessSettings, MobileMenuVisibility, DailyActivity
 from .menu_permissions import MENU_ITEMS, MENU_KEYS, CONFIGURABLE_ROLES, EDIT_ENFORCED_MENUS, VIEW_ENFORCED_ONLY_MENUS, get_effective_permissions, get_all_effective_permissions, can_edit_menu, can_view_menu
 import string
 from .serializers import (
@@ -291,6 +291,39 @@ class MobileMenuVisibilityView(APIView):
         serializer.is_valid(raise_exception=True)
         obj = serializer.save(updated_by=request.user)
         return Response(MobileMenuVisibilitySerializer(obj).data)
+
+
+class ActivityPingView(APIView):
+    """
+    خواسته: مدت زمان حضور در سایت هر کاربر، در هر روز — فرانت‌اند هر یک دقیقه (فقط وقتی
+    تب باز و در حال دیدن است) اینجا پینگ می‌زند و ما فقط فاصله‌ی معقول (حداکثر ۹۰ ثانیه)
+    را به مجموع اضافه می‌کنیم تا اگر تب مدتی بسته/غیرفعال بوده، آن وقفه حساب نشود.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        today = timezone.localdate()
+        now = timezone.now()
+        obj, created = DailyActivity.objects.get_or_create(
+            user=request.user, date=today, defaults={'last_ping_at': now}
+        )
+        if not created:
+            gap = (now - obj.last_ping_at).total_seconds()
+            if 0 < gap <= 90:
+                obj.total_seconds += int(gap)
+            obj.last_ping_at = now
+            obj.save()
+        return Response({'total_seconds': obj.total_seconds, 'date': str(today)})
+
+
+class ActivityTodayView(APIView):
+    """مدت زمان حضورِ همین کاربر در سایت، امروز (برای نمایش بالای صفحه)."""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        today = timezone.localdate()
+        obj = DailyActivity.objects.filter(user=request.user, date=today).first()
+        return Response({'total_seconds': obj.total_seconds if obj else 0, 'date': str(today)})
 
 
 class PriceSettingView(APIView):
