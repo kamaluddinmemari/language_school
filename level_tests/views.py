@@ -11,7 +11,7 @@ from .models import LevelTest, LevelTestPriceSetting, StandardLevel
 from .serializers import LevelTestIntakeSerializer, LevelTestSerializer, LevelTestPriceSettingSerializer
 from accounts.menu_permissions import can_edit_menu, can_view_menu
 from .levels import get_levels_by_age_group, AGE_GROUP_LABELS
-from accounts.models import User
+from accounts.models import User, ClassRequest
 from accounts.serializers import StudentSerializer
 from notifications.utils import send_notification
 
@@ -120,6 +120,43 @@ class LevelChoicesView(APIView):
             'age_groups': [{'value': k, 'label': v} for k, v in AGE_GROUP_LABELS.items()],
             'levels_by_age_group': get_levels_by_age_group(),
         })
+
+
+class AvailableClassSlotsForLevelView(APIView):
+    """
+    خواسته: برای فرم «ثبت نتیجه‌ی تعیین سطح» — همه‌ی کلاس‌های ترمِ جاری (آخرین ترم تعریف‌شده)
+    که با جنسیتِ داوطلب سازگارند (همان جنسیت + کلاس‌های مختلط) را برمی‌گرداند. از این یک
+    پاسخ هم برای رنگ‌آمیزیِ سطوحِ موجود/ناموجود (بر اساس اینکه سطح در نتیجه حضور دارد یا نه)
+    و هم برای پیشنهاد کلاسِ متناسب با سطحِ انتخابی، در فرانت استفاده می‌شود.
+
+    نکته‌ی مهم: جنسیت روی LevelTest با مقادیر User.Gender ثبت می‌شود ('female'/'male')،
+    اما جنسیت روی ClassSlot با مقادیر جداگانه‌ای است ('girls'/'boys'/'mixed')؛ اینجا بین
+    این دو نگاشت انجام می‌شود (باگ قبلی همین عدم تطابق بود که باعث می‌شد فیلتر جنسیت اصلاً
+    اعمال نشود و همه‌ی کلاس‌ها، صرف‌نظر از جنسیت، برگردانده شوند).
+    """
+    permission_classes = [IsAuthenticated]
+    GENDER_MAP = {'female': 'girls', 'male': 'boys'}
+
+    def get(self, request):
+        from class_management.models import ClassSlot, Term
+        gender = (request.query_params.get('gender') or '').strip()
+        latest_term = Term.objects.order_by('-year', '-term_number').first()
+        if not latest_term:
+            return Response([])
+        qs = ClassSlot.objects.filter(term=latest_term).exclude(assigned_level='')
+        mapped_gender = self.GENDER_MAP.get(gender)
+        if mapped_gender:
+            qs = qs.filter(gender__in=[mapped_gender, ClassSlot.Gender.MIXED])
+        results = [{
+            'id': c.id,
+            'level': c.assigned_level,
+            'day_display': c.get_day_type_display(),
+            'time_slot': c.time_slot,
+            'teacher_name': c.teacher_name or 'تعیین نشده',
+            'gender_display': c.get_gender_display(),
+            'seats_left': c.seats_left,
+        } for c in qs.order_by('assigned_level', 'day_type', 'time_slot')]
+        return Response(results)
 
 
 class LevelTestListCreateView(APIView):
@@ -386,6 +423,30 @@ class LevelTestDetailView(APIView):
             if updated.student.language_level != updated.level:
                 updated.student.language_level = updated.level
                 updated.student.save(update_fields=['language_level'])
+
+        # خواسته: اگر تعیین‌سطح تکمیل شد و فرد نیاز به کلاس خصوصی و/یا جبرانی دارد، بدون نیاز
+        # به ورود دوباره‌ی اطلاعات، خودکار یک درخواست کلاس (به ازای هرکدام) در «درخواست‌های
+        # کلاس» ساخته می‌شود — با وضعیت pending (منتظر ارجاع به استاد) و پرداخت‌نشده (منتظر
+        # پرداخت هزینه)؛ پروتکل رنگی همان‌جاست: خصوصی‌ی پرداخت‌نشده قرمز، پرداخت‌شده سبز،
+        # جبرانی زرد. با بررسی auto_created_class_requests از ساختن دوباره جلوگیری می‌شود.
+        if updated.status == LevelTest.Status.COMPLETED and updated.student and not updated.auto_created_class_requests.exists():
+            source_note = 'ورود اطلاعات از بخش تعیین سطح — منتظر ارجاع به استاد و پرداخت هزینه'
+            if updated.needs_private_class:
+                ClassRequest.objects.create(
+                    student=updated.student, class_type=ClassRequest.ClassType.PRIVATE,
+                    language_level=updated.level or updated.student.language_level,
+                    session_count=updated.private_sessions_needed or 1,
+                    payment_status=ClassRequest.PaymentStatus.UNPAID, status=ClassRequest.Status.PENDING,
+                    notes=source_note, source_level_test=updated,
+                )
+            if updated.needs_makeup_class:
+                ClassRequest.objects.create(
+                    student=updated.student, class_type=ClassRequest.ClassType.MAKEUP,
+                    language_level=updated.level or updated.student.language_level,
+                    session_count=updated.makeup_sessions_needed or 1,
+                    payment_status=ClassRequest.PaymentStatus.UNPAID, status=ClassRequest.Status.PENDING,
+                    notes=source_note, source_level_test=updated,
+                )
 
         # نوتیف به دانش‌آموز — فقط در همون لحظه‌ای که هرکدوم از این‌ها *تازه* مقداردهی می‌شن،
         # نه هر بار که مدیر رکورد رو ویرایش می‌کنه

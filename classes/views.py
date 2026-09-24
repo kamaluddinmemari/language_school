@@ -225,12 +225,16 @@ class TeacherDeclineView(APIView):
 
 
 class DirectAssignClassView(APIView):
-    """ارجاع نهایی مستقیم توسط مدیر؛ بدون نیاز به تایید اولیه استاد."""
+    """
+    انتخاب و تخصیص نهایی مستقیم استاد توسط مدیر/مدیر آموزش — بدون مرحله‌ی میانی «ارجاع و
+    انتظار پذیرش استاد» (آن فرایند حذف شده است؛ این تنها راه تبدیل یک درخواست از حالت
+    «در انتظار» به «تایید نهایی» است).
+    """
     permission_classes = [IsAuthenticated]
 
     def post(self, request, pk):
-        if request.user.role != 'admin':
-            return Response({'error': 'فقط مدیر می‌تواند ارجاع نهایی مستقیم انجام دهد'}, status=status.HTTP_403_FORBIDDEN)
+        if request.user.role not in ('admin', 'evaluator'):
+            return Response({'error': 'فقط مدیر یا مدیر آموزش می‌تواند استاد را تخصیص نهایی بدهد'}, status=status.HTTP_403_FORBIDDEN)
         try:
             class_request = ClassRequest.objects.get(pk=pk)
         except ClassRequest.DoesNotExist:
@@ -500,10 +504,10 @@ class ClassSessionUpdateView(APIView):
 
     def patch(self, request, pk, session_number):
         user = request.user
-        if user.role not in ('admin', 'teacher'):
+        if user.role not in ('admin', 'evaluator', 'office', 'teacher'):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         try:
-            if user.role in ('admin', 'office'):
+            if user.role in ('admin', 'evaluator', 'office'):
                 class_request = ClassRequest.objects.get(pk=pk)
             else:
                 class_request = ClassRequest.objects.filter(
@@ -550,17 +554,23 @@ class ClassSessionUpdateView(APIView):
 
 
 class AdminConfirmCompleteView(APIView):
-    """مدیر اتمام کلاس را تایید می‌کند و کلاس مختومه می‌شود"""
+    """
+    مدیر/مدیر آموزش اتمام کلاس را تایید می‌کند و کلاس مختومه می‌شود.
+    خواسته: دکمه‌ی «پایان کلاس» باید برای هر ردیفِ تایید‌شده همیشه در دسترس باشد — بدون
+    اینکه از قبل لازم باشد تاریخ همه‌ی جلسات ثبت شده باشد (is_completed از قبل True باشد)؛
+    اینجا هم آن پیش‌شرط را برمی‌داریم و هم خودمان is_completed را True می‌کنیم.
+    """
     permission_classes = [IsAuthenticated]
 
     def post(self, request, pk):
-        if request.user.role not in ('admin', 'office'):
-            return Response({'error': 'فقط مدیر می‌تونه تایید کنه'}, status=status.HTTP_403_FORBIDDEN)
+        if request.user.role not in ('admin', 'office', 'evaluator'):
+            return Response({'error': 'فقط مدیر یا مدیر آموزش می‌تونه تایید کنه'}, status=status.HTTP_403_FORBIDDEN)
         try:
-            class_request = ClassRequest.objects.get(pk=pk, is_completed=True)
+            class_request = ClassRequest.objects.get(pk=pk, status=ClassRequest.Status.CONFIRMED)
         except ClassRequest.DoesNotExist:
             return Response({'error': 'درخواست پیدا نشد'}, status=status.HTTP_404_NOT_FOUND)
 
+        class_request.is_completed = True
         class_request.status = ClassRequest.Status.COMPLETED
         class_request.save()
 

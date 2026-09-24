@@ -109,6 +109,22 @@ class LevelTest(models.Model):
     )
     evaluator_name = models.CharField(max_length=150, blank=True, help_text='برای وقتی ارزیاب حساب کاربری ندارد و مدیر به‌جایش وارد می‌کند')
     notes = models.TextField(blank=True)
+    # خواسته: به‌جای تاریخ/ساعتِ آزمون در فرم ثبت نتیجه، انتخاب یکی از کلاس‌های موجودِ همان سطح
+    # (متناسب با جنسیت) از بین کلاس‌های ترمِ جاری — روز/ساعت/استاد به‌صورت عکسِ لحظه‌ی انتخاب
+    # ذخیره می‌شود تا حتی اگر بعداً خودِ کلاس تغییر کند، این رکورد تاریخی درست بماند.
+    assigned_class_slot = models.ForeignKey(
+        'class_management.ClassSlot', on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='level_test_placements',
+    )
+    assigned_class_day = models.CharField(max_length=100, blank=True, help_text='عکسِ روز برگزاری کلاسِ انتخاب‌شده، در لحظه‌ی ثبت نتیجه')
+    assigned_class_time = models.CharField(max_length=20, blank=True, help_text='عکسِ ساعت برگزاری کلاسِ انتخاب‌شده، در لحظه‌ی ثبت نتیجه')
+    assigned_class_teacher_name = models.CharField(max_length=150, blank=True, help_text='عکسِ نام استادِ کلاسِ انتخاب‌شده، در لحظه‌ی ثبت نتیجه')
+    # خواسته: تیک نیاز به کلاس خصوصی/جبرانی + تعداد جلسه؛ با تکمیل نتیجه، اگر هرکدام فعال باشد
+    # خودکار یک درخواست کلاس (خصوصی/جبرانی) در «درخواست‌های کلاس» ساخته می‌شود.
+    needs_private_class = models.BooleanField(default=False)
+    private_sessions_needed = models.PositiveIntegerField(null=True, blank=True)
+    needs_makeup_class = models.BooleanField(default=False)
+    makeup_sessions_needed = models.PositiveIntegerField(null=True, blank=True)
     natoos_registered = models.BooleanField(default=False, help_text='آیا این تعیین سطح در سامانه‌ی ناتوس هم ثبت شده است')
     reminder_24h_followed_at = models.DateTimeField(null=True, blank=True, help_text='زمان ثبت پیگیری هشدار ۲۴ ساعت قبل')
     reminder_2h_followed_at = models.DateTimeField(null=True, blank=True, help_text='زمان ثبت پیگیری هشدار ۲ ساعت قبل')
@@ -144,6 +160,17 @@ class LevelTest(models.Model):
             return None
         local_dt = timezone.localtime(self.test_date)
         return jdatetime.datetime.fromgregorian(datetime=local_dt).strftime('%Y/%m/%d - %H:%M')
+
+    @property
+    def assigned_class_display(self):
+        """نمایش خلاصه‌ی کلاسِ انتخاب‌شده — «روز — ساعت — استاد فلان» — برای جلوی اسم فرد در بایگانی"""
+        if not (self.assigned_class_day or self.assigned_class_time or self.assigned_class_teacher_name):
+            return None
+        parts = [p for p in [self.assigned_class_day, self.assigned_class_time] if p]
+        text = ' — '.join(parts)
+        if self.assigned_class_teacher_name:
+            text = f"{text} — استاد {self.assigned_class_teacher_name}" if text else f"استاد {self.assigned_class_teacher_name}"
+        return text
 
     @property
     def reminder_24h_followed_at_jalali(self):

@@ -208,6 +208,11 @@ class ClassRequest(models.Model):
         PAID = 'paid', 'پرداخت شده'
         PENDING = 'pending', 'در انتظار تایید'
 
+    class PaymentMethod(models.TextChoices):
+        CASH = 'cash', 'نقدی'
+        CARD_TO_CARD = 'card_to_card', 'کارت به کارت'
+        POS = 'pos', 'پوز'
+
     class SessionDuration(models.TextChoices):
         ONE_HOUR = '1', 'یک ساعت'
         ONE_HALF = '1.5', 'یک و نیم ساعت'
@@ -237,6 +242,16 @@ class ClassRequest(models.Model):
     suggested_teacher_name = models.CharField(max_length=150, blank=True)
     class_date = models.DateTimeField(null=True, blank=True)
     class_date_approved = models.BooleanField(default=False)
+    # خواسته: برای کلاس‌های «تایید نهایی شده» دو دکمه‌ی یک‌بارمصرف — هماهنگی با استاد و با
+    # دانش‌آموز درباره‌ی زمان برگزاری؛ تا وقتی False است برچسب قرمز نشان داده می‌شود.
+    teacher_coordinated = models.BooleanField(default=False)
+    student_coordinated = models.BooleanField(default=False)
+    # خواسته: دکمه‌ی «تغییر اولویت» (بردن به بالای صفِ خودش) و دکمه‌ی «انتقال به انتهای صف»
+    # (پایین‌تر از همه، حتی پرداخت‌نشده‌ها) برای درخواست‌های در انتظار.
+    manual_priority = models.IntegerField(null=True, blank=True)
+    force_last = models.BooleanField(default=False)
+    # خواسته: دکمه‌ای که وقتی با فرد تماس گرفته شد ولی پاسخگو نبود، زده می‌شود — برچسب زرد.
+    contact_no_answer = models.BooleanField(default=False)
     session_duration = models.CharField(max_length=5, choices=SessionDuration.choices, default=SessionDuration.ONE_HALF)
     session_count = models.PositiveIntegerField(default=1)
     total_price = models.PositiveIntegerField(default=0)
@@ -248,8 +263,19 @@ class ClassRequest(models.Model):
     receipt = models.ImageField(upload_to='receipts/', null=True, blank=True)
     amount = models.PositiveIntegerField(default=0)
     payment_status = models.CharField(max_length=10, choices=PaymentStatus.choices, default=PaymentStatus.UNPAID)
+    # خواسته: وقتی هزینه‌ی کلاس خصوصی/جبرانی پرداخت‌شده ثبت می‌شود — نوع پرداخت، شماره‌ی
+    # پیگیری/مرجع، و لحظه‌ی دقیق پرداخت هم ثبت شود.
+    payment_method = models.CharField(max_length=20, choices=PaymentMethod.choices, blank=True)
+    payment_reference = models.CharField(max_length=100, blank=True)
+    payment_confirmed_at = models.DateTimeField(null=True, blank=True)
     status = models.CharField(max_length=10, choices=Status.choices, default=Status.PENDING)
     notes = models.TextField(blank=True)
+    # خواسته: وقتی این درخواست خودکار از نتیجه‌ی «تعیین سطح» (نیاز به خصوصی/جبرانی) ساخته شده،
+    # برای نمایش برچسب «ورود اطلاعات از تعیین سطح» در لیست درخواست‌های کلاس.
+    source_level_test = models.ForeignKey(
+        'level_tests.LevelTest', on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='auto_created_class_requests',
+    )
     is_completed = models.BooleanField(default=False)
     completed_at = models.DateTimeField(null=True, blank=True)
     satisfaction = models.IntegerField(null=True, blank=True, validators=[MinValueValidator(1), MaxValueValidator(5)])
@@ -280,6 +306,14 @@ class ClassRequest(models.Model):
         if not self.class_date:
             return None
         local_dt = timezone.localtime(self.class_date)
+        return jdatetime.datetime.fromgregorian(datetime=local_dt).strftime('%Y/%m/%d - %H:%M')
+
+    @property
+    def payment_confirmed_at_jalali(self):
+        """تاریخ و ساعت پرداخت به شمسی"""
+        if not self.payment_confirmed_at:
+            return None
+        local_dt = timezone.localtime(self.payment_confirmed_at)
         return jdatetime.datetime.fromgregorian(datetime=local_dt).strftime('%Y/%m/%d - %H:%M')
 
     def save(self, *args, **kwargs):

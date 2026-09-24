@@ -34,6 +34,7 @@ class ClassRequestAdminSerializer(serializers.ModelSerializer):
     created_at_jalali = serializers.ReadOnlyField()
     completed_at_jalali = serializers.ReadOnlyField()
     class_date_jalali = serializers.ReadOnlyField()
+    payment_confirmed_at_jalali = serializers.ReadOnlyField()
     sessions = ClassSessionSerializer(many=True, read_only=True)
 
     class Meta:
@@ -44,19 +45,24 @@ class ClassRequestAdminSerializer(serializers.ModelSerializer):
             'accepted_teachers', 'accepted_teachers_info',
             'class_type', 'custom_class_type', 'is_online', 'meeting_link', 'language_level',
             'proposed_time', 'class_date', 'class_date_jalali', 'class_date_approved',
+            'teacher_coordinated', 'student_coordinated',
+            'manual_priority', 'force_last', 'contact_no_answer',
             'suggested_teacher_name', 'group_key', 'group_size',
             'session_duration', 'session_count', 'sessions',
             'total_price', 'teacher_share', 'school_share',
             'teacher_payment_status', 'teacher_payment_date', 'teacher_payment_amount',
-            'receipt', 'amount', 'payment_status', 'status', 'notes',
+            'receipt', 'amount', 'payment_status',
+            'payment_method', 'payment_reference', 'payment_confirmed_at', 'payment_confirmed_at_jalali',
+            'status', 'notes',
             'is_completed', 'completed_at', 'completed_at_jalali',
             'satisfaction', 'satisfaction_text', 'satisfaction_approved',
+            'source_level_test',
             'created_at', 'created_at_jalali', 'updated_at',
         ]
         read_only_fields = [
             'status', 'created_at', 'updated_at', 'total_price',
             'teacher_share', 'school_share', 'is_completed',
-            'accepted_teachers',
+            'accepted_teachers', 'source_level_test',
         ]
         # نکته: completed_at عمداً از read_only خارج شده تا مدیر همیشه بتونه
         # تاریخ و ساعت اتمام کلاس رو از پنل ویرایش کنه (حتی بعد از مختومه شدن)
@@ -89,6 +95,9 @@ class ClassRequestAdminCreateSerializer(serializers.Serializer):
         choices=ClassRequest.PaymentStatus.choices,
         default=ClassRequest.PaymentStatus.UNPAID
     )
+    payment_method = serializers.ChoiceField(choices=ClassRequest.PaymentMethod.choices, required=False, allow_blank=True)
+    payment_reference = serializers.CharField(max_length=100, required=False, allow_blank=True)
+    payment_confirmed_at = serializers.DateTimeField(required=False, allow_null=True)
     notes = serializers.CharField(required=False, allow_blank=True)
     suggested_teacher_name = serializers.CharField(max_length=150, required=False, allow_blank=True)
     username = serializers.CharField(max_length=150, required=False, allow_blank=True, validators=[username_validator])

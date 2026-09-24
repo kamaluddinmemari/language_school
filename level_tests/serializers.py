@@ -44,6 +44,7 @@ class LevelTestSerializer(serializers.ModelSerializer):
     reminder_2h_due = serializers.SerializerMethodField()
     reminder_24h_followed_at_jalali = serializers.SerializerMethodField()
     reminder_2h_followed_at_jalali = serializers.SerializerMethodField()
+    assigned_class_display = serializers.ReadOnlyField()
 
     def _reminder_at(self, obj, hours):
         return obj.test_date - timedelta(hours=hours) if obj.test_date else None
@@ -63,6 +64,10 @@ class LevelTestSerializer(serializers.ModelSerializer):
             'payment_status_display', 'mode', 'mode_display', 'meeting_link', 'self_requested',
             'payment_method', 'payment_method_display', 'receipt_image',
             'age_group', 'level', 'test_date', 'test_date_jalali',
+            'assigned_class_slot', 'assigned_class_day', 'assigned_class_time',
+            'assigned_class_teacher_name', 'assigned_class_display',
+            'needs_private_class', 'private_sessions_needed',
+            'needs_makeup_class', 'makeup_sessions_needed',
             'evaluator', 'evaluator_name', 'display_evaluator_name', 'notes', 'created_by',
             'created_at', 'created_at_jalali', 'updated_at', 'natoos_registered',
             'reminder_24h_at', 'reminder_2h_at', 'reminder_24h_due', 'reminder_2h_due',
