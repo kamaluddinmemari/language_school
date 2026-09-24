@@ -4,6 +4,27 @@ from accounts.validators import username_validator, password_validator
 from .models import ClassSession
 
 
+def _normalize_identity(value):
+    """یکسان‌سازی فاصله و ارقام فارسی/عربی برای مقایسه‌ی اطلاعات هویتی."""
+    return str(value or '').strip().translate(str.maketrans('۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩', '01234567890123456789')).replace(' ', '').replace('\u200c', '')
+
+
+def _validate_duplicate_identity(attrs, student=None):
+    """نام، کد ملی و موبایل در درخواست‌های جدید و تأیید نهایی تکراری نباشند."""
+    first_name = _normalize_identity(attrs.get('first_name') or getattr(student, 'first_name', ''))
+    last_name = _normalize_identity(attrs.get('last_name') or getattr(student, 'last_name', ''))
+    national_code = _normalize_identity(attrs.get('national_code') or getattr(student, 'national_code', ''))
+    phone = _normalize_identity(attrs.get('phone') or getattr(student, 'phone', ''))
+    full_name = first_name + last_name
+    active_requests = ClassRequest.objects.filter(
+        status__in=[ClassRequest.Status.PENDING, ClassRequest.Status.CONFIRMED]
+    ).select_related('student')
+    for request in active_requests:
+        existing_name = _normalize_identity(request.student.first_name) + _normalize_identity(request.student.last_name)
+        if (full_name and full_name == existing_name) or (national_code and national_code == _normalize_identity(request.student.national_code)) or (phone and phone == _normalize_identity(request.student.phone)):
+            raise serializers.ValidationError({'error': 'اسم فرد مورد نظر در لیست وجود دارد'})
+
+
 class ClassSessionSerializer(serializers.ModelSerializer):
     completed_at_jalali = serializers.ReadOnlyField()
 
@@ -103,6 +124,10 @@ class ClassRequestAdminCreateSerializer(serializers.Serializer):
     username = serializers.CharField(max_length=150, required=False, allow_blank=True, validators=[username_validator])
     password = serializers.CharField(max_length=128, required=False, allow_blank=True, validators=[password_validator])
 
+    def validate(self, attrs):
+        _validate_duplicate_identity(attrs)
+        return attrs
+
     def create(self, validated_data):
         phone = validated_data.pop('phone')
         first_name = validated_data.pop('first_name')
@@ -147,6 +172,10 @@ class ClassRequestCreateSerializer(serializers.ModelSerializer):
         extra_kwargs = {
             'receipt': {'required': True},  # تصویر فیش واریزی الزامی است
         }
+
+    def validate(self, attrs):
+        _validate_duplicate_identity(attrs, student=self.context['request'].user)
+        return attrs
 
     def to_representation(self, instance):
         return ClassRequestStudentSerializer(instance, context=self.context).data
