@@ -1,28 +1,34 @@
 from rest_framework import serializers
 from accounts.models import ClassRequest, User, persian_only_validator
 from accounts.validators import username_validator, password_validator
-from .models import ClassSession
+from classes.models import ClassSession
 
 
-def _normalize_identity(value):
-    """یکسان‌سازی فاصله و ارقام فارسی/عربی برای مقایسه‌ی اطلاعات هویتی."""
-    return str(value or '').strip().translate(str.maketrans('۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩', '01234567890123456789')).replace(' ', '').replace('\u200c', '')
+ACTIVE_IDENTITY_STATUSES = [ClassRequest.Status.PENDING, ClassRequest.Status.CONFIRMED]
 
 
-def _validate_duplicate_identity(attrs, student=None):
-    """نام، کد ملی و موبایل در درخواست‌های جدید و تأیید نهایی تکراری نباشند."""
-    first_name = _normalize_identity(attrs.get('first_name') or getattr(student, 'first_name', ''))
-    last_name = _normalize_identity(attrs.get('last_name') or getattr(student, 'last_name', ''))
-    national_code = _normalize_identity(attrs.get('national_code') or getattr(student, 'national_code', ''))
-    phone = _normalize_identity(attrs.get('phone') or getattr(student, 'phone', ''))
-    full_name = first_name + last_name
-    active_requests = ClassRequest.objects.filter(
-        status__in=[ClassRequest.Status.PENDING, ClassRequest.Status.CONFIRMED]
-    ).select_related('student')
-    for request in active_requests:
-        existing_name = _normalize_identity(request.student.first_name) + _normalize_identity(request.student.last_name)
-        if (full_name and full_name == existing_name) or (national_code and national_code == _normalize_identity(request.student.national_code)) or (phone and phone == _normalize_identity(request.student.phone)):
-            raise serializers.ValidationError({'error': 'اسم فرد مورد نظر در لیست وجود دارد'})
+def normalize_identity(value):
+    """برای مقایسه‌ی هویت، فاصله‌ها و ارقام فارسی/عربی را یکسان می‌کند."""
+    value = str(value or '').strip()
+    return value.translate(str.maketrans('۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩', '01234567890123456789')).replace(' ', '').replace('\u200c', '')
+
+
+def validate_active_identity(attrs, *, student=None):
+    """درخواست جدید نباید با درخواست جدید یا تأیید نهاییِ موجود هم‌هویت باشد."""
+    first_name = normalize_identity(attrs.get('first_name') or getattr(student, 'first_name', ''))
+    last_name = normalize_identity(attrs.get('last_name') or getattr(student, 'last_name', ''))
+    national_code = normalize_identity(attrs.get('national_code') or getattr(student, 'national_code', ''))
+    phone = normalize_identity(attrs.get('phone') or getattr(student, 'phone', ''))
+    full_name = normalize_identity(f'{first_name}{last_name}')
+    if not any((full_name, national_code, phone)):
+        return
+    qs = ClassRequest.objects.filter(status__in=ACTIVE_IDENTITY_STATUSES).select_related('student')
+    for existing in qs:
+        existing_name = normalize_identity(existing.student.first_name + existing.student.last_name)
+        existing_national = normalize_identity(existing.student.national_code)
+        existing_phone = normalize_identity(existing.student.phone)
+        if (full_name and full_name == existing_name) or (national_code and national_code == existing_national) or (phone and phone == existing_phone):
+            raise serializers.ValidationError({'error': 'اسم فرد مورد نظر در لیست وجود دارد؛ نام، کد ملی و شماره همراه باید یکتا باشند.'})
 
 
 class ClassSessionSerializer(serializers.ModelSerializer):
@@ -30,7 +36,7 @@ class ClassSessionSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = ClassSession
-        fields = ['id', 'session_number', 'completed_at', 'completed_at_jalali', 'notes']
+        fields = ['id', 'session_number', 'completed_at', 'completed_at_jalali', 'student_confirmed', 'student_rejected', 'notes']
 
 
 class StudentInfoSerializer(serializers.ModelSerializer):
@@ -67,6 +73,9 @@ class ClassRequestAdminSerializer(serializers.ModelSerializer):
             'class_type', 'custom_class_type', 'is_online', 'meeting_link', 'language_level',
             'proposed_time', 'class_date', 'class_date_jalali', 'class_date_approved',
             'teacher_coordinated', 'student_coordinated',
+            'workflow_stage', 'teacher_proposed_at', 'teacher_proposed_at_jalali',
+            'student_time_confirmed', 'student_time_rejected',
+            'stage1_notes', 'stage2_notes', 'stage3_notes', 'stage4_notes',
             'manual_priority', 'force_last', 'contact_no_answer',
             'suggested_teacher_name', 'group_key', 'group_size',
             'session_duration', 'session_count', 'sessions',
@@ -81,7 +90,7 @@ class ClassRequestAdminSerializer(serializers.ModelSerializer):
             'created_at', 'created_at_jalali', 'updated_at',
         ]
         read_only_fields = [
-            'status', 'created_at', 'updated_at', 'total_price',
+            'status', 'created_at', 'updated_at', 'total_price', 'teacher_proposed_at_jalali',
             'teacher_share', 'school_share', 'is_completed',
             'accepted_teachers', 'source_level_test',
         ]
@@ -125,7 +134,7 @@ class ClassRequestAdminCreateSerializer(serializers.Serializer):
     password = serializers.CharField(max_length=128, required=False, allow_blank=True, validators=[password_validator])
 
     def validate(self, attrs):
-        _validate_duplicate_identity(attrs)
+        validate_active_identity(attrs)
         return attrs
 
     def create(self, validated_data):
@@ -174,7 +183,7 @@ class ClassRequestCreateSerializer(serializers.ModelSerializer):
         }
 
     def validate(self, attrs):
-        _validate_duplicate_identity(attrs, student=self.context['request'].user)
+        validate_active_identity(attrs, student=self.context['request'].user)
         return attrs
 
     def to_representation(self, instance):

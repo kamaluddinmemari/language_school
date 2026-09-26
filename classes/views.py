@@ -4,10 +4,12 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from django.utils import timezone
+from django.utils.dateparse import parse_datetime
+from datetime import timedelta
 from django.db.models import Q
 from accounts.models import ClassRequest, User
 from notifications.utils import send_notification
-from .models import ClassSession, ensure_sessions
+from classes.models import ClassSession, ensure_sessions
 from .serializers import (
     ClassRequestAdminSerializer,
     ClassRequestAdminCreateSerializer,
@@ -253,6 +255,7 @@ class DirectAssignClassView(APIView):
         class_request.accepted_teachers.add(chosen_teacher)
         class_request.teacher = chosen_teacher
         class_request.status = ClassRequest.Status.CONFIRMED
+        class_request.workflow_stage = max(class_request.workflow_stage or 1, 2)
         class_request.save()
         ensure_sessions(class_request)
 
@@ -318,6 +321,10 @@ class ReturnToPendingView(APIView):
         class_request.accepted_teachers.clear()
         class_request.teacher = None
         class_request.status = ClassRequest.Status.PENDING
+        class_request.workflow_stage = 1
+        class_request.teacher_proposed_at = None
+        class_request.student_time_confirmed = False
+        class_request.student_time_rejected = False
         class_request.seen_by_admin = False
         class_request.save()
 
@@ -355,6 +362,7 @@ class FinalizeClassView(APIView):
 
         class_request.teacher = chosen_teacher
         class_request.status = ClassRequest.Status.CONFIRMED
+        class_request.workflow_stage = max(class_request.workflow_stage or 1, 2)
         class_request.save()
         ensure_sessions(class_request)
 
@@ -524,15 +532,38 @@ class ClassSessionUpdateView(APIView):
 
         completed_at = request.data.get('completed_at')
         if completed_at is not None:
-            session.completed_at = completed_at or None
+            proposed_at = parse_datetime(str(completed_at)) if completed_at else None
+            if proposed_at and timezone.is_naive(proposed_at):
+                proposed_at = timezone.make_aware(proposed_at, timezone.get_current_timezone())
+            if proposed_at and class_request.teacher_id:
+                conflicts = ClassSession.objects.filter(
+                    class_request__teacher_id=class_request.teacher_id,
+                    class_request__status=ClassRequest.Status.CONFIRMED,
+                    completed_at__isnull=False,
+                    completed_at__gte=proposed_at - timedelta(minutes=90),
+                    completed_at__lte=proposed_at + timedelta(minutes=90),
+                ).exclude(pk=session.pk).select_related('class_request')
+                if conflicts.exists():
+                    conflict = conflicts.first()
+                    return Response({'error': f"تداخل تایم خصوصی با جلسه کلاس دیگر استاد در بازه ۹۰ دقیقه‌ای وجود دارد ({conflict.completed_at.strftime('%Y-%m-%d %H:%M')})"}, status=status.HTTP_400_BAD_REQUEST)
+            session.completed_at = proposed_at
         notes = request.data.get('notes')
         if notes is not None:
             session.notes = notes
+        if 'student_confirmed' in request.data and user.role in ('admin', 'evaluator', 'office'):
+            session.student_confirmed = bool(request.data.get('student_confirmed'))
+            if session.student_confirmed:
+                session.student_rejected = False
+        if 'student_rejected' in request.data and user.role in ('admin', 'evaluator', 'office'):
+            session.student_rejected = bool(request.data.get('student_rejected'))
+            if session.student_rejected:
+                session.student_confirmed = False
         session.completed_by = user
         session.save()
 
         total = class_request.session_count
         done = class_request.sessions.filter(completed_at__isnull=False).count()
+        # مرحله ۴ فقط با دکمه تأیید نهایی زمان همه جلسات فعال می‌شود.
         if done >= total and not class_request.is_completed:
             class_request.is_completed = True
             class_request.completed_at = timezone.now()

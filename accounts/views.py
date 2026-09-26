@@ -129,9 +129,11 @@ class TeacherListCreateView(generics.ListCreateAPIView):
     serializer_class = TeacherSerializer
 
     def get_queryset(self):
-        if not can_view_menu(self.request.user, 'teachers'):
+        # انتخاب استاد در پنل کلاس‌های خصوصی باید مستقل از روشن/خاموش بودن
+        # منوی «مدیریت استادها» قابل استفاده باشد.
+        if self.request.user.role not in ('admin', 'evaluator'):
             return User.objects.none()
-        return User.objects.filter(role__in=User.TEACHER_LIKE_ROLES)
+        return User.objects.filter(role__in=User.TEACHER_LIKE_ROLES).order_by('first_name', 'last_name')
 
     def create(self, request, *args, **kwargs):
         if not can_edit_menu(request.user, 'teachers'):

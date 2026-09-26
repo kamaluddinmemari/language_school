@@ -246,6 +246,15 @@ class ClassRequest(models.Model):
     # دانش‌آموز درباره‌ی زمان برگزاری؛ تا وقتی False است برچسب قرمز نشان داده می‌شود.
     teacher_coordinated = models.BooleanField(default=False)
     student_coordinated = models.BooleanField(default=False)
+    # وضعیت پایدار فلوچارت فرایند کلاس از تخصیص استاد تا اتمام جلسات
+    workflow_stage = models.PositiveSmallIntegerField(default=1)
+    teacher_proposed_at = models.DateTimeField(null=True, blank=True)
+    student_time_confirmed = models.BooleanField(default=False)
+    student_time_rejected = models.BooleanField(default=False)
+    stage1_notes = models.TextField(blank=True)
+    stage2_notes = models.TextField(blank=True)
+    stage3_notes = models.TextField(blank=True)
+    stage4_notes = models.TextField(blank=True)
     # خواسته: دکمه‌ی «تغییر اولویت» (بردن به بالای صفِ خودش) و دکمه‌ی «انتقال به انتهای صف»
     # (پایین‌تر از همه، حتی پرداخت‌نشده‌ها) برای درخواست‌های در انتظار.
     manual_priority = models.IntegerField(null=True, blank=True)
@@ -306,6 +315,12 @@ class ClassRequest(models.Model):
         if not self.class_date:
             return None
         local_dt = timezone.localtime(self.class_date)
+        return jdatetime.datetime.fromgregorian(datetime=local_dt).strftime('%Y/%m/%d - %H:%M')
+    @property
+    def teacher_proposed_at_jalali(self):
+        if not self.teacher_proposed_at:
+            return None
+        local_dt = timezone.localtime(self.teacher_proposed_at)
         return jdatetime.datetime.fromgregorian(datetime=local_dt).strftime('%Y/%m/%d - %H:%M')
 
     @property

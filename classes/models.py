@@ -13,6 +13,8 @@ class ClassSession(models.Model):
     class_request = models.ForeignKey(ClassRequest, on_delete=models.CASCADE, related_name='sessions')
     session_number = models.PositiveIntegerField()
     completed_at = models.DateTimeField(null=True, blank=True)
+    student_confirmed = models.BooleanField(default=False)
+    student_rejected = models.BooleanField(default=False)
     completed_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True)
     notes = models.CharField(max_length=255, blank=True)
     updated_at = models.DateTimeField(auto_now=True)
