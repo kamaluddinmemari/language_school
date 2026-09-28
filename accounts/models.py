@@ -323,6 +323,51 @@ class ClassRequest(models.Model):
         local_dt = timezone.localtime(self.teacher_proposed_at)
         return jdatetime.datetime.fromgregorian(datetime=local_dt).strftime('%Y/%m/%d - %H:%M')
 
+    # خواسته: در کلاس‌های چند جلسه‌ای، وقتی جلسه‌ای (از جلسه‌ی ۲ به بعد) کنسل می‌شود،
+    # سهم استاد/مدرسه باید فقط بر اساسِ جلساتِ باقی‌مانده (نه تعداد اولیه) حساب شود؛
+    # قیمتِ هر جلسه ثابت است (total_price اولیه تقسیم بر تعداد اولیه‌ی جلسات)، پس این
+    # محاسبه صرفاً نسبت به همان مبلغِ اولیه‌ی «از ابتدا ست‌شده» کم می‌شود، بدون این‌که
+    # session_count/total_price/teacher_share/school_share (که مبنای همان کلاس با تمام
+    # جلسات از ابتدا هستند) تغییر کنند — تا بشود اختلاف را با آن مقدار اولیه مقایسه کرد.
+    @property
+    def cancelled_session_count(self):
+        return self.sessions.filter(is_cancelled=True).count()
+
+    @property
+    def active_session_count(self):
+        return max(self.session_count - self.cancelled_session_count, 0)
+
+    @property
+    def price_per_session(self):
+        return int(self.total_price / self.session_count) if self.session_count else 0
+
+    @property
+    def effective_total_price(self):
+        if not self.session_count:
+            return self.total_price
+        return int(self.total_price * self.active_session_count / self.session_count)
+
+    @property
+    def effective_teacher_share(self):
+        if not self.session_count:
+            return self.teacher_share
+        return int(self.teacher_share * self.active_session_count / self.session_count)
+
+    @property
+    def effective_school_share(self):
+        if not self.session_count:
+            return self.school_share
+        return int(self.school_share * self.active_session_count / self.session_count)
+
+    @property
+    def teacher_share_difference_from_original(self):
+        """چقدر سهم استاد نسبت به کلاسی که از ابتدا با همین تعداد جلسه (بدون کنسلی) ست شده بود کمتر شده"""
+        return self.teacher_share - self.effective_teacher_share
+
+    @property
+    def total_price_difference_from_original(self):
+        return self.total_price - self.effective_total_price
+
     @property
     def payment_confirmed_at_jalali(self):
         """تاریخ و ساعت پرداخت به شمسی"""

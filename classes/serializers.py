@@ -4,7 +4,7 @@ from accounts.validators import username_validator, password_validator
 from classes.models import ClassSession
 
 
-ACTIVE_IDENTITY_STATUSES = [ClassRequest.Status.PENDING, ClassRequest.Status.CONFIRMED]
+ACTIVE_IDENTITY_STATUSES = [ClassRequest.Status.PENDING, ClassRequest.Status.REFERRED, ClassRequest.Status.CONFIRMED]
 
 
 def normalize_identity(value):
@@ -14,21 +14,20 @@ def normalize_identity(value):
 
 
 def validate_active_identity(attrs, *, student=None):
-    """درخواست جدید نباید با درخواست جدید یا تأیید نهاییِ موجود هم‌هویت باشد."""
+    """برای یک هویت و نوع کلاس، تا وقتی کلاس مختومه/رد/کنسل نشده است، ثبت تکراری ممنوع است."""
     first_name = normalize_identity(attrs.get('first_name') or getattr(student, 'first_name', ''))
     last_name = normalize_identity(attrs.get('last_name') or getattr(student, 'last_name', ''))
     national_code = normalize_identity(attrs.get('national_code') or getattr(student, 'national_code', ''))
-    phone = normalize_identity(attrs.get('phone') or getattr(student, 'phone', ''))
+    class_type = attrs.get('class_type')
     full_name = normalize_identity(f'{first_name}{last_name}')
-    if not any((full_name, national_code, phone)):
+    if not full_name or not national_code or not class_type:
         return
-    qs = ClassRequest.objects.filter(status__in=ACTIVE_IDENTITY_STATUSES).select_related('student')
+    qs = ClassRequest.objects.filter(status__in=ACTIVE_IDENTITY_STATUSES, class_type=class_type).select_related('student')
     for existing in qs:
         existing_name = normalize_identity(existing.student.first_name + existing.student.last_name)
         existing_national = normalize_identity(existing.student.national_code)
-        existing_phone = normalize_identity(existing.student.phone)
-        if (full_name and full_name == existing_name) or (national_code and national_code == existing_national) or (phone and phone == existing_phone):
-            raise serializers.ValidationError({'error': 'اسم فرد مورد نظر در لیست وجود دارد؛ نام، کد ملی و شماره همراه باید یکتا باشند.'})
+        if full_name == existing_name and national_code == existing_national:
+            raise serializers.ValidationError({'error': 'برای این دانش‌آموز با این نوع کلاس، یک کلاس فعال وجود دارد و هنوز مختومه نشده است.'})
 
 
 class ClassSessionSerializer(serializers.ModelSerializer):
@@ -36,7 +35,10 @@ class ClassSessionSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = ClassSession
-        fields = ['id', 'session_number', 'completed_at', 'completed_at_jalali', 'student_confirmed', 'student_rejected', 'notes']
+        fields = [
+            'id', 'session_number', 'completed_at', 'completed_at_jalali', 'student_confirmed', 'student_rejected', 'held',
+            'notes', 'is_cancelled', 'cancelled_at', 'cancel_reason',
+        ]
 
 
 class StudentInfoSerializer(serializers.ModelSerializer):
@@ -63,6 +65,27 @@ class ClassRequestAdminSerializer(serializers.ModelSerializer):
     class_date_jalali = serializers.ReadOnlyField()
     payment_confirmed_at_jalali = serializers.ReadOnlyField()
     sessions = ClassSessionSerializer(many=True, read_only=True)
+    # خواسته: با کنسل‌شدنِ جلسات (۲ به بعد)، سهم واقعیِ استاد/مدرسه طبق جلساتِ باقی‌مانده
+    # و اختلافش با مبلغِ کلاسِ «از ابتدا با همین تعداد جلسه ست‌شده» (بدون کنسلی) نمایش داده شود.
+    cancelled_session_count = serializers.ReadOnlyField()
+    active_session_count = serializers.ReadOnlyField()
+    effective_total_price = serializers.ReadOnlyField()
+    effective_teacher_share = serializers.ReadOnlyField()
+    effective_school_share = serializers.ReadOnlyField()
+    teacher_share_difference_from_original = serializers.ReadOnlyField()
+    total_price_difference_from_original = serializers.ReadOnlyField()
+
+    def validate(self, attrs):
+        payment_status = attrs.get('payment_status', getattr(self.instance, 'payment_status', None))
+        payment_method = attrs.get('payment_method', getattr(self.instance, 'payment_method', ''))
+        payment_confirmed_at = attrs.get('payment_confirmed_at', getattr(self.instance, 'payment_confirmed_at', None))
+        payment_reference = attrs.get('payment_reference', getattr(self.instance, 'payment_reference', ''))
+        if payment_status == ClassRequest.PaymentStatus.PAID:
+            if not payment_method or not payment_confirmed_at:
+                raise serializers.ValidationError({'payment_status': 'برای پرداخت‌شده، نوع پرداخت و تاریخ و ساعت پرداخت الزامی است.'})
+            if payment_method == ClassRequest.PaymentMethod.POS and not str(payment_reference or '').strip():
+                raise serializers.ValidationError({'payment_reference': 'برای پرداخت با پوز، شناسه پرداخت الزامی است.'})
+        return attrs
 
     class Meta:
         model = ClassRequest
@@ -79,7 +102,10 @@ class ClassRequestAdminSerializer(serializers.ModelSerializer):
             'manual_priority', 'force_last', 'contact_no_answer',
             'suggested_teacher_name', 'group_key', 'group_size',
             'session_duration', 'session_count', 'sessions',
+            'cancelled_session_count', 'active_session_count',
             'total_price', 'teacher_share', 'school_share',
+            'effective_total_price', 'effective_teacher_share', 'effective_school_share',
+            'teacher_share_difference_from_original', 'total_price_difference_from_original',
             'teacher_payment_status', 'teacher_payment_date', 'teacher_payment_amount',
             'receipt', 'amount', 'payment_status',
             'payment_method', 'payment_reference', 'payment_confirmed_at', 'payment_confirmed_at_jalali',
@@ -93,6 +119,9 @@ class ClassRequestAdminSerializer(serializers.ModelSerializer):
             'status', 'created_at', 'updated_at', 'total_price', 'teacher_proposed_at_jalali',
             'teacher_share', 'school_share', 'is_completed',
             'accepted_teachers', 'source_level_test',
+            'cancelled_session_count', 'active_session_count',
+            'effective_total_price', 'effective_teacher_share', 'effective_school_share',
+            'teacher_share_difference_from_original', 'total_price_difference_from_original',
         ]
         # نکته: completed_at عمداً از read_only خارج شده تا مدیر همیشه بتونه
         # تاریخ و ساعت اتمام کلاس رو از پنل ویرایش کنه (حتی بعد از مختومه شدن)

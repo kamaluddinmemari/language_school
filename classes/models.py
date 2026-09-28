@@ -15,8 +15,16 @@ class ClassSession(models.Model):
     completed_at = models.DateTimeField(null=True, blank=True)
     student_confirmed = models.BooleanField(default=False)
     student_rejected = models.BooleanField(default=False)
+    # مرحله ۴: این جلسه واقعاً برگزار شد و مدیر آن را ثبت کرد
+    held = models.BooleanField(default=False)
     completed_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True)
     notes = models.CharField(max_length=255, blank=True)
+    # خواسته: در کلاس‌های چند جلسه‌ای، جلسات ۲ به بعد (مستقل از بقیه) قابل کنسل‌شدن باشند؛
+    # جلسه‌ی کنسل‌شده دیگر در محاسبه‌ی سهم استاد/مدرسه و در شرط «همه‌ی جلسات برگزار شد» شمرده نمی‌شود.
+    is_cancelled = models.BooleanField(default=False)
+    cancelled_at = models.DateTimeField(null=True, blank=True)
+    cancel_reason = models.CharField(max_length=255, blank=True)
+    cancelled_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='cancelled_sessions')
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:

@@ -4,5 +4,5 @@ from .models import ClassSession
 
 @admin.register(ClassSession)
 class ClassSessionAdmin(admin.ModelAdmin):
-    list_display = ('class_request', 'session_number', 'completed_at', 'completed_by')
-    list_filter = ('completed_at',)
+    list_display = ('class_request', 'session_number', 'completed_at', 'completed_by', 'is_cancelled')
+    list_filter = ('completed_at', 'is_cancelled')

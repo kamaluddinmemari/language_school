@@ -530,7 +530,68 @@ class ClassSessionUpdateView(APIView):
         except ClassSession.DoesNotExist:
             return Response({'error': 'جلسه پیدا نشد'}, status=status.HTTP_404_NOT_FOUND)
 
+        # خواسته: برای کلاس‌های بیش از یک جلسه، جلساتِ ۲ به بعد به‌طور مستقل قابل کنسل‌شدن
+        # باشند (جلسه‌ی ۱ کنسل نمی‌شود). با کنسل‌شدن، آن جلسه دیگر در محاسبه‌ی سهم استاد/مدرسه
+        # و در شرط «همه‌ی جلسات برگزار شد» شمرده نمی‌شود.
+        if 'is_cancelled' in request.data:
+            if user.role not in ('admin', 'evaluator', 'office'):
+                return Response({'error': 'فقط مدیر می‌تونه جلسه رو کنسل کنه'}, status=status.HTTP_403_FORBIDDEN)
+            is_cancelled = bool(request.data.get('is_cancelled'))
+            if session.session_number == 1:
+                # جلسه ۱ «کنسل نهایی» نمی‌شود؛ فقط برای تشکیل دوباره به مرحله ۲
+                # برمی‌گردد تا پس از ثبت زمان جدید، همان جلسه دوباره فعال شود.
+                session.is_cancelled = False
+                session.cancel_reason = ''
+                session.cancelled_at = None
+                session.cancelled_by = None
+                session.completed_at = None
+                session.student_confirmed = False
+                session.student_rejected = False
+                session.held = False
+                # جلسه ۱ جلسه مادر است؛ با شروع دوباره‌ی آن، وضعیت زمانی/تأیید/
+                # برگزاری تمام جلسات بعدیِ فعال نیز از چرخه‌ی قبلی پاک می‌شود.
+                # جلسات بعدیِ واقعاً کنسل‌شده دست‌نخورده می‌مانند.
+                for later_session in class_request.sessions.exclude(pk=session.pk).filter(is_cancelled=False):
+                    later_session.completed_at = None
+                    later_session.student_confirmed = False
+                    later_session.student_rejected = False
+                    later_session.held = False
+                    later_session.save(update_fields=['completed_at', 'student_confirmed', 'student_rejected', 'held', 'updated_at'])
+                class_request.workflow_stage = 2
+                class_request.status = ClassRequest.Status.CONFIRMED
+                class_request.is_completed = False
+                class_request.completed_at = None
+                class_request.teacher_proposed_at = None
+                class_request.class_date = None
+                class_request.class_date_approved = False
+                class_request.student_time_confirmed = False
+                class_request.student_time_rejected = False
+                class_request.teacher_coordinated = False
+                class_request.student_coordinated = False
+                class_request.save(update_fields=['workflow_stage', 'status', 'is_completed', 'completed_at', 'teacher_proposed_at', 'class_date', 'class_date_approved', 'student_time_confirmed', 'student_time_rejected', 'teacher_coordinated', 'student_coordinated', 'updated_at'])
+            else:
+                session.is_cancelled = is_cancelled
+                session.cancel_reason = request.data.get('cancel_reason', session.cancel_reason if is_cancelled else '')
+                session.cancelled_at = timezone.now() if is_cancelled else None
+                session.cancelled_by = user if is_cancelled else None
+                if is_cancelled:
+                    session.completed_at = None
+                    session.student_confirmed = False
+                    session.student_rejected = False
+                    session.held = False
+
         completed_at = request.data.get('completed_at')
+        if session.session_number == 1 and completed_at is not None and session.is_cancelled:
+            session.is_cancelled = False
+            session.cancel_reason = ''
+            session.cancelled_at = None
+            session.cancelled_by = None
+            for later_session in class_request.sessions.exclude(pk=session.pk).filter(is_cancelled=False):
+                later_session.completed_at = None
+                later_session.student_confirmed = False
+                later_session.student_rejected = False
+                later_session.held = False
+                later_session.save(update_fields=['completed_at', 'student_confirmed', 'student_rejected', 'held', 'updated_at'])
         if completed_at is not None:
             proposed_at = parse_datetime(str(completed_at)) if completed_at else None
             if proposed_at and timezone.is_naive(proposed_at):
@@ -554,16 +615,24 @@ class ClassSessionUpdateView(APIView):
             session.student_confirmed = bool(request.data.get('student_confirmed'))
             if session.student_confirmed:
                 session.student_rejected = False
+            else:
+                session.held = False
         if 'student_rejected' in request.data and user.role in ('admin', 'evaluator', 'office'):
             session.student_rejected = bool(request.data.get('student_rejected'))
             if session.student_rejected:
                 session.student_confirmed = False
+        if 'held' in request.data and user.role in ('admin', 'evaluator', 'office'):
+            held = bool(request.data.get('held'))
+            if held and (session.is_cancelled or not session.completed_at or not session.student_confirmed):
+                return Response({'error': 'برای ثبت برگزاری، ابتدا تاریخ جلسه را ثبت و تأیید مرحله ۳ را انجام دهید'}, status=status.HTTP_400_BAD_REQUEST)
+            session.held = held
         session.completed_by = user
         session.save()
 
-        total = class_request.session_count
-        done = class_request.sessions.filter(completed_at__isnull=False).count()
-        # مرحله ۴ فقط با دکمه تأیید نهایی زمان همه جلسات فعال می‌شود.
+        # خواسته: جلساتِ کنسل‌شده در شرط «همه‌ی جلسات برگزار شد» به حساب نمی‌آیند.
+        total = class_request.active_session_count
+        done = class_request.sessions.filter(held=True, is_cancelled=False).count()
+        # مرحله ۴ فقط با دکمه «برگزار شد» برای همه‌ی جلسات فعال کامل می‌شود.
         if done >= total and not class_request.is_completed:
             class_request.is_completed = True
             class_request.completed_at = timezone.now()
@@ -601,6 +670,10 @@ class AdminConfirmCompleteView(APIView):
         except ClassRequest.DoesNotExist:
             return Response({'error': 'درخواست پیدا نشد'}, status=status.HTTP_404_NOT_FOUND)
 
+        total = class_request.active_session_count
+        held = class_request.sessions.filter(held=True, is_cancelled=False).count()
+        if held < total:
+            return Response({'error': f'ابتدا برگزاری همه جلسات را ثبت کنید ({held} از {total})'}, status=status.HTTP_400_BAD_REQUEST)
         class_request.is_completed = True
         class_request.status = ClassRequest.Status.COMPLETED
         class_request.save()
@@ -621,6 +694,24 @@ class AdminConfirmCompleteView(APIView):
                 notif_type='class_accepted'
             )
         return Response({'message': 'کلاس مختومه شد'})
+
+
+class RestoreCompletedClassView(APIView):
+    """بازگرداندن کلاس مختومه به وضعیت فعالِ مرحله ۴ برای اصلاح یا ادامه روند."""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, pk):
+        if request.user.role not in ('admin', 'office', 'evaluator'):
+            return Response({'error': 'فقط مدیر می‌تواند کلاس مختومه را بازگرداند'}, status=status.HTTP_403_FORBIDDEN)
+        try:
+            class_request = ClassRequest.objects.get(pk=pk, status=ClassRequest.Status.COMPLETED)
+        except ClassRequest.DoesNotExist:
+            return Response({'error': 'کلاس پیدا نشد یا مختومه نیست'}, status=status.HTTP_404_NOT_FOUND)
+        class_request.status = ClassRequest.Status.CONFIRMED
+        class_request.is_completed = False
+        class_request.workflow_stage = 4
+        class_request.save(update_fields=['status', 'is_completed', 'workflow_stage', 'updated_at'])
+        return Response({'message': 'کلاس به مرحله قبل بازگردانده شد'})
 
 
 class SatisfactionView(APIView):
@@ -705,13 +796,18 @@ class PayTeacherView(APIView):
         except ClassRequest.DoesNotExist:
             return Response({'error': 'درخواست پیدا نشد'}, status=status.HTTP_404_NOT_FOUND)
 
-        amount = request.data.get('amount', class_request.teacher_share)
-        class_request.teacher_payment_status = True
-        class_request.teacher_payment_date = timezone.now()
-        class_request.teacher_payment_amount = amount
+        # خواسته: اگر جلسه‌ای کنسل شده، پیش‌فرضِ مبلغِ پرداختی سهم استاد باید طبق جلساتِ
+        # باقی‌مانده (effective_teacher_share) باشد، نه سهمِ کاملِ محاسبه‌شده برای همه‌ی جلسات.
+        paid = request.data.get('paid', True)
+        if isinstance(paid, str):
+            paid = paid.lower() not in ('false', '0', 'no', 'off')
+        amount = request.data.get('amount', class_request.effective_teacher_share)
+        class_request.teacher_payment_status = bool(paid)
+        class_request.teacher_payment_date = timezone.now() if paid else None
+        class_request.teacher_payment_amount = amount if paid else 0
         class_request.save()
 
-        if class_request.teacher:
+        if class_request.teacher and paid:
             send_notification(
                 sender=request.user,
                 recipients=[class_request.teacher],
