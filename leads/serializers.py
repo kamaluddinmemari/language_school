@@ -1,8 +1,21 @@
 from rest_framework import serializers
-from .models import NewLead, UnregisteredStudent, UnregisteredStudentFollowup, Debtor, DebtorFollowup, DiscountedPerson, normalize_national_code, normalize_phone
+from .models import NewLead, NewLeadFollowup, UnregisteredStudent, UnregisteredStudentFollowup, Debtor, DebtorFollowup, DiscountedPerson, normalize_national_code, normalize_phone
+
+
+class NewLeadFollowupSerializer(serializers.ModelSerializer):
+    followed_up_at_jalali = serializers.ReadOnlyField()
+    followed_up_by_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = NewLeadFollowup
+        fields = ['id', 'followed_up_at', 'followed_up_at_jalali', 'followed_up_by_name']
+
+    def get_followed_up_by_name(self, obj):
+        return obj.followed_up_by.get_full_name() if obj.followed_up_by else None
 
 
 class NewLeadSerializer(serializers.ModelSerializer):
+    followups = NewLeadFollowupSerializer(many=True, read_only=True)
     status_display = serializers.CharField(source='get_status_display', read_only=True)
     created_at_jalali = serializers.ReadOnlyField()
     followup1_at_jalali = serializers.ReadOnlyField()
@@ -70,7 +83,7 @@ class NewLeadSerializer(serializers.ModelSerializer):
             'followup2_at', 'followup2_at_jalali', 'followup2_by_name',
             'registered_at', 'registered_at_jalali', 'cancelled_at', 'cancelled_at_jalali',
             'deposit_amount', 'deposit_paid_at', 'deposit_paid_at_jalali',
-            'description',
+            'description', 'followups',
             'needs_level_test', 'needs_level_test_marked_at', 'needs_level_test_marked_at_jalali',
             'created_at', 'created_at_jalali', 'updated_at', 'level_test',
         ]

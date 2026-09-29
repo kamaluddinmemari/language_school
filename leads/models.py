@@ -180,6 +180,20 @@ class NewLead(models.Model):
         return f"{self.first_name} {self.last_name} ({self.get_status_display()})"
 
 
+class NewLeadFollowup(models.Model):
+    """هر بار پیگیری یک سرنخ لیست انتظار — بدون محدودیت تعداد؛ تاریخ و ساعت هر بار ثبت می‌شود"""
+    lead = models.ForeignKey(NewLead, on_delete=models.CASCADE, related_name='followups')
+    followed_up_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
+    followed_up_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['followed_up_at', 'id']
+
+    @property
+    def followed_up_at_jalali(self):
+        return _jalali(self.followed_up_at)
+
+
 class UnregisteredStudent(models.Model):
     """زبان‌آموزی که استادی معرفی کرده ولی هنوز ثبت‌نام نکرده — نیازمند پیگیری آموزشگاه"""
 

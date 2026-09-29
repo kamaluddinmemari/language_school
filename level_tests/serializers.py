@@ -5,6 +5,21 @@ from .models import LevelTest, LevelTestPriceSetting
 from .levels import LEVELS_BY_AGE_GROUP
 
 
+def _ensure_slot_free(attrs, instance):
+    """یک تایم در یک تاریخ فقط برای یک نفر: اگر همان تایم برای فرد دیگری رزرو باشد، خطا می‌دهد."""
+    from .scheduling import find_reserved_conflict
+    new_date = attrs.get('test_date')
+    if not new_date:
+        return
+    if instance is not None and instance.test_date == new_date:
+        return  # تغییری در تایم نداده
+    if new_date < timezone.now() - timedelta(minutes=5):  # ۵ دقیقه تلورانس برای دکمه‌ی «اکنون»
+        raise serializers.ValidationError({'test_date': 'امکان رزرو در تاریخ و ساعتِ گذشته وجود ندارد'})
+    who = find_reserved_conflict(new_date, instance.pk if instance is not None else None)
+    if who:
+        raise serializers.ValidationError({'test_date': f'این تایم قبلاً برای «{who}» رزرو شده است؛ تایم دیگری انتخاب کنید یا ابتدا رزرو قبلی را لغو کنید'})
+
+
 class LevelTestPriceSettingSerializer(serializers.ModelSerializer):
     class Meta:
         model = LevelTestPriceSetting
@@ -24,6 +39,7 @@ class LevelTestIntakeSerializer(serializers.ModelSerializer):
         for field in ['first_name', 'last_name', 'father_name', 'birth_date', 'national_code', 'phone', 'gender']:
             if not attrs.get(field) and not (self.instance and getattr(self.instance, field, None)):
                 raise serializers.ValidationError({field: 'این فیلد لازم است'})
+        _ensure_slot_free(attrs, self.instance)
         return attrs
 
 
@@ -82,4 +98,7 @@ class LevelTestSerializer(serializers.ModelSerializer):
             valid_levels = LEVELS_BY_AGE_GROUP.get(age_group, [])
             if level not in valid_levels:
                 raise serializers.ValidationError({'level': f'این سطح متعلق به گروه سنی «{age_group}» نیست'})
+        # ثبت نتیجه (تکمیل تعیین‌سطح) رزرو جدید نیست؛ فقط ویرایش/رزرو وقت یک داوطلبِ در انتظار بررسی می‌شود
+        if not (level or (self.instance and self.instance.level)):
+            _ensure_slot_free(attrs, self.instance)
         return attrs

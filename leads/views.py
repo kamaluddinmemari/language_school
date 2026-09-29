@@ -5,7 +5,7 @@ from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from django.utils import timezone
 from django.db.models import Q
-from .models import NewLead, UnregisteredStudent, UnregisteredStudentFollowup, DropoutFollowup, Debtor, DebtorFollowup, DiscountedPerson, build_identity_key, build_person_key, get_current_term
+from .models import NewLead, NewLeadFollowup, UnregisteredStudent, UnregisteredStudentFollowup, DropoutFollowup, Debtor, DebtorFollowup, DiscountedPerson, build_identity_key, build_person_key, get_current_term
 from .serializers import (
     NewLeadSerializer,
     UnregisteredStudentSerializer,
@@ -38,7 +38,7 @@ class NewLeadListView(generics.ListCreateAPIView):
     def get_queryset(self):
         if not can_edit_menu(self.request.user, "new-leads"):
             return NewLead.objects.none()
-        return NewLead.objects.all()
+        return NewLead.objects.all().prefetch_related('followups__followed_up_by')
 
     def get_serializer_context(self):
         """
@@ -106,7 +106,7 @@ class NewLeadDetailView(generics.RetrieveUpdateDestroyAPIView):
 
 
 class NewLeadActionView(APIView):
-    """POST: یکی از اکشن‌های followup1 / followup2 / register / cancel / flag_level_test / unflag_level_test روی یک سرنخ"""
+    """POST: یکی از اکشن‌های followup (نامحدود) / register / cancel / flag_level_test / unflag_level_test روی یک سرنخ"""
     permission_classes = [IsAuthenticated]
 
     def post(self, request, pk, action):
@@ -118,6 +118,11 @@ class NewLeadActionView(APIView):
             return Response({'error': 'مورد پیدا نشد'}, status=status.HTTP_404_NOT_FOUND)
 
         now = timezone.now()
+        if action == 'followup':
+            # پیگیری نامحدود: هر بار یک ردیف جدید با تاریخ و ساعت همان لحظه
+            NewLeadFollowup.objects.create(lead=lead, followed_up_by=request.user)
+            lead.refresh_from_db()
+            return Response(NewLeadSerializer(lead).data)
         if action == 'followup1':
             lead.followup1_at = now
             lead.followup1_by = request.user
