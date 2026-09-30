@@ -248,6 +248,8 @@ class ClassRequest(models.Model):
     student_coordinated = models.BooleanField(default=False)
     # وضعیت پایدار فلوچارت فرایند کلاس از تخصیص استاد تا اتمام جلسات
     workflow_stage = models.PositiveSmallIntegerField(default=1)
+    # آخرین زمان ارجاع نهایی کلاس به استاد؛ برای مرتب‌سازی تب تأیید نهایی
+    teacher_assigned_at = models.DateTimeField(null=True, blank=True)
     teacher_proposed_at = models.DateTimeField(null=True, blank=True)
     student_time_confirmed = models.BooleanField(default=False)
     student_time_rejected = models.BooleanField(default=False)

@@ -18,7 +18,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from .models import LevelTest
+from .models import LevelTest, LevelTestManualSlotOverride
 
 # نام استادِ ارزیاب تعیین‌سطح — برای تغییر، فقط همین‌جا را عوض کنید (مقایسه بدون توجه به فاصله/نیم‌فاصله/ی-ك عربی).
 EVALUATOR_TEACHER_NAME = 'حسام الدین معماری'
@@ -163,26 +163,48 @@ def teacher_busy_intervals(day):
 
 
 def reservations_for_day(day, exclude_id=None):
-    """تعیین‌سطح‌های در انتظارِ رزروشده در این روز → [(دقیقه‌ی شروع, نام)]"""
+    """تعیین‌سطح‌های در انتظارِ رزروشده در این روز → [(دقیقه‌ی شروع, نام, id)]"""
     qs = LevelTest.objects.filter(status=LevelTest.Status.PENDING, test_date__isnull=False)
     if exclude_id:
         qs = qs.exclude(pk=exclude_id)
     out = []
     for t in qs:
         if _local_date(t.test_date) == day:
-            out.append((_minute_of_day(t.test_date), f'{t.first_name} {t.last_name}'.strip()))
+            out.append((_minute_of_day(t.test_date), f'{t.first_name} {t.last_name}'.strip(), t.id))
     return out
 
 
+def manual_overrides_for_day(day):
+    """→ {time_str: LevelTestManualSlotOverride}"""
+    return {o.time: o for o in LevelTestManualSlotOverride.objects.filter(date=day)}
+
+
 def find_reserved_conflict(test_date, exclude_pk=None):
-    """اگر همین تایم (بازه‌ی SLOT_MINUTES) قبلاً برای تعیین‌سطحِ در انتظارِ دیگری رزرو شده باشد، نام او را برمی‌گرداند."""
+    """
+    بررسی امکان رزرو یک تایم؛ خروجی None یعنی مجاز، در غیر این صورت پیام خطا.
+    اولویت با override دستیِ همان تایم است: 'free' اجازه‌ی رزرو (حتی هم‌زمان با فرد دیگر) می‌دهد،
+    'blocked' مانع رزرو می‌شود، حتی اگر بر اساس پروتکل خودکار آزاد باشد.
+    """
     if not test_date:
         return None
     day = _local_date(test_date)
     start = _minute_of_day(test_date)
-    for s, name in reservations_for_day(day, exclude_pk):
+    time_str = _hm(start - start % SLOT_MINUTES)
+    override = manual_overrides_for_day(day).get(time_str)
+    if override and override.state == LevelTestManualSlotOverride.State.FREE:
+        return None
+    if override and override.state == LevelTestManualSlotOverride.State.BLOCKED:
+        return {'blocked': True, 'message': 'این تایم توسط مدیر مسدود شده است'}
+    for s, name, _id in reservations_for_day(day, exclude_pk):
         if abs(s - start) < SLOT_MINUTES:
-            return name or 'فرد دیگر'
+            return {'blocked': False, 'name': name or 'فرد دیگر'}
+    # همان قاعده‌ای که رنگ قرمزِ «اشغال» را در لیست تایم‌ها نشان می‌دهد، هنگام
+    # ثبت مستقیم/«همین الان تعیین سطح می‌کند» هم باید هشدار ایجاد کند. با ارسال
+    # force_time_override=True بعد از تایید کاربر، این بررسی عمداً دور زده می‌شود.
+    if not any(lo <= start and start + SLOT_MINUTES <= hi for lo, hi in BUSY_EXEMPT_RANGES):
+        busy = next((item for item in teacher_busy_intervals(day) if _overlaps(start, start + SLOT_MINUTES, item[0], item[1])), None)
+        if busy:
+            return {'blocked': False, 'name': busy[2], 'busy': True}
     return None
 
 
@@ -205,6 +227,7 @@ class LevelTestAvailableTimesView(APIView):
 
         busy = teacher_busy_intervals(day)
         reserved = reservations_for_day(day, exclude_id)
+        overrides = manual_overrides_for_day(day)
         now_local = timezone.localtime(timezone.now())
         now_min = now_local.hour * 60 + now_local.minute
 
@@ -213,11 +236,18 @@ class LevelTestAvailableTimesView(APIView):
             end = start + SLOT_MINUTES
             state, reason = 'free', ''
             is_past = day < now_local.date() or (day == now_local.date() and start < now_min)
-            hit = next(((s, n) for s, n in reserved if _overlaps(start, end, s, s + SLOT_MINUTES)), None)
+            override = overrides.get(_hm(start))
+            hit = next(((s, n, i) for s, n, i in reserved if _overlaps(start, end, s, s + SLOT_MINUTES)), None)
             if is_past:
                 state, reason = 'past', 'این تایم گذشته است'
+            elif override and override.state == LevelTestManualSlotOverride.State.FREE:
+                state, reason = 'free', ''
+                if hit:
+                    reason = f'به‌طور دستی آزاد شده (با وجود رزروِ {hit[1]})'
             elif hit:
                 state, reason = 'reserved', f'رزرو شده برای {hit[1]}'
+            elif override and override.state == LevelTestManualSlotOverride.State.BLOCKED:
+                state, reason = 'blocked', override.note or 'مسدود شده توسط مدیر'
             elif not any(lo <= start and end <= hi for lo, hi in BUSY_EXEMPT_RANGES):
                 b = next((x for x in busy if _overlaps(start, end, x[0], x[1])), None)
                 if b:
@@ -225,13 +255,14 @@ class LevelTestAvailableTimesView(APIView):
             slots.append({
                 'time': _hm(start), 'period': 'morning' if start < 13 * 60 else 'evening',
                 'priority': _is_priority(start) and start >= 13 * 60, 'state': state, 'reason': reason,
+                'manual': bool(override),
             })
         return Response({
             'date': day.isoformat(),
             'teacher_name': EVALUATOR_TEACHER_NAME,
             'slots': slots,
             'busy': [{'start': _hm(a), 'end': _hm(b), 'reason': r} for a, b, r in busy],
-            'reservations': [{'time': _hm(s), 'name': n} for s, n in reserved],
+            'reservations': [{'time': _hm(s), 'name': n, 'id': i} for s, n, i in reserved],
         })
 
 
@@ -268,3 +299,59 @@ class LevelTestTeacherConflictsView(APIView):
                 'id': t.id, 'name': f'{t.first_name} {t.last_name}'.strip(), 'test_date_jalali': t.test_date_jalali,
             })
         return Response({'conflicts': conflicts, 'teacher_name': EVALUATOR_TEACHER_NAME})
+
+
+class LevelTestManualSlotOverrideView(APIView):
+    """
+    تنظیمات دستیِ تایم — جدای از پروتکل خودکار:
+    GET    ?date=YYYY-MM-DD                      → لیست override های همان روز
+    POST   {date, time, state, note?}            → ثبت/به‌روزرسانی override یک تایم (state یکی از blocked/free)
+    DELETE ?date=YYYY-MM-DD&time=HH:MM           → حذف override و بازگشت به حالت خودکار
+    """
+    permission_classes = [IsAuthenticated]
+
+    def _check_role(self, request):
+        return getattr(request.user, 'role', '') != 'student'
+
+    def get(self, request):
+        if not self._check_role(request):
+            return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
+        try:
+            day = datetime.strptime(request.query_params.get('date', ''), '%Y-%m-%d').date()
+        except ValueError:
+            return Response({'error': 'تاریخ نامعتبر است'}, status=status.HTTP_400_BAD_REQUEST)
+        items = LevelTestManualSlotOverride.objects.filter(date=day)
+        return Response({'overrides': [
+            {'id': o.id, 'time': o.time, 'state': o.state, 'note': o.note} for o in items
+        ]})
+
+    def post(self, request):
+        if not self._check_role(request):
+            return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
+        date_str = request.data.get('date')
+        time_str = request.data.get('time')
+        state = request.data.get('state')
+        note = request.data.get('note', '') or ''
+        try:
+            day = datetime.strptime(date_str, '%Y-%m-%d').date()
+        except (ValueError, TypeError):
+            return Response({'error': 'تاریخ نامعتبر است'}, status=status.HTTP_400_BAD_REQUEST)
+        if not re.match(r'^\d{2}:\d{2}$', str(time_str or '')):
+            return Response({'error': 'ساعت نامعتبر است'}, status=status.HTTP_400_BAD_REQUEST)
+        if state not in (LevelTestManualSlotOverride.State.BLOCKED, LevelTestManualSlotOverride.State.FREE):
+            return Response({'error': 'وضعیت نامعتبر است'}, status=status.HTTP_400_BAD_REQUEST)
+        obj, _ = LevelTestManualSlotOverride.objects.update_or_create(
+            date=day, time=time_str, defaults={'state': state, 'note': note[:200], 'created_by': request.user},
+        )
+        return Response({'id': obj.id, 'time': obj.time, 'state': obj.state, 'note': obj.note})
+
+    def delete(self, request):
+        if not self._check_role(request):
+            return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
+        try:
+            day = datetime.strptime(request.query_params.get('date', ''), '%Y-%m-%d').date()
+        except ValueError:
+            return Response({'error': 'تاریخ نامعتبر است'}, status=status.HTTP_400_BAD_REQUEST)
+        time_str = request.query_params.get('time', '')
+        LevelTestManualSlotOverride.objects.filter(date=day, time=time_str).delete()
+        return Response({'deleted': True})

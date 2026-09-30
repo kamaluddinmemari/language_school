@@ -6,7 +6,7 @@ from rest_framework.permissions import IsAuthenticated
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 from datetime import timedelta
-from django.db.models import Q
+from django.db.models import Case, IntegerField, Q, Value, When
 from accounts.models import ClassRequest, User
 from notifications.utils import send_notification
 from classes.models import ClassSession, ensure_sessions
@@ -19,6 +19,24 @@ from .serializers import (
     ClassSessionSerializer,
 )
 from accounts.menu_permissions import can_view_menu
+
+
+def _private_class_queue_ordering(queryset):
+    """صف پنل: پرداخت‌شده‌ها/جبرانی‌ها ابتدا، خصوصیِ پرداخت‌نشده بعد؛ قدیمی به جدید."""
+    queue_group = Case(
+        When(force_last=True, then=Value(3)),
+        When(
+            Q(class_type=ClassRequest.ClassType.MAKEUP)
+            | Q(payment_status=ClassRequest.PaymentStatus.PAID),
+            then=Value(0),
+        ),
+        When(class_type=ClassRequest.ClassType.PRIVATE, then=Value(1)),
+        default=Value(2),
+        output_field=IntegerField(),
+    )
+    return queryset.annotate(_private_queue_group=queue_group).order_by(
+        '_private_queue_group', 'created_at', 'id'
+    )
 
 
 class PendingPrivateClassRequestsView(generics.ListAPIView):
@@ -68,7 +86,7 @@ class ClassRequestListCreateView(generics.ListCreateAPIView):
     def get_queryset(self):
         user = self.request.user
         if user.role in ('admin', 'evaluator', 'office', 'employee'):
-            return ClassRequest.objects.all().order_by('-created_at')
+            return _private_class_queue_ordering(ClassRequest.objects.all())
         elif user.role in User.TEACHER_LIKE_ROLES:
             from django.db.models import Q
             return ClassRequest.objects.filter(
@@ -256,6 +274,7 @@ class DirectAssignClassView(APIView):
         class_request.teacher = chosen_teacher
         class_request.status = ClassRequest.Status.CONFIRMED
         class_request.workflow_stage = max(class_request.workflow_stage or 1, 2)
+        class_request.teacher_assigned_at = timezone.now()
         class_request.save()
         ensure_sessions(class_request)
 
@@ -363,6 +382,7 @@ class FinalizeClassView(APIView):
         class_request.teacher = chosen_teacher
         class_request.status = ClassRequest.Status.CONFIRMED
         class_request.workflow_stage = max(class_request.workflow_stage or 1, 2)
+        class_request.teacher_assigned_at = timezone.now()
         class_request.save()
         ensure_sessions(class_request)
 

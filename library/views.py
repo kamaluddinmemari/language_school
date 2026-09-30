@@ -54,6 +54,25 @@ class BookDetailView(generics.RetrieveUpdateDestroyAPIView):
         return super().destroy(request, *args, **kwargs)
 
 
+class BookSalesPriceListView(APIView):
+    """GET: داده‌ی فشرده‌ی جدول «قیمت فروش کتاب‌ها» برای نمایش سریع در پنل."""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        if not can_edit_menu(request.user, 'library'):
+            return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
+        books = Book.objects.order_by('title', 'id')
+        return Response([
+            {
+                'id': book.id,
+                'title': book.title,
+                'unit_price': book.unit_price,
+                'current_stock': book.current_stock,
+            }
+            for book in books
+        ])
+
+
 class SellBookView(APIView):
     """POST: ثبت فروش — بدنه: {quantity} — از موجودی کم می‌کند و تراکنش فروش می‌سازد"""
     permission_classes = [IsAuthenticated]

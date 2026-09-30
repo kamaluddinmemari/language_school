@@ -5,11 +5,13 @@ from .views import (
     SellBookView,
     AddBookStockView,
     BookSalesHistoryView,
+    BookSalesPriceListView,
     LibraryStatsView,
 )
 
 urlpatterns = [
     path('library/books/', BookListView.as_view(), name='book_list'),
+    path('library/books/sale-prices/', BookSalesPriceListView.as_view(), name='book_sale_prices'),
     path('library/books/<int:pk>/', BookDetailView.as_view(), name='book_detail'),
     path('library/books/<int:pk>/sell/', SellBookView.as_view(), name='book_sell'),
     path('library/books/<int:pk>/add-stock/', AddBookStockView.as_view(), name='book_add_stock'),

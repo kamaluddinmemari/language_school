@@ -202,3 +202,25 @@ class LevelTest(models.Model):
 
     def __str__(self):
         return f"{self.first_name} {self.last_name} ({self.get_status_display()})"
+
+
+class LevelTestManualSlotOverride(models.Model):
+    """
+    تنظیم دستیِ تایم تعیین سطح — جدای از پروتکل خودکار (کلاس‌های استاد/رزروهای واقعی).
+    مدیر می‌تواند یک تایمِ خودکار «اشغال» را دستی آزاد کند، یا یک تایمِ خودکار «آزاد» را دستی مسدود کند.
+    این override فقط نمایش/امکان انتخاب را عوض می‌کند و رزروهای واقعی (LevelTest.test_date) را حذف نمی‌کند.
+    """
+    class State(models.TextChoices):
+        BLOCKED = 'blocked', 'مسدود شده (اشغال دستی)'
+        FREE = 'free', 'باز شده (آزاد دستی)'
+
+    date = models.DateField()
+    time = models.CharField(max_length=5, help_text='ساعت شروعِ بازه‌ی ۵ دقیقه‌ای، مثل 09:05')
+    state = models.CharField(max_length=10, choices=State.choices)
+    note = models.CharField(max_length=200, blank=True)
+    created_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = [('date', 'time')]
+        ordering = ['date', 'time']

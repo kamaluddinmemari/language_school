@@ -96,7 +96,7 @@ class ClassRequestAdminSerializer(serializers.ModelSerializer):
             'class_type', 'custom_class_type', 'is_online', 'meeting_link', 'language_level',
             'proposed_time', 'class_date', 'class_date_jalali', 'class_date_approved',
             'teacher_coordinated', 'student_coordinated',
-            'workflow_stage', 'teacher_proposed_at', 'teacher_proposed_at_jalali',
+            'workflow_stage', 'teacher_assigned_at', 'teacher_proposed_at', 'teacher_proposed_at_jalali',
             'student_time_confirmed', 'student_time_rejected',
             'stage1_notes', 'stage2_notes', 'stage3_notes', 'stage4_notes',
             'manual_priority', 'force_last', 'contact_no_answer',
@@ -115,7 +115,16 @@ class ClassRequestAdminSerializer(serializers.ModelSerializer):
             'source_level_test',
             'created_at', 'created_at_jalali', 'updated_at',
         ]
-        read_only_fields = [
+
+    def update(self, instance, validated_data):
+        # بعد از پرداخت، مورد باید از انتهای صف خارج و در گروه پرداخت‌شده‌ها
+        # طبق تاریخ ثبت قرار بگیرد؛ اولویت دستی قبلی نباید این رفتار را نقض کند.
+        if validated_data.get('payment_status') == ClassRequest.PaymentStatus.PAID:
+            validated_data['force_last'] = False
+            validated_data['manual_priority'] = None
+        return super().update(instance, validated_data)
+
+    read_only_fields = [
             'status', 'created_at', 'updated_at', 'total_price', 'teacher_proposed_at_jalali',
             'teacher_share', 'school_share', 'is_completed',
             'accepted_teachers', 'source_level_test',
