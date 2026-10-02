@@ -145,7 +145,37 @@ class ClassRequestDetailView(generics.RetrieveUpdateDestroyAPIView):
     def update(self, request, *args, **kwargs):
         if request.user.role not in ('admin', 'evaluator'):
             return Response({'error': 'فقط مدیر یا مدیر آموزش می‌تونه ویرایش کنه'}, status=status.HTTP_403_FORBIDDEN)
-        return super().update(request, *args, **kwargs)
+
+        # تغییر تعداد جلسات (مثلاً هنگام ترکیب چند کلاس به کلاس چندنفره): ردیف‌های جلسه باید با
+        # تعداد جدید هم‌خوان بماند. کاهش فقط وقتی مجاز است که جلسه‌های اضافه هنوز هیچ داده‌ای
+        # (زمان، تأیید، برگزاری، کنسلی) نداشته باشند.
+        instance = self.get_object()
+        raw_count = request.data.get('session_count')
+        new_count = None
+        if raw_count not in (None, ''):
+            try:
+                new_count = int(raw_count)
+            except (TypeError, ValueError):
+                new_count = None
+        if new_count is not None and new_count >= 1 and new_count < instance.session_count:
+            used = instance.sessions.filter(session_number__gt=new_count).filter(
+                Q(completed_at__isnull=False) | Q(held=True) | Q(student_confirmed=True) | Q(is_cancelled=True)
+            )
+            if used.exists():
+                return Response(
+                    {'error': 'برخی از جلساتی که با کاهش تعداد حذف می‌شوند زمان‌بندی/تأیید/برگزار شده‌اند؛ ابتدا آن‌ها را اصلاح کنید.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+        response = super().update(request, *args, **kwargs)
+
+        if new_count is not None and new_count >= 1 and response.status_code == 200:
+            instance.refresh_from_db()
+            if instance.sessions.exists() or instance.status in (ClassRequest.Status.CONFIRMED, ClassRequest.Status.COMPLETED):
+                instance.sessions.filter(session_number__gt=instance.session_count).delete()
+                ensure_sessions(instance)
+                response.data = self.get_serializer(instance).data
+        return response
 
     def destroy(self, request, *args, **kwargs):
         if request.user.role not in ('admin', 'evaluator'):
@@ -730,7 +760,9 @@ class RestoreCompletedClassView(APIView):
         class_request.status = ClassRequest.Status.CONFIRMED
         class_request.is_completed = False
         class_request.workflow_stage = 4
-        class_request.save(update_fields=['status', 'is_completed', 'workflow_stage', 'updated_at'])
+        # بازگشت به «تایید نهایی» یعنی ورود دوباره به این بخش؛ برای مرتب‌سازی (جدیدترین در بالا) زمان ورود به‌روز می‌شود.
+        class_request.teacher_assigned_at = timezone.now()
+        class_request.save(update_fields=['status', 'is_completed', 'workflow_stage', 'teacher_assigned_at', 'updated_at'])
         return Response({'message': 'کلاس به مرحله قبل بازگردانده شد'})
 
 
