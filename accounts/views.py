@@ -694,7 +694,7 @@ class PeopleSearchView(APIView):
         results = []
         seen = set()
 
-        def add(first_name, last_name, father_name, national_code, phone, phone2, source):
+        def add(first_name, last_name, father_name, national_code, phone, phone2, source, birth_date=None, gender=''):
             key = (national_code or '', phone or '', first_name, last_name)
             if key in seen:
                 return
@@ -702,6 +702,7 @@ class PeopleSearchView(APIView):
             results.append({
                 'first_name': first_name, 'last_name': last_name, 'father_name': father_name or '',
                 'national_code': national_code or '', 'phone': phone or '', 'phone2': phone2 or '',
+                'birth_date': birth_date.isoformat() if birth_date else '', 'gender': gender or '',
                 'source': source,
             })
 
@@ -709,12 +710,12 @@ class PeopleSearchView(APIView):
             Q(national_code__icontains=q) | Q(last_name__icontains=q) | Q(first_name__icontains=q)
         )[:8]
         for s in students:
-            add(s.first_name, s.last_name, s.father_name, s.national_code, s.phone, s.phone2, 'دانش‌آموز')
+            add(s.first_name, s.last_name, s.father_name, s.national_code, s.phone, s.phone2, 'دانش‌آموز', s.birth_date, s.gender)
 
         try:
             from leads.models import NewLead, UnregisteredStudent, Debtor, DiscountedPerson
             for lead in NewLead.objects.filter(Q(national_code__icontains=q) | Q(last_name__icontains=q) | Q(first_name__icontains=q))[:8]:
-                add(lead.first_name, lead.last_name, lead.father_name, lead.national_code, lead.phone, '', 'لیست انتظار')
+                add(lead.first_name, lead.last_name, lead.father_name, lead.national_code, lead.phone, '', 'لیست انتظار', lead.birth_date)
             for us in UnregisteredStudent.objects.filter(Q(national_code__icontains=q) | Q(last_name__icontains=q) | Q(first_name__icontains=q))[:8]:
                 add(us.first_name, us.last_name, '', us.national_code, us.phone, '', 'ثبت‌نام‌نشده')
             for d in Debtor.objects.filter(Q(last_name__icontains=q) | Q(first_name__icontains=q))[:8]:
