@@ -8,6 +8,7 @@ from django.db import transaction
 from datetime import timedelta, datetime, date
 import random
 import re
+import json
 
 try:
     import openpyxl
@@ -513,28 +514,128 @@ def _load_excel_rows(uploaded_file):
     return list(sheet.iter_rows(values_only=True))
 
 
-def _read_student_excel(uploaded_file, manual_mapping=None):
+def _normalize_excel_column_range(value):
+    """پذیرش هم ستون قدیمی تکی و هم بازه‌ی {start, end} با اندیس صفرمبنا."""
+    if value in (None, '', 'null'):
+        return None
+    if isinstance(value, dict):
+        start, end = value.get('start'), value.get('end')
+    elif isinstance(value, (list, tuple)) and len(value) == 2:
+        start, end = value
+    else:
+        start = end = value
+    if start in (None, '', 'null') and end in (None, '', 'null'):
+        return None
+    if start in (None, '', 'null') or end in (None, '', 'null'):
+        raise ValueError('برای هر بازهٔ ستون، ستون شروع و پایان را هر دو انتخاب کنید.')
+    try:
+        start, end = int(start), int(end)
+    except (TypeError, ValueError):
+        raise ValueError('شمارهٔ ستون معتبر نیست.')
+    if start < 0 or end < start or end > 701:
+        raise ValueError('بازهٔ ستون باید از A تا ZZ و ستون پایان نباید قبل از شروع باشد.')
+    return start, end
+
+
+def _normalize_excluded_row_ranges(ranges):
+    """پاک‌سازی چند بازه‌ی سطر فیزیکی که نباید وارد شوند."""
+    if ranges in (None, '', 'null'):
+        return []
+    if isinstance(ranges, str):
+        try:
+            ranges = json.loads(ranges)
+        except (TypeError, ValueError):
+            raise ValueError('فهرست بازه‌های سطرهای حذف‌شونده معتبر نیست.')
+    if not isinstance(ranges, (list, tuple)):
+        raise ValueError('بازه‌های سطرهای حذف‌شونده باید به‌صورت فهرست ارسال شوند.')
+    normalized = []
+    for row_range in ranges:
+        if isinstance(row_range, dict):
+            start, end = row_range.get('start'), row_range.get('end')
+        elif isinstance(row_range, (list, tuple)) and len(row_range) == 2:
+            start, end = row_range
+        else:
+            raise ValueError('ساختار یکی از بازه‌های سطرهای حذف‌شونده معتبر نیست.')
+        if start in (None, '', 'null') and end in (None, '', 'null'):
+            continue
+        if start in (None, '', 'null') or end in (None, '', 'null'):
+            raise ValueError('برای هر بازهٔ حذف، سطر شروع و پایان را هر دو وارد کنید.')
+        try:
+            start, end = int(start), int(end)
+        except (TypeError, ValueError):
+            raise ValueError('شمارهٔ سطرهای حذف‌شونده معتبر نیست.')
+        if start < 1 or end < start:
+            raise ValueError('بازهٔ حذف سطر نامعتبر است؛ پایان باید برابر یا بعد از شروع باشد.')
+        normalized.append((start, end))
+    return sorted(normalized)
+
+
+def _read_student_excel(uploaded_file, manual_mapping=None, start_row=None, end_row=None, excluded_row_ranges=None):
     """
-    manual_mapping (اختیاری): dict از {field_key: column_index} که کارمند از پنل «تطبیق ستون‌ها»
-    ارسال کرده — اگر داده شود، جای تشخیص خودکار همان استفاده می‌شود (برای فیلدهایی که خودکار
-    درست تشخیص داده نشدند).
+    manual_mapping (اختیاری): dict از {field_key: (start_column, end_column)} که از پنل می‌آید.
+    بازهٔ ستون هر فیلد از A تا ZZ است؛ بازهٔ چندستونی برای فیلدهای متنی با فاصله ترکیب می‌شود.
     """
     rows = _load_excel_rows(uploaded_file)
+    excluded_row_ranges = _normalize_excluded_row_ranges(excluded_row_ranges)
     if not rows:
-        return {'rows': [], 'headers': [], 'positions': {}, 'header_row_index': 0}
+        return {
+            'rows': [], 'headers': [], 'positions': {}, 'header_row_index': 0,
+            'first_data_row': 1, 'last_data_row': 1, 'selected_range': {'start': 1, 'end': 1},
+            'excluded_row_ranges': excluded_row_ranges, 'excluded_row_count': 0,
+        }
     header_row_index = _find_header_row(rows)
     raw_headers = list(rows[header_row_index])
     headers = [_normalize_excel_header(x) for x in raw_headers]
     positions = _auto_map_headers(headers)
-    if manual_mapping:
+    if manual_mapping is not None:
         for key, idx in manual_mapping.items():
             if key in positions:
-                positions[key] = idx if idx is not None and idx >= 0 else None
+                positions[key] = _normalize_excel_column_range(idx)
+    positions = {key: _normalize_excel_column_range(value) for key, value in positions.items()}
+    first_data_row = header_row_index + 2
+    nonempty_rows = [index + 1 for index, values in enumerate(rows) if values is not None and any(value not in (None, '') for value in values)]
+    last_data_row = max(nonempty_rows, default=header_row_index + 1)
+    if last_data_row < first_data_row:
+        return {
+            'rows': [], 'headers': [str(h or '').strip() for h in raw_headers],
+            'positions': positions, 'header_row_index': header_row_index,
+            'first_data_row': first_data_row, 'last_data_row': first_data_row,
+            'selected_range': {'start': first_data_row, 'end': first_data_row},
+            'excluded_row_ranges': excluded_row_ranges, 'excluded_row_count': 0,
+        }
+    requested_start = int(start_row) if start_row not in (None, '') else first_data_row
+    requested_end = int(end_row) if end_row not in (None, '') else last_data_row
+    if requested_start < 1 or requested_end < requested_start:
+        raise ValueError('بازهٔ سطرهای انتخاب‌شده معتبر نیست؛ سطر پایان باید از سطر شروع کوچک‌تر نباشد.')
+    selected_start = max(requested_start, first_data_row)
+    selected_end = min(requested_end, last_data_row)
+    if selected_start > last_data_row:
+        raise ValueError(f'فایل تا سطر {last_data_row} داده دارد؛ سطر شروع انتخابی بیرون از محدودهٔ فایل است.')
+    if selected_end < selected_start:
+        raise ValueError('بازهٔ انتخاب‌شده پس از سطر عنوان فایل، داده‌ای برای ورود ندارد.')
     output = []
-    for row_number, values in enumerate(rows[header_row_index + 1:], start=header_row_index + 2):
+    excluded_row_count = 0
+    for row_number in range(selected_start, selected_end + 1):
+        values = rows[row_number - 1]
         if values is None or all(v in (None, '') for v in values):
             continue  # ردیف کاملاً خالی را نادیده می‌گیرد (مثلاً انتهای فایل)
-        raw = {key: (values[pos] if pos is not None and pos < len(values) else '') for key, pos in positions.items()}
+        if any(start <= row_number <= end for start, end in excluded_row_ranges):
+            excluded_row_count += 1
+            continue
+        raw = {}
+        for key, column_range in positions.items():
+            if column_range is None:
+                raw[key] = ''
+                continue
+            start_column, end_column = column_range
+            selected_values = [
+                values[index] for index in range(start_column, min(end_column + 1, len(values)))
+                if values[index] not in (None, '') and str(values[index]).strip()
+            ]
+            if key == 'birth_date':
+                raw[key] = selected_values[0] if selected_values else ''
+            else:
+                raw[key] = ' '.join(str(value).strip() for value in selected_values)
         item = {key: (_parse_excel_date(value) if key == 'birth_date' else str(value or '').strip()) for key, value in raw.items()}
         item['_row_number'] = row_number
         output.append(item)
@@ -543,6 +644,11 @@ def _read_student_excel(uploaded_file, manual_mapping=None):
         'headers': [str(h or '').strip() for h in raw_headers],
         'positions': positions,
         'header_row_index': header_row_index,
+        'first_data_row': first_data_row,
+        'last_data_row': last_data_row,
+        'selected_range': {'start': selected_start, 'end': selected_end},
+        'excluded_row_ranges': excluded_row_ranges,
+        'excluded_row_count': excluded_row_count,
     }
 
 
@@ -591,12 +697,27 @@ class StudentExcelImportView(APIView):
                     return Response({'error': 'فایل Excel را انتخاب کنید'}, status=400)
                 manual_mapping = None
                 raw_mapping = request.data.get('mapping')
-                if raw_mapping:
-                    import json
+                if raw_mapping not in (None, ''):
                     parsed_mapping = json.loads(raw_mapping) if isinstance(raw_mapping, str) else raw_mapping
-                    manual_mapping = {k: (int(v) if v not in (None, '', 'null') else None) for k, v in parsed_mapping.items()}
-                parsed_file = _read_student_excel(uploaded, manual_mapping)
+                    if not isinstance(parsed_mapping, dict):
+                        return Response({'error': 'تطبیق ستون‌های فایل معتبر نیست'}, status=400)
+                    manual_mapping = {key: _normalize_excel_column_range(value) for key, value in parsed_mapping.items()}
+                excluded_row_ranges = _normalize_excluded_row_ranges(request.data.get('excluded_row_ranges'))
+                raw_start_row = request.data.get('start_row')
+                raw_end_row = request.data.get('end_row')
+                if (raw_start_row in (None, '')) != (raw_end_row in (None, '')):
+                    return Response({'error': 'هر دو سطر شروع و پایان را وارد کنید'}, status=400)
+                try:
+                    start_row = int(raw_start_row) if raw_start_row not in (None, '') else None
+                    end_row = int(raw_end_row) if raw_end_row not in (None, '') else None
+                except (TypeError, ValueError):
+                    return Response({'error': 'شمارهٔ سطر شروع و پایان معتبر نیست'}, status=400)
+                parsed_file = _read_student_excel(uploaded, manual_mapping, start_row, end_row, excluded_row_ranges)
                 items = _student_import_preview(parsed_file['rows'])
+                column_ranges = {
+                    key: ({'start': value[0], 'end': value[1]} if value is not None else None)
+                    for key, value in parsed_file['positions'].items()
+                }
                 return Response({
                     'rows': items,
                     'total': len(items),
@@ -604,8 +725,15 @@ class StudentExcelImportView(APIView):
                     'duplicate_count': sum(x['status'] == 'duplicate' for x in items),
                     'error_count': sum(x['status'] == 'error' for x in items),
                     'headers': parsed_file['headers'],
-                    'positions': parsed_file['positions'],
+                    'positions': column_ranges,
                     'header_row_index': parsed_file['header_row_index'],
+                    'first_data_row': parsed_file['first_data_row'],
+                    'last_data_row': parsed_file['last_data_row'],
+                    'selected_range': parsed_file['selected_range'],
+                    'excluded_row_ranges': [
+                        {'start': start, 'end': end} for start, end in parsed_file['excluded_row_ranges']
+                    ],
+                    'excluded_row_count': parsed_file['excluded_row_count'],
                     'field_labels': STUDENT_FIELD_LABELS,
                 })
             if mode != 'commit': return Response({'error': 'حالت واردکردن معتبر نیست'}, status=400)

@@ -1,7 +1,9 @@
 from django.utils import timezone
+import json
 import random
 import re
 import math
+import unicodedata
 from datetime import datetime, timedelta
 from django.db import models as django_models, transaction
 from django.db.models import Count, Max, Q
@@ -41,6 +43,24 @@ from .attendance import DEFAULT_SESSION_COUNT, jalali_date, roster_attendance_pa
 # منسوخ — از تنظیمات دسترسی (accounts.menu_permissions.can_edit_menu) جایگزین شد.
 # فقط برای مرجع/سازگاری با کد قدیمی نگه داشته شده؛ جایی از این فایل استفاده نمی‌شود.
 MANAGE_ROLES = ('admin', 'evaluator', 'office', 'employee')
+
+
+def _same_term_enrollments(slot, student_ids=None):
+    queryset = ClassSlotEnrollment.objects.all()
+    if slot.term_id:
+        queryset = queryset.filter(class_slot__term_id=slot.term_id)
+    else:
+        queryset = queryset.filter(class_slot__term__isnull=True)
+    if student_ids is not None:
+        queryset = queryset.filter(student_id__in=student_ids)
+    return queryset.select_related('class_slot').order_by('created_at')
+
+
+def _enrollment_class_label(slot):
+    return (
+        f"کلاس {slot.number} — {slot.day_type_display} — ساعت {slot.time_slot or 'نامشخص'}"
+        f" — سطح {slot.assigned_level or '—'}"
+    )
 
 
 def _next_level_for_carryover(level_code, terminal_levels=None):
@@ -878,6 +898,7 @@ class ClassSlotEnrollView(APIView):
     """
     permission_classes = [IsAuthenticated]
 
+    @transaction.atomic
     def post(self, request, pk):
         if not can_edit_menu(request.user, 'class-management'):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
@@ -894,13 +915,20 @@ class ClassSlotEnrollView(APIView):
         User = get_user_model()
         try:
             if data.get('student_id'):
-                student = User.objects.get(id=data['student_id'], role='student')
+                student = User.objects.select_for_update().get(id=data['student_id'], role='student')
             else:
-                student = User.objects.get(national_code=data['national_code'], role='student')
+                student = User.objects.select_for_update().get(national_code=data['national_code'], role='student')
         except User.DoesNotExist:
             return Response({'error': 'دانش‌آموز پیدا نشد'}, status=status.HTTP_404_NOT_FOUND)
         except User.MultipleObjectsReturned:
             return Response({'error': 'بیش از یک دانش‌آموز با این مشخصات ثبت شده — با مدیر سیستم هماهنگ کنید'}, status=status.HTTP_400_BAD_REQUEST)
+
+        prior_enrollments = list(_same_term_enrollments(slot, [student.id]).filter(student=student))
+        if prior_enrollments:
+            class_labels = '؛ '.join(_enrollment_class_label(item.class_slot) for item in prior_enrollments)
+            return Response({
+                'error': f'خطای ثبت‌نام تکراری: این کد ملی قبلاً در همین ترم در {class_labels} ثبت‌نام شده است — برای جابه‌جایی از «انتقال کلاس» استفاده کنید'
+            }, status=status.HTTP_400_BAD_REQUEST)
 
         # خواسته‌ی ۱: سطح این کلاس باید با سطح واقعیِ فعلیِ دانش‌آموز (محاسبه‌شده از آخرین
         # ثبت‌نام واقعی یا آخرین تعیین‌سطح — نه فیلد خام و اغلب خالیِ language_level) یکی
@@ -921,20 +949,6 @@ class ClassSlotEnrollView(APIView):
                 return Response({
                     'error': f"این کلاس {expected_gender} است و جنسیت این دانش‌آموز با آن همخوانی ندارد"
                 }, status=status.HTTP_400_BAD_REQUEST)
-
-        if ClassSlotEnrollment.objects.filter(class_slot=slot, student=student).exists():
-            return Response({'error': 'این دانش‌آموز قبلاً توی همین کلاس ثبت‌نام شده'}, status=status.HTTP_400_BAD_REQUEST)
-
-        # خواسته: کد ملی در هر ترم فقط یک ثبت‌نام فعال دارد — اگه همین الان توی یه کلاس دیگه‌ی
-        # همین ترم ثبت‌نام فعال داره، اجازه‌ی ثبت‌نام دوم نمی‌دیم (اول باید با «انتقال کلاس» یا
-        # حذف/استرداد از کلاس قبلی خارجش کنن). بین ترم‌های مختلف مانعی نیست.
-        other_enrollment = ClassSlotEnrollment.objects.filter(
-            student=student, class_slot__term=slot.term
-        ).exclude(class_slot=slot).select_related('class_slot').first()
-        if other_enrollment:
-            return Response({
-                'error': f"این دانش‌آموز از قبل توی کلاس {other_enrollment.class_slot.number} (سطح {other_enrollment.class_slot.assigned_level or '—'}) در همین ترم ثبت‌نام فعال دارد — برای جابه‌جایی از «انتقال کلاس» استفاده کنید"
-            }, status=status.HTTP_400_BAD_REQUEST)
 
         # خواسته‌ی ۵: ثبت‌نام هرگز به‌خاطر پر بودن ظرفیت مسدود نمی‌شود — چون current_count
         # ممکن است از روی «تخصیص خودکار» (پیش‌بینی تقاضا) از قبل با ظرفیت برابر شده باشد،
@@ -989,6 +1003,385 @@ class ClassSlotEnrollView(APIView):
             'discount_record': DiscountedPersonSerializer(discount_record).data if discount_record else None,
             'wallet_balance': student.wallet_balance,
         }, status=status.HTTP_201_CREATED)
+
+
+class ClassSlotExcelImportView(APIView):
+    """Preview a selected Excel row/column range, then add those students to one class."""
+    parser_classes = [MultiPartParser, FormParser]
+    permission_classes = [IsAuthenticated]
+
+    @staticmethod
+    def _national_code_key(value):
+        if isinstance(value, float) and value.is_integer():
+            value = int(value)
+        text = unicodedata.normalize('NFKC', str(value or '')).strip()
+        if re.fullmatch(r'\d+\.0+', text):
+            text = text.split('.', 1)[0]
+        digits = []
+        for char in text:
+            try:
+                digits.append(str(unicodedata.digit(char)))
+            except (TypeError, ValueError):
+                continue
+        return ''.join(digits)
+
+    @staticmethod
+    def _excel_column_index(column):
+        result = 0
+        for letter in column:
+            result = result * 26 + ord(letter) - ord('A') + 1
+        return result - 1
+
+    @staticmethod
+    def _class_tariff(slot):
+        level = str(slot.assigned_level or '').strip()
+        age_group = infer_age_group_from_level(level) if level else ''
+        setting = TuitionSetting.objects.filter(level=level, age_group=age_group).first() if level and age_group else None
+        if not setting:
+            return None, level, age_group, 'برای سطح این کلاس شهریهٔ مصوب تعریف نشده است؛ ابتدا سطح و شهریهٔ کلاس را بررسی کنید.'
+        return setting.amount, level, age_group, ''
+
+    def _preview_students_by_code(self, slot, student_rows, lock_students=False):
+        from django.contrib.auth import get_user_model
+        User = get_user_model()
+        tuition, level, age_group, tariff_error = self._class_tariff(slot)
+        students_by_code = {}
+        students = list(User.objects.filter(role='student').only(
+            'id', 'first_name', 'last_name', 'national_code', 'phone', 'gender', 'wallet_balance',
+        ).order_by('id'))
+        for student in students:
+            code_key = self._national_code_key(student.national_code)
+            if code_key:
+                students_by_code.setdefault(code_key, []).append(student)
+        if lock_students:
+            incoming_codes = {self._national_code_key(row[3]) for row in student_rows}
+            matched_student_ids = [
+                student.id for code_key, matches in students_by_code.items() if code_key in incoming_codes
+                for student in matches
+            ]
+            if matched_student_ids:
+                list(User.objects.select_for_update().filter(pk__in=matched_student_ids).order_by('id').values_list('id', flat=True))
+        other_users_by_code = {}
+        other_users = User.objects.exclude(role='student').exclude(national_code__isnull=True).exclude(national_code='').only('national_code')
+        for user in other_users:
+            code_key = self._national_code_key(user.national_code)
+            if code_key:
+                other_users_by_code[code_key] = True
+
+        student_ids = [student.id for matches in students_by_code.values() for student in matches]
+        enrollments_by_student = {}
+        if student_ids:
+            for enrollment in _same_term_enrollments(slot, student_ids):
+                enrollments_by_student.setdefault(enrollment.student_id, []).append(enrollment.class_slot)
+        discount_by_student = {}
+        if student_ids:
+            for discount in DiscountedPerson.objects.filter(student_id__in=student_ids).order_by('-updated_at'):
+                discount_by_student.setdefault(discount.student_id, discount.discount_percent)
+
+        rows = []
+        seen_codes = set()
+        labels = {
+            'new': 'دانش‌آموز جدید', 'existing': 'دانش‌آموز موجود',
+            'already_enrolled': 'خطای ثبت‌نام تکراری',
+            'other_term': 'خطای ثبت‌نام تکراری',
+            'ambiguous_code': 'کد ملی در سامانه به بیش از یک پرونده اشاره می‌کند',
+            'national_code_in_use': 'این کد ملی متعلق به حسابی غیر از دانش‌آموز است',
+            'duplicate_in_file': 'کد ملی تکراری در فایل',
+            'invalid_national_code': 'کد ملی باید دقیقاً ۱۰ رقم باشد',
+            'invalid_name': 'نام یا نام خانوادگی دانش‌آموز جدید خالی یا بیش از ۱۵۰ نویسه است',
+            'invalid_phone': 'شمارهٔ همراه باید ۱۰ یا ۱۱ رقم باشد',
+            'level_mismatch': 'سطح فعلی با سطح کلاس همخوانی ندارد',
+            'gender_mismatch': 'جنسیت با کلاس همخوانی ندارد',
+        }
+        for row_number, first_name, last_name, raw_national_code, raw_phone in student_rows:
+            first_name = str(first_name or '').strip()
+            last_name = str(last_name or '').strip()
+            national_code = self._national_code_key(raw_national_code)
+            phone = self._national_code_key(raw_phone)
+            if len(phone) == 10 and phone.startswith('9'):
+                phone = '0' + phone
+            if not first_name and not last_name and not national_code and not phone:
+                continue
+            result = {
+                'row_number': row_number, 'first_name': first_name, 'last_name': last_name, 'national_code': national_code, 'phone': phone,
+                'status': '', 'status_label': '', 'note': '', 'student_id': None,
+                'discount_percent': 0, 'tuition_amount': tuition,
+            }
+            if len(national_code) != 10:
+                result['status'] = 'invalid_national_code'
+            elif national_code in seen_codes:
+                result['status'] = 'duplicate_in_file'
+            else:
+                seen_codes.add(national_code)
+                matches = students_by_code.get(national_code, [])
+                if len(matches) > 1:
+                    result['status'] = 'ambiguous_code'
+                elif not matches:
+                    if national_code in other_users_by_code:
+                        result['status'] = 'national_code_in_use'
+                    elif not first_name or not last_name or len(first_name) > 150 or len(last_name) > 150:
+                        result['status'] = 'invalid_name'
+                    elif phone and len(phone) not in (10, 11):
+                        result['status'] = 'invalid_phone'
+                    else:
+                        result['status'] = 'new'
+                else:
+                    student = matches[0]
+                    result['student_id'] = student.id
+                    result['first_name'] = student.first_name or first_name
+                    result['last_name'] = student.last_name or last_name
+                    result['phone'] = student.phone or phone or ''
+                    result['discount_percent'] = discount_by_student.get(student.id, 0)
+                    if tuition is not None:
+                        result['tuition_amount'] = round(tuition * (100 - result['discount_percent']) / 100)
+                    prior_slots = enrollments_by_student.get(student.id, [])
+                    if prior_slots:
+                        result['status'] = 'already_enrolled' if any(prior.pk == slot.pk for prior in prior_slots) else 'other_term'
+                        class_labels = '؛ '.join(_enrollment_class_label(prior) for prior in prior_slots)
+                        result['note'] = f'این کد ملی قبلاً در همین ترم ثبت‌نام شده است: {class_labels}'
+                    else:
+                        current_level = _compute_level_suggestion(student).get('level')
+                        if slot.assigned_level and current_level and _normalize_level(slot.assigned_level) != _normalize_level(current_level):
+                            result['status'] = 'level_mismatch'
+                            result['note'] = f'سطح فعلی: {current_level}'
+                        elif slot.gender != ClassSlot.Gender.MIXED and student.gender and (
+                            (slot.gender == ClassSlot.Gender.GIRLS and student.gender != 'female') or
+                            (slot.gender == ClassSlot.Gender.BOYS and student.gender != 'male')
+                        ):
+                            result['status'] = 'gender_mismatch'
+                        else:
+                            result['status'] = 'existing'
+            result['status_label'] = labels.get(result['status'], result['status'])
+            rows.append(result)
+
+        eligible_count = sum(1 for row in rows if row['status'] in ('new', 'existing'))
+        return {
+            'rows': rows, 'eligible_count': eligible_count, 'level': level,
+            'age_group': age_group, 'base_tuition': tuition,
+            'tariff_error': tariff_error,
+        }
+
+    def post(self, request, pk):
+        if not can_edit_menu(request.user, 'class-management'):
+            return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
+        try:
+            slot = ClassSlot.objects.get(pk=pk)
+        except ClassSlot.DoesNotExist:
+            return Response({'error': 'کلاس پیدا نشد'}, status=status.HTTP_404_NOT_FOUND)
+
+        mode = str(request.data.get('mode', 'preview')).strip().lower()
+        if mode == 'preview':
+            uploaded_file = request.FILES.get('file')
+            if not uploaded_file:
+                return Response({'error': 'فایل Excel را انتخاب کنید'}, status=status.HTTP_400_BAD_REQUEST)
+            legacy_first_column = str(request.data.get('first_name_column', '')).strip().upper()
+            legacy_national_code_column = str(request.data.get('national_code_column', request.data.get('national_code_start_column', request.data.get('last_name_column', '')))).strip().upper()
+            first_start_column = str(request.data.get('first_name_start_column', legacy_first_column)).strip().upper()
+            first_end_column = str(request.data.get('first_name_end_column', request.data.get('first_name_start_column', legacy_first_column))).strip().upper()
+            legacy_last_name_column = str(request.data.get('last_name_column', 'B')).strip().upper()
+            last_name_start_column = str(request.data.get('last_name_start_column', legacy_last_name_column)).strip().upper()
+            last_name_end_column = str(request.data.get('last_name_end_column', request.data.get('last_name_start_column', legacy_last_name_column))).strip().upper()
+            national_code_start_column = str(request.data.get('national_code_start_column', legacy_national_code_column)).strip().upper()
+            national_code_end_column = str(request.data.get('national_code_end_column', request.data.get('national_code_start_column', legacy_national_code_column))).strip().upper()
+            phone_start_column = str(request.data.get('phone_start_column', 'D')).strip().upper()
+            phone_end_column = str(request.data.get('phone_end_column', request.data.get('phone_start_column', 'D'))).strip().upper()
+            selected_columns = (
+                first_start_column, first_end_column, last_name_start_column, last_name_end_column,
+                national_code_start_column, national_code_end_column, phone_start_column, phone_end_column,
+            )
+            if any(not re.fullmatch(r'[A-Z]{1,2}', column) for column in selected_columns):
+                return Response({'error': 'بازهٔ نام، نام خانوادگی، کد ملی و شمارهٔ همراه را از A تا ZZ انتخاب کنید'}, status=status.HTTP_400_BAD_REQUEST)
+            if any(self._excel_column_index(column) > 701 for column in selected_columns):
+                return Response({'error': 'حداکثر ستون قابل انتخاب ZZ است'}, status=status.HTTP_400_BAD_REQUEST)
+            first_start_index = self._excel_column_index(first_start_column)
+            first_end_index = self._excel_column_index(first_end_column)
+            last_name_start_index = self._excel_column_index(last_name_start_column)
+            last_name_end_index = self._excel_column_index(last_name_end_column)
+            national_code_start_index = self._excel_column_index(national_code_start_column)
+            national_code_end_index = self._excel_column_index(national_code_end_column)
+            phone_start_index = self._excel_column_index(phone_start_column)
+            phone_end_index = self._excel_column_index(phone_end_column)
+            if any(start > end for start, end in (
+                (first_start_index, first_end_index), (last_name_start_index, last_name_end_index),
+                (national_code_start_index, national_code_end_index), (phone_start_index, phone_end_index),
+            )):
+                return Response({'error': 'ستون «از» باید قبل از ستون «تا» باشد'}, status=status.HTTP_400_BAD_REQUEST)
+            column_ranges = [
+                (first_start_index, first_end_index), (last_name_start_index, last_name_end_index),
+                (national_code_start_index, national_code_end_index), (phone_start_index, phone_end_index),
+            ]
+            if any(start <= other_end and other_start <= end for index, (start, end) in enumerate(column_ranges) for other_start, other_end in column_ranges[index + 1:]):
+                return Response({'error': 'بازه‌های نام، نام خانوادگی، کد ملی و شمارهٔ همراه نباید با هم هم‌پوشانی داشته باشند'}, status=status.HTTP_400_BAD_REQUEST)
+            try:
+                start_row = int(request.data.get('start_row', ''))
+                end_row = int(request.data.get('end_row', ''))
+            except (TypeError, ValueError):
+                return Response({'error': 'شمارهٔ سطر شروع و پایان را وارد کنید'}, status=status.HTTP_400_BAD_REQUEST)
+            if start_row < 1 or end_row < start_row:
+                return Response({'error': 'بازهٔ سطرها معتبر نیست'}, status=status.HTTP_400_BAD_REQUEST)
+            try:
+                from accounts.views import _load_excel_rows
+                sheet_rows = _load_excel_rows(uploaded_file)
+            except Exception as exc:
+                return Response({'error': str(exc) or 'خواندن فایل Excel انجام نشد'}, status=status.HTTP_400_BAD_REQUEST)
+            if start_row > len(sheet_rows):
+                return Response({'error': f'فایل فقط {len(sheet_rows)} سطر قابل‌خواندن دارد'}, status=status.HTTP_400_BAD_REQUEST)
+            actual_end_row = min(end_row, len(sheet_rows))
+
+            def join_column_range(values, start_index, end_index):
+                parts = []
+                for column_index in range(start_index, end_index + 1):
+                    value = values[column_index] if column_index < len(values) else ''
+                    text = str(value).strip() if value is not None else ''
+                    if text:
+                        parts.append(text)
+                return ' '.join(parts)
+
+            student_rows = []
+            for row_number in range(start_row, actual_end_row + 1):
+                values = sheet_rows[row_number - 1] or ()
+                first_name = join_column_range(values, first_start_index, first_end_index)
+                last_name = join_column_range(values, last_name_start_index, last_name_end_index)
+                national_code = join_column_range(values, national_code_start_index, national_code_end_index)
+                phone = join_column_range(values, phone_start_index, phone_end_index)
+                if first_name not in (None, '') or last_name not in (None, '') or national_code not in (None, '') or phone not in (None, ''):
+                    student_rows.append((row_number, first_name, last_name, national_code, phone))
+            preview = self._preview_students_by_code(slot, student_rows)
+            preview.update({
+                'selected_range': {'start': start_row, 'end': actual_end_row},
+                'first_name_column': first_start_column, 'last_name_column': last_name_start_column,
+                'national_code_column': national_code_start_column,
+                'first_name_start_column': first_start_column, 'first_name_end_column': first_end_column,
+                'last_name_start_column': last_name_start_column, 'last_name_end_column': last_name_end_column,
+                'national_code_start_column': national_code_start_column, 'national_code_end_column': national_code_end_column,
+                'phone_start_column': phone_start_column, 'phone_end_column': phone_end_column,
+                'class_number': slot.number, 'capacity': slot.capacity,
+                'real_enrolled_count': ClassSlotEnrollment.objects.filter(class_slot=slot).count(),
+            })
+            return Response(preview)
+
+        if mode != 'commit':
+            return Response({'error': 'درخواست نامعتبر است'}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            supplied_rows = json.loads(request.data.get('rows') or '[]')
+        except (TypeError, ValueError):
+            return Response({'error': 'فهرست سطرهای انتخاب‌شده معتبر نیست'}, status=status.HTTP_400_BAD_REQUEST)
+        if not isinstance(supplied_rows, list) or not supplied_rows:
+            return Response({'error': 'حداقل یک سطر را برای ثبت انتخاب کنید'}, status=status.HTTP_400_BAD_REQUEST)
+        if len(supplied_rows) > 2000:
+            return Response({'error': 'در هر نوبت حداکثر ۲۰۰۰ سطر قابل ثبت است'}, status=status.HTTP_400_BAD_REQUEST)
+        payment_method = str(request.data.get('payment_method', '')).strip()
+        allowed_methods = {value for value, _label in ClassSlotEnrollment.PaymentMethod.choices}
+        if payment_method not in allowed_methods:
+            return Response({'error': 'روش پرداخت را انتخاب کنید'}, status=status.HTTP_400_BAD_REQUEST)
+        pos_reference_code = str(request.data.get('pos_reference_code', '')).strip()
+        if payment_method == ClassSlotEnrollment.PaymentMethod.POS and not pos_reference_code:
+            return Response({'error': 'کد پیگیری مشترک دستگاه پوز را وارد کنید'}, status=status.HTTP_400_BAD_REQUEST)
+        if len(pos_reference_code) > 50:
+            return Response({'error': 'کد پیگیری پوز حداکثر ۵۰ نویسه است'}, status=status.HTTP_400_BAD_REQUEST)
+
+        student_rows = []
+        try:
+            for item in supplied_rows:
+                row_number = int(item.get('row_number'))
+                first_name = str(item.get('first_name') or '').strip()
+                last_name = str(item.get('last_name') or '').strip()
+                national_code = str(item.get('national_code') or '').strip()
+                phone = str(item.get('phone') or '').strip()
+                if row_number < 1 or (not first_name and not last_name and not national_code and not phone):
+                    continue
+                student_rows.append((row_number, first_name, last_name, national_code, phone))
+        except (AttributeError, TypeError, ValueError):
+            return Response({'error': 'اطلاعات یکی از سطرهای انتخاب‌شده معتبر نیست'}, status=status.HTTP_400_BAD_REQUEST)
+        if not student_rows:
+            return Response({'error': 'هیچ سطر معتبری برای ثبت انتخاب نشده است'}, status=status.HTTP_400_BAD_REQUEST)
+
+        with transaction.atomic():
+            slot = ClassSlot.objects.select_for_update().get(pk=pk)
+            preview = self._preview_students_by_code(slot, student_rows, lock_students=True)
+            if preview['tariff_error']:
+                return Response({'error': preview['tariff_error']}, status=status.HTTP_400_BAD_REQUEST)
+            candidates = [row for row in preview['rows'] if row['status'] in ('new', 'existing')]
+            rejected = [
+                {'row_number': row['row_number'], 'name': f"{row['first_name']} {row['last_name']}", 'reason': row['status_label'] + (f" — {row['note']}" if row['note'] else '')}
+                for row in preview['rows'] if row['status'] not in ('new', 'existing')
+            ]
+            if payment_method == ClassSlotEnrollment.PaymentMethod.WALLET:
+                from django.contrib.auth import get_user_model
+                User = get_user_model()
+                eligible_after_wallet = []
+                for row in candidates:
+                    student = User.objects.filter(pk=row['student_id'], role='student').first() if row['student_id'] else None
+                    balance = student.wallet_balance if student else 0
+                    if balance < row['tuition_amount']:
+                        rejected.append({'row_number': row['row_number'], 'name': f"{row['first_name']} {row['last_name']}", 'reason': 'موجودی کیف پول برای شهریه کافی نیست'})
+                    else:
+                        eligible_after_wallet.append(row)
+                candidates = eligible_after_wallet
+            if not candidates:
+                return Response({'error': 'هیچ دانش‌آموز واجد شرایطی برای ثبت باقی نمانده است', 'rejected': rejected}, status=status.HTTP_400_BAD_REQUEST)
+            current_enrolled_count = ClassSlotEnrollment.objects.filter(class_slot=slot).count()
+            force_over_capacity = str(request.data.get('force_over_capacity', '')).lower() in ('1', 'true', 'yes')
+            if current_enrolled_count + len(candidates) > slot.capacity and not force_over_capacity:
+                return Response({
+                    'capacity_warning': True, 'error': f'با ثبت این افراد، تعداد ثبت‌نام‌شده‌ها از ظرفیت {slot.capacity} نفر عبور می‌کند.',
+                    'current_enrolled_count': current_enrolled_count, 'capacity': slot.capacity,
+                    'eligible_count': len(candidates),
+                }, status=status.HTTP_409_CONFLICT)
+
+            from django.contrib.auth import get_user_model
+            User = get_user_model()
+            created_students = 0
+            enrolled_count = 0
+            for row in candidates:
+                if row['student_id']:
+                    student = User.objects.select_for_update().filter(pk=row['student_id'], role='student').first()
+                    if not student:
+                        rejected.append({'row_number': row['row_number'], 'name': f"{row['first_name']} {row['last_name']}", 'reason': 'دانش‌آموز دیگر پیدا نشد'})
+                        continue
+                else:
+                    base_username = f'excel_{slot.id}_{row["row_number"]}'
+                    username = base_username
+                    suffix = 1
+                    while User.objects.filter(username=username).exists():
+                        username = f'{base_username}_{suffix}'
+                        suffix += 1
+                    student = User(
+                        username=username, role='student', first_name=row['first_name'], last_name=row['last_name'],
+                        phone=row['phone'], national_code=row['national_code'], gender='', needs_editing=True,
+                    )
+                    student.set_unusable_password()
+                    student.save()
+                    created_students += 1
+
+                if ClassSlotEnrollment.objects.filter(class_slot=slot, student=student).exists():
+                    rejected.append({'row_number': row['row_number'], 'name': f"{row['first_name']} {row['last_name']}", 'reason': 'در همین کلاس ثبت‌نام بود'})
+                    continue
+                discount_percent = row['discount_percent']
+                tuition_amount = row['tuition_amount']
+                enrollment = ClassSlotEnrollment.objects.create(
+                    class_slot=slot, student=student, payment_method=payment_method,
+                    tuition_amount=tuition_amount, discount_percent=discount_percent,
+                    pos_reference_code=pos_reference_code if payment_method == ClassSlotEnrollment.PaymentMethod.POS else '',
+                )
+                if payment_method == ClassSlotEnrollment.PaymentMethod.WALLET:
+                    student.wallet_balance -= tuition_amount
+                    student.save(update_fields=['wallet_balance'])
+                    WalletTransaction.objects.create(
+                        student=student, kind=WalletTransaction.Kind.DEBIT, amount=tuition_amount,
+                        reason=f'پرداخت شهریهٔ کلاس {slot.number}', class_slot=slot,
+                    )
+                if discount_percent > 0:
+                    DiscountedPerson.objects.update_or_create(
+                        student=student,
+                        defaults={'discount_percent': discount_percent, 'class_slot': slot, 'approved_tuition': tuition_amount},
+                    )
+                enrolled_count += 1
+            return Response({
+                'created_students': created_students, 'enrolled_count': enrolled_count,
+                'skipped_count': len(rejected), 'rejected': rejected,
+                'message': f'{enrolled_count} نفر به کلاس اضافه شدند',
+            }, status=status.HTTP_201_CREATED)
 
 
 class ClassSlotUnenrollView(APIView):
@@ -1460,8 +1853,10 @@ class SelfEnrollView(APIView):
     permission_classes = [IsAuthenticated]
     parser_classes = [MultiPartParser, FormParser]
 
+    @transaction.atomic
     def post(self, request, pk):
-        student = request.user
+        from django.contrib.auth import get_user_model
+        student = get_user_model().objects.select_for_update().get(pk=request.user.pk)
         if student.role != 'student':
             return Response({'error': 'این بخش فقط برای دانش‌آموزان است'}, status=status.HTTP_403_FORBIDDEN)
         try:
@@ -1479,12 +1874,12 @@ class SelfEnrollView(APIView):
         if not receipt:
             return Response({'error': 'تصویر رسید کارت‌به‌کارت الزامی است'}, status=status.HTTP_400_BAD_REQUEST)
 
-        if ClassSlotEnrollment.objects.filter(class_slot=slot, student=student).exists():
-            return Response({'error': 'شما قبلاً توی همین کلاس ثبت‌نام کرده‌اید'}, status=status.HTTP_400_BAD_REQUEST)
-
-        other_enrollment = ClassSlotEnrollment.objects.filter(student=student, class_slot__term=slot.term).exclude(class_slot=slot).first()
-        if other_enrollment:
-            return Response({'error': 'شما از قبل یک ثبت‌نام فعال دیگر در همین ترم دارید — برای تغییر کلاس با مدرسه تماس بگیرید'}, status=status.HTTP_400_BAD_REQUEST)
+        prior_enrollments = list(_same_term_enrollments(slot, [student.id]).filter(student=student))
+        if prior_enrollments:
+            class_labels = '؛ '.join(_enrollment_class_label(item.class_slot) for item in prior_enrollments)
+            return Response({
+                'error': f'خطای ثبت‌نام تکراری: شما قبلاً در همین ترم در {class_labels} ثبت‌نام کرده‌اید — برای جابه‌جایی با مدرسه تماس بگیرید'
+            }, status=status.HTTP_400_BAD_REQUEST)
 
         # اگه سطح دانش‌آموز نیاز به تعیین‌سطح مجدد داره (منقضی یا آخرین سطح گروه سنی‌اش)،
         # اجازه‌ی ثبت‌نام خودکار نمی‌دیم — باید یا تعیین‌سطح بده یا مدیر آموزش تاییدش کنه
@@ -1805,19 +2200,27 @@ class TransferEnrollmentView(APIView):
     """POST: دکمه‌ی «انتقال کلاس» — دانش‌آموز از کلاس فعلی حذف و به کلاس مقصدِ انتخاب‌شده منتقل می‌شود"""
     permission_classes = [IsAuthenticated]
 
+    @transaction.atomic
     def post(self, request, pk, student_id):
         if not can_edit_menu(request.user, 'class-management'):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         try:
-            source = ClassSlot.objects.get(pk=pk)
-            enrollment = ClassSlotEnrollment.objects.get(class_slot=source, student_id=student_id)
+            source = ClassSlot.objects.select_for_update().get(pk=pk)
+            enrollment = ClassSlotEnrollment.objects.select_for_update().get(class_slot=source, student_id=student_id)
         except (ClassSlot.DoesNotExist, ClassSlotEnrollment.DoesNotExist):
             return Response({'error': 'ثبت‌نام پیدا نشد'}, status=status.HTTP_404_NOT_FOUND)
+
+        from django.contrib.auth import get_user_model
+        User = get_user_model()
+        try:
+            User.objects.select_for_update().get(pk=student_id, role='student')
+        except User.DoesNotExist:
+            return Response({'error': 'دانش‌آموز پیدا نشد'}, status=status.HTTP_404_NOT_FOUND)
 
         serializer = TransferEnrollmentSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         try:
-            target = ClassSlot.objects.get(pk=serializer.validated_data['target_slot_id'])
+            target = ClassSlot.objects.select_for_update().get(pk=serializer.validated_data['target_slot_id'])
         except ClassSlot.DoesNotExist:
             return Response({'error': 'کلاس مقصد پیدا نشد'}, status=status.HTTP_404_NOT_FOUND)
 
@@ -1825,8 +2228,12 @@ class TransferEnrollmentView(APIView):
             return Response({'error': 'کلاس مقصد نمی‌تواند همان کلاس فعلی باشد'}, status=status.HTTP_400_BAD_REQUEST)
         if target.real_seats_left <= 0:
             return Response({'error': 'کلاس مقصد ظرفیت خالی ندارد'}, status=status.HTTP_400_BAD_REQUEST)
-        if ClassSlotEnrollment.objects.filter(class_slot=target, student_id=student_id).exists():
-            return Response({'error': 'این دانش‌آموز از قبل توی کلاس مقصد ثبت‌نام شده'}, status=status.HTTP_400_BAD_REQUEST)
+        existing_in_target_term = list(_same_term_enrollments(target, [student_id]).exclude(pk=enrollment.pk))
+        if existing_in_target_term:
+            class_labels = '؛ '.join(_enrollment_class_label(item.class_slot) for item in existing_in_target_term)
+            return Response({
+                'error': f'خطای ثبت‌نام تکراری: این کد ملی قبلاً در ترم مقصد در {class_labels} ثبت‌نام شده است'
+            }, status=status.HTTP_400_BAD_REQUEST)
 
         ClassSlotEnrollment.objects.create(
             class_slot=target, student_id=student_id,
@@ -1888,11 +2295,12 @@ class SplitClassView(APIView):
     """
     permission_classes = [IsAuthenticated]
 
+    @transaction.atomic
     def post(self, request, pk):
         if not can_edit_menu(request.user, 'class-management'):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         try:
-            source = ClassSlot.objects.get(pk=pk)
+            source = ClassSlot.objects.select_for_update().get(pk=pk)
         except ClassSlot.DoesNotExist:
             return Response({'error': 'کلاس پیدا نشد'}, status=status.HTTP_404_NOT_FOUND)
 
@@ -1900,7 +2308,7 @@ class SplitClassView(APIView):
         serializer.is_valid(raise_exception=True)
         payload = serializer.validated_data
 
-        enrollments = list(ClassSlotEnrollment.objects.filter(class_slot=source).select_related('student'))
+        enrollments = list(ClassSlotEnrollment.objects.select_for_update().filter(class_slot=source).select_related('student'))
         if payload.get('student_ids'):
             wanted = set(payload['student_ids'])
             to_move = [e for e in enrollments if e.student_id in wanted]
@@ -1915,10 +2323,28 @@ class SplitClassView(APIView):
         if not to_move:
             return Response({'error': 'هیچ دانش‌آموزی برای تفکیک انتخاب نشد'}, status=status.HTTP_400_BAD_REQUEST)
 
+        student_ids = sorted({enrollment.student_id for enrollment in to_move})
+        from django.contrib.auth import get_user_model
+        list(get_user_model().objects.select_for_update().filter(pk__in=student_ids).order_by('id').values_list('id', flat=True))
+        existing_elsewhere = list(_same_term_enrollments(source, student_ids).exclude(class_slot=source))
+        if existing_elsewhere:
+            enrollments_by_student = {}
+            for enrollment in existing_elsewhere:
+                enrollments_by_student.setdefault(enrollment.student_id, []).append(enrollment.class_slot)
+            duplicate_details = []
+            for enrollment in to_move:
+                prior_slots = enrollments_by_student.get(enrollment.student_id, [])
+                if prior_slots:
+                    classes = '؛ '.join(_enrollment_class_label(slot) for slot in prior_slots)
+                    duplicate_details.append(f'{enrollment.student.get_full_name()}: {classes}')
+            return Response({
+                'error': 'خطای ثبت‌نام تکراری: تفکیک انجام نشد؛ این افراد در کلاس دیگری از همین ترم ثبت‌نام دارند: ' + ' | '.join(duplicate_details)
+            }, status=status.HTTP_400_BAD_REQUEST)
+
         # اول دنبال یک کلاس هم‌سطح/هم‌جنسیت/هم‌روز که هنوز هیچ ثبت‌نام واقعی ندارد بگرد
         target = (
             ClassSlot.objects.exclude(pk=source.pk)
-            .filter(assigned_level=source.assigned_level, gender=source.gender, day_type=source.day_type)
+            .filter(assigned_level=source.assigned_level, gender=source.gender, day_type=source.day_type, term_id=source.term_id)
             .annotate(real_count=Count('enrollments'))
             .filter(real_count=0)
             .order_by('number')
@@ -1927,7 +2353,7 @@ class SplitClassView(APIView):
         if not target:
             next_number = (ClassSlot.objects.aggregate(m=Max('number'))['m'] or 0) + 1
             target = ClassSlot.objects.create(
-                number=next_number, day_type=source.day_type, time_slot=source.time_slot,
+                number=next_number, term=source.term, day_type=source.day_type, time_slot=source.time_slot,
                 gender=source.gender, assigned_level=source.assigned_level,
                 capacity=source.capacity, teacher_name='',
                 title=f'تفکیک‌شده از کلاس {source.number}',

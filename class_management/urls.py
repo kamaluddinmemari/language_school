@@ -2,7 +2,7 @@ from django.urls import path
 from .views import (
     ClassSlotListView, ClassSlotDetailView, SwapClassLocationView, TransferClassLocationView, AllocateClassesView,
     ConfirmOverflowView, TransferSurplusView, SpinOffSurplusView, ClassStatsView,
-    BulkCreatePhysicalClassesView, ClassSlotEnrollView, ClassSlotUnenrollView, ClassSlotRosterView,
+    BulkCreatePhysicalClassesView, ClassSlotEnrollView, ClassSlotExcelImportView, ClassSlotUnenrollView, ClassSlotRosterView,
     TuitionSuggestionView, TuitionSettingListView, TuitionSettingDetailView, DiscountedPersonListView, DiscountedPersonDetailView,
     RefundEnrollmentView, TransferEnrollmentOptionsView, TransferEnrollmentView, CreditToWalletView,
     StudentFinancialHistoryView, EnrollmentReportView, SplitClassView, DirectEnrollSuggestionsView,
@@ -31,6 +31,7 @@ urlpatterns = [
     path('class-management/slots/<int:pk>/transfer-surplus/', TransferSurplusView.as_view(), name='class_transfer_surplus'),
     path('class-management/slots/<int:pk>/spin-off-surplus/', SpinOffSurplusView.as_view(), name='class_spin_off_surplus'),
     path('class-management/slots/<int:pk>/enroll/', ClassSlotEnrollView.as_view(), name='class_slot_enroll'),
+    path('class-management/slots/<int:pk>/import-excel/', ClassSlotExcelImportView.as_view(), name='class_slot_excel_import'),
     path('class-management/slots/<int:pk>/enroll/<int:student_id>/', ClassSlotUnenrollView.as_view(), name='class_slot_unenroll'),
     path('class-management/slots/<int:pk>/enroll/<int:student_id>/refund/', RefundEnrollmentView.as_view(), name='class_slot_refund'),
     path('class-management/slots/<int:pk>/enroll/<int:student_id>/transfer-options/', TransferEnrollmentOptionsView.as_view(), name='class_slot_transfer_options'),
