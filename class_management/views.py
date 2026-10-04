@@ -1210,7 +1210,12 @@ class ClassSlotExcelImportView(APIView):
                 (first_start_index, first_end_index), (last_name_start_index, last_name_end_index),
                 (national_code_start_index, national_code_end_index), (phone_start_index, phone_end_index),
             ]
-            if any(start <= other_end and other_start <= end for index, (start, end) in enumerate(column_ranges) for other_start, other_end in column_ranges[index + 1:]):
+            same_full_name_range = (first_start_index, first_end_index) == (last_name_start_index, last_name_end_index)
+            if any(
+                start <= other_end and other_start <= end and not (index == 0 and other_index == 1 and same_full_name_range)
+                for index, (start, end) in enumerate(column_ranges)
+                for other_index, (other_start, other_end) in enumerate(column_ranges[index + 1:], start=index + 1)
+            ):
                 return Response({'error': 'بازه‌های نام، نام خانوادگی، کد ملی و شمارهٔ همراه نباید با هم هم‌پوشانی داشته باشند'}, status=status.HTTP_400_BAD_REQUEST)
             try:
                 start_row = int(request.data.get('start_row', ''))
@@ -1240,8 +1245,13 @@ class ClassSlotExcelImportView(APIView):
             student_rows = []
             for row_number in range(start_row, actual_end_row + 1):
                 values = sheet_rows[row_number - 1] or ()
-                first_name = join_column_range(values, first_start_index, first_end_index)
-                last_name = join_column_range(values, last_name_start_index, last_name_end_index)
+                if same_full_name_range:
+                    full_name_parts = join_column_range(values, first_start_index, first_end_index).split()
+                    first_name = full_name_parts[0] if full_name_parts else ''
+                    last_name = ' '.join(full_name_parts[1:])
+                else:
+                    first_name = join_column_range(values, first_start_index, first_end_index)
+                    last_name = join_column_range(values, last_name_start_index, last_name_end_index)
                 national_code = join_column_range(values, national_code_start_index, national_code_end_index)
                 phone = join_column_range(values, phone_start_index, phone_end_index)
                 if first_name not in (None, '') or last_name not in (None, '') or national_code not in (None, '') or phone not in (None, ''):

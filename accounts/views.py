@@ -705,14 +705,17 @@ class StudentExcelImportView(APIView):
                 excluded_row_ranges = _normalize_excluded_row_ranges(request.data.get('excluded_row_ranges'))
                 raw_start_row = request.data.get('start_row')
                 raw_end_row = request.data.get('end_row')
-                if (raw_start_row in (None, '')) != (raw_end_row in (None, '')):
-                    return Response({'error': 'هر دو سطر شروع و پایان را وارد کنید'}, status=400)
                 try:
                     start_row = int(raw_start_row) if raw_start_row not in (None, '') else None
                     end_row = int(raw_end_row) if raw_end_row not in (None, '') else None
                 except (TypeError, ValueError):
                     return Response({'error': 'شمارهٔ سطر شروع و پایان معتبر نیست'}, status=400)
                 parsed_file = _read_student_excel(uploaded, manual_mapping, start_row, end_row, excluded_row_ranges)
+                if manual_mapping is not None and manual_mapping.get('first_name') is not None and manual_mapping.get('last_name', 'not-mapped') is None:
+                    for item in parsed_file['rows']:
+                        name_parts = ' '.join(str(item.get('first_name') or '').split()).split()
+                        item['first_name'] = name_parts[0] if name_parts else ''
+                        item['last_name'] = ' '.join(name_parts[1:])
                 items = _student_import_preview(parsed_file['rows'])
                 column_ranges = {
                     key: ({'start': value[0], 'end': value[1]} if value is not None else None)
