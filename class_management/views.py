@@ -200,7 +200,11 @@ class TermListView(generics.ListCreateAPIView):
 
 
 class CarryClassesToNextTermView(APIView):
-    """انتقال انتخابی کلاس‌های یک ترم به ترم مقصد بدون انتقال ثبت‌نام دانش‌آموزان."""
+    """انتقال انتخابی کلاس‌های یک ترم به ترم مقصد.
+
+    برای هر کلاس، فیلد carry_students (پیش‌فرض: True) مشخص می‌کند دانش‌آموزان تاییدشدهٔ کلاس مبدا هم
+    در کلاس جدید ثبت‌نام شوند یا نه. ثبت‌نام‌های ترم مبدا برای حفظ سوابق آموزشی/مالی دست‌نخورده می‌مانند.
+    """
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
@@ -233,6 +237,7 @@ class CarryClassesToNextTermView(APIView):
             qs = qs.filter(time_slot__in=time_slots)
         assignment_by_id = {str(row.get('source_id')): row for row in assignments if row.get('source_id')}
         created, skipped, warnings = [], [], []
+        students_carried_total = 0
         with transaction.atomic():
             for source in qs.select_for_update().order_by('number', 'day_type', 'time_slot'):
                 row = assignment_by_id.get(str(source.id), {})
@@ -278,8 +283,52 @@ class CarryClassesToNextTermView(APIView):
                     schedule_kind=schedule_kind, schedule_days=schedule_days,
                     delivery_pattern=delivery_pattern, rotation_group='', current_count=0,
                 )
-                created.append({'source_id': source.id, 'target': ClassSlotSerializer(target).data})
-        return Response({'message': f'{len(created)} کلاس به ترم مقصد منتقل شد', 'created': created, 'skipped': skipped, 'warnings': warnings})
+                carried, student_skips = 0, []
+                carry_flag = row.get('carry_students', True)
+                if isinstance(carry_flag, str):
+                    carry_flag = carry_flag.strip().lower() not in ('0', 'false', 'no', '')
+                if carry_flag:
+                    carried, student_skips = self._carry_students(source, target)
+                    students_carried_total += carried
+                    for item in student_skips:
+                        warnings.append({'source_id': source.id, 'number': source.number, 'level': source.assigned_level or '', 'message': item})
+                created.append({
+                    'source_id': source.id, 'target': ClassSlotSerializer(target).data,
+                    'students_carried': carried, 'students_skipped': len(student_skips), 'carry_students': bool(carry_flag),
+                })
+        message = f'{len(created)} کلاس به ترم مقصد منتقل شد'
+        if students_carried_total:
+            message += f' و {students_carried_total} دانش‌آموز در کلاس‌های جدید ثبت‌نام شدند'
+        return Response({'message': message, 'created': created, 'skipped': skipped, 'warnings': warnings, 'students_carried': students_carried_total})
+
+    @staticmethod
+    def _carry_students(source, target):
+        """ثبت‌نام دانش‌آموزان تاییدشدهٔ کلاس مبدا در کلاس مقصد (کپی؛ ثبت‌نام ترم مبدا حفظ می‌شود).
+
+        قواعد: هر کد ملی در یک ترم فقط یک کلاس؛ جنسیت باید با کلاس مقصد همخوان باشد (کلاس مختلط آزاد است).
+        شهریهٔ ترم جدید صفر ثبت می‌شود تا پرداخت ترم قبل دوباره در گزارش مالی حساب نشود.
+        """
+        carried, skips = 0, []
+        enrollments = source.enrollments.filter(payment_verified=True).select_related('student').order_by('created_at')
+        for enrollment in enrollments:
+            student = enrollment.student
+            name = student.get_full_name() or student.username
+            if target.gender != ClassSlot.Gender.MIXED and student.gender and (
+                (target.gender == ClassSlot.Gender.GIRLS and student.gender != 'female') or
+                (target.gender == ClassSlot.Gender.BOYS and student.gender != 'male')
+            ):
+                skips.append(f'«{name}» منتقل نشد: جنسیت با کلاس مقصد همخوانی ندارد')
+                continue
+            duplicate = _same_term_enrollments(target, [student.id]).first()
+            if duplicate:
+                skips.append(f'«{name}» منتقل نشد: قبلاً در ترم مقصد در {_enrollment_class_label(duplicate.class_slot)} ثبت‌نام شده است')
+                continue
+            ClassSlotEnrollment.objects.create(
+                class_slot=target, student=student, payment_method=enrollment.payment_method,
+                tuition_amount=0, discount_percent=enrollment.discount_percent,
+            )
+            carried += 1
+        return carried, skips
 
 
 class TermDetailView(generics.RetrieveUpdateDestroyAPIView):
@@ -352,14 +401,7 @@ class ClassSlotDetailView(generics.RetrieveUpdateDestroyAPIView):
 
         obj = self.get_object()
 
-        # خواسته: تا وقتی کلاس دانش‌آموز ثبت‌نام‌شده دارد (چه تاییدشده چه در انتظار تایید پرداخت)،
-        # اجازه‌ی ویرایش داده نمی‌شود — ابتدا باید دانش‌آموز(ها) از کلاس حذف یا مسترد شوند
-        enrolled_count = obj.enrollments.count()
-        if enrolled_count:
-            return Response(
-                {'error': f'این کلاس {enrolled_count} دانش‌آموز ثبت‌نام‌شده دارد — تا زمانی که دانش‌آموز(ها) از کلاس حذف یا مسترد نشوند، امکان ویرایش این کلاس وجود ندارد'},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+        # خواسته: ویرایش کلاس حتی وقتی دانش‌آموز ثبت‌نام‌شده دارد مجاز است؛ فقط «حذف» کلاس مسدود می‌شود.
 
         # خواسته: توی هر ردیفِ روز+ساعت (مثلاً همه‌ی کلاس‌های زوج ساعت ۳:۴۵ الی ۵:۱۵)، یک استاد
         # فقط می‌تواند همزمان روی یک کلاس باشد — نباید بین چند اتاق در همان روز/ساعت تداخل داشته باشد
@@ -743,6 +785,88 @@ class SpinOffSurplusView(APIView):
         }, status=status.HTTP_201_CREATED)
 
 
+class StudentClassSearchView(APIView):
+    """GET ?q=&term=: جستجوی دانش‌آموز بر اساس کد ملی یا نام/نام‌خانوادگی در یک ترم.
+
+    برای هر ثبت‌نامِ دانش‌آموز در آن ترم یک ردیف برمی‌گرداند: سطح (سطح کلاس)، شماره کلاس، روز، ساعت و استاد.
+    اگر term فرستاده نشود، آخرین ترم (بزرگ‌ترین سال و شماره‌ی ترم) استفاده می‌شود.
+    """
+    permission_classes = [IsAuthenticated]
+    MAX_ROWS = 200
+
+    @staticmethod
+    def _digits_to_en(value):
+        table = str.maketrans('۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩', '01234567890123456789')
+        return str(value or '').translate(table)
+
+    @staticmethod
+    def _text_variants(token):
+        """املای عربی/فارسی «ی» و «ک» را هم‌ارز می‌گیرد تا جستجو با هر دو شکل پیدا شود."""
+        fa = token.replace('ي', 'ی').replace('ك', 'ک')
+        ar = fa.replace('ی', 'ي').replace('ک', 'ك')
+        return {token, fa, ar}
+
+    def get(self, request):
+        if not (can_view_menu(request.user, 'class-management') or can_edit_menu(request.user, 'class-management')):
+            return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
+
+        query = ' '.join(self._digits_to_en(request.query_params.get('q', '')).split())
+        term_param = request.query_params.get('term')
+        term = Term.objects.filter(pk=term_param).first() if term_param else Term.objects.order_by('-year', '-term_number').first()
+        if term_param and not term:
+            return Response({'error': 'ترم پیدا نشد'}, status=status.HTTP_404_NOT_FOUND)
+        term_title = term.title if term else ''
+        if not term or len(query) < 2:
+            return Response({'term_id': term.id if term else None, 'term_title': term_title, 'count': 0, 'results': []})
+
+        enrollments = ClassSlotEnrollment.objects.filter(class_slot__term=term).select_related('student', 'class_slot')
+        if query.replace(' ', '').isdigit():
+            enrollments = enrollments.filter(student__national_code__contains=query.replace(' ', ''))
+        else:
+            for token in query.split(' '):
+                token_q = Q()
+                for variant in self._text_variants(token):
+                    token_q |= Q(student__first_name__icontains=variant) | Q(student__last_name__icontains=variant)
+                enrollments = enrollments.filter(token_q)
+
+        rows = []
+        for enrollment in enrollments.order_by('student__last_name', 'student__first_name', 'class_slot__number')[:self.MAX_ROWS]:
+            slot, student = enrollment.class_slot, enrollment.student
+            rows.append({
+                'student_id': student.id,
+                'student_name': f'{student.first_name or ""} {student.last_name or ""}'.strip() or student.username,
+                'national_code': student.national_code or '',
+                'level': slot.assigned_level or '',
+                'class_number': slot.number,
+                'day': slot.day_type_display,
+                'time': slot.time_slot or '',
+                'teacher': slot.teacher_name or '',
+                'slot_id': slot.id,
+                'payment_verified': enrollment.payment_verified,
+            })
+        return Response({'term_id': term.id, 'term_title': term_title, 'count': len(rows), 'results': rows})
+
+
+class EnrollmentPulseView(APIView):
+    """GET: «نبض» سبک ثبت‌نام‌ها برای اعلان صوتی سراسری — فقط دو عدد برای هر نوع ثبت‌نام تاییدشده
+    (بزرگ‌ترین شناسه + تعداد). فرانت هر چند ثانیه می‌پرسد و اگر هر کدام زیاد شده باشد یعنی دانش‌آموز تازه‌ای
+    (از هر سیستمی؛ دستی، اکسل، پرداخت تاییدشده، دوره‌ی آنلاین) ثبت‌نام شده است. حذف/استرداد صدا ندارد.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        if not (can_view_menu(request.user, 'class-management') or can_edit_menu(request.user, 'class-management')):
+            return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
+        slot_qs = ClassSlotEnrollment.objects.filter(payment_verified=True)
+        course_qs = OnlineCourseEnrollment.objects.filter(payment_verified=True)
+        slot_agg = slot_qs.aggregate(max_id=Max('id'), count=Count('id'))
+        course_agg = course_qs.aggregate(max_id=Max('id'), count=Count('id'))
+        return Response({
+            'slot': {'max_id': slot_agg['max_id'] or 0, 'count': slot_agg['count'] or 0},
+            'course': {'max_id': course_agg['max_id'] or 0, 'count': course_agg['count'] or 0},
+        })
+
+
 class ClassStatsView(APIView):
     """GET: آمار دقیق لحظه‌ای کلیه‌ی کلاس‌ها — تعداد افراد، مکان‌ها، استاد هر کلاس، تفکیک بر اساس روز"""
     permission_classes = [IsAuthenticated]
@@ -1041,6 +1165,10 @@ class ClassSlotExcelImportView(APIView):
             return None, level, age_group, 'برای سطح این کلاس شهریهٔ مصوب تعریف نشده است؛ ابتدا سطح و شهریهٔ کلاس را بررسی کنید.'
         return setting.amount, level, age_group, ''
 
+    # وضعیت‌هایی که فقط با تایید صریح مدیر قابل ثبت‌اند. موارد زیر هرگز قابل ثبت نیستند، حتی با تایید مدیر:
+    # ثبت‌نام تکراری (همین کلاس یا کلاس دیگری در همین ترم)، عدم تطابق جنسیت، و خطاهای ساختاری کد ملی/نام/تلفن.
+    ADMIN_OVERRIDABLE_STATUSES = ('level_mismatch',)
+
     def _preview_students_by_code(self, slot, student_rows, lock_students=False):
         from django.contrib.auth import get_user_model
         User = get_user_model()
@@ -1090,7 +1218,7 @@ class ClassSlotExcelImportView(APIView):
             'invalid_national_code': 'کد ملی باید دقیقاً ۱۰ رقم باشد',
             'invalid_name': 'نام یا نام خانوادگی دانش‌آموز جدید خالی یا بیش از ۱۵۰ نویسه است',
             'invalid_phone': 'شمارهٔ همراه باید ۱۰ یا ۱۱ رقم باشد',
-            'level_mismatch': 'سطح فعلی با سطح کلاس همخوانی ندارد',
+            'level_mismatch': 'سطح فعلی با سطح کلاس همخوانی ندارد (نیازمند تایید مدیر)',
             'gender_mismatch': 'جنسیت با کلاس همخوانی ندارد',
         }
         for row_number, first_name, last_name, raw_national_code, raw_phone in student_rows:
@@ -1141,22 +1269,28 @@ class ClassSlotExcelImportView(APIView):
                         result['note'] = f'این کد ملی قبلاً در همین ترم ثبت‌نام شده است: {class_labels}'
                     else:
                         current_level = _compute_level_suggestion(student).get('level')
-                        if slot.assigned_level and current_level and _normalize_level(slot.assigned_level) != _normalize_level(current_level):
-                            result['status'] = 'level_mismatch'
-                            result['note'] = f'سطح فعلی: {current_level}'
-                        elif slot.gender != ClassSlot.Gender.MIXED and student.gender and (
+                        # تطابق جنسیت الزامی و غیرقابل‌عبور است (کلاس مختلط برای همه آزاد است)؛ پس قبل از
+                        # بررسی سطح انجام می‌شود تا با تایید مدیر هم دور زده نشود.
+                        if slot.gender != ClassSlot.Gender.MIXED and student.gender and (
                             (slot.gender == ClassSlot.Gender.GIRLS and student.gender != 'female') or
                             (slot.gender == ClassSlot.Gender.BOYS and student.gender != 'male')
                         ):
                             result['status'] = 'gender_mismatch'
+                            result['note'] = 'کلاس دخترانه برای پسر و کلاس پسرانه برای دختر قابل ثبت‌نام نیست'
+                        elif slot.assigned_level and current_level and _normalize_level(slot.assigned_level) != _normalize_level(current_level):
+                            # قابل ثبت فقط با تایید صریح مدیر
+                            result['status'] = 'level_mismatch'
+                            result['note'] = f'سطح فعلی: {current_level} — با تایید مدیر قابل ثبت است'
                         else:
                             result['status'] = 'existing'
             result['status_label'] = labels.get(result['status'], result['status'])
+            result['needs_admin_approval'] = result['status'] in self.ADMIN_OVERRIDABLE_STATUSES
             rows.append(result)
 
         eligible_count = sum(1 for row in rows if row['status'] in ('new', 'existing'))
+        approvable_count = sum(1 for row in rows if row['status'] in self.ADMIN_OVERRIDABLE_STATUSES)
         return {
-            'rows': rows, 'eligible_count': eligible_count, 'level': level,
+            'rows': rows, 'eligible_count': eligible_count, 'approvable_count': approvable_count, 'level': level,
             'age_group': age_group, 'base_tuition': tuition,
             'tariff_error': tariff_error,
         }
@@ -1290,6 +1424,11 @@ class ClassSlotExcelImportView(APIView):
         if len(pos_reference_code) > 50:
             return Response({'error': 'کد پیگیری پوز حداکثر ۵۰ نویسه است'}, status=status.HTTP_400_BAD_REQUEST)
 
+        try:
+            approved_row_numbers = {int(n) for n in json.loads(request.data.get('approved_rows') or '[]')}
+        except (TypeError, ValueError):
+            return Response({'error': 'فهرست موارد تاییدشده توسط مدیر معتبر نیست'}, status=status.HTTP_400_BAD_REQUEST)
+
         student_rows = []
         try:
             for item in supplied_rows:
@@ -1311,10 +1450,15 @@ class ClassSlotExcelImportView(APIView):
             preview = self._preview_students_by_code(slot, student_rows, lock_students=True)
             if preview['tariff_error']:
                 return Response({'error': preview['tariff_error']}, status=status.HTTP_400_BAD_REQUEST)
-            candidates = [row for row in preview['rows'] if row['status'] in ('new', 'existing')]
+            def _is_candidate(row):
+                if row['status'] in ('new', 'existing'):
+                    return True
+                return row['status'] in self.ADMIN_OVERRIDABLE_STATUSES and row['row_number'] in approved_row_numbers
+
+            candidates = [row for row in preview['rows'] if _is_candidate(row)]
             rejected = [
                 {'row_number': row['row_number'], 'name': f"{row['first_name']} {row['last_name']}", 'reason': row['status_label'] + (f" — {row['note']}" if row['note'] else '')}
-                for row in preview['rows'] if row['status'] not in ('new', 'existing')
+                for row in preview['rows'] if not _is_candidate(row)
             ]
             if payment_method == ClassSlotEnrollment.PaymentMethod.WALLET:
                 from django.contrib.auth import get_user_model
@@ -2605,6 +2749,13 @@ class OnlineCourseDetailView(generics.RetrieveUpdateDestroyAPIView):
     def destroy(self, request, *args, **kwargs):
         if not can_edit_menu(request.user, 'class-management'):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
+        obj = self.get_object()
+        enrolled_count = obj.enrollments.count()
+        if enrolled_count:
+            return Response(
+                {'error': f'این دوره {enrolled_count} دانش‌آموز ثبت‌نام‌شده دارد — تا زمانی که دانش‌آموز(ها) از دوره حذف یا مسترد نشوند، امکان حذف آن وجود ندارد'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         return super().destroy(request, *args, **kwargs)
 
 
@@ -3998,6 +4149,15 @@ class BulkClassSlotActionView(APIView):
             return Response({'error': 'هیچ کلاسی با این فیلتر پیدا نشد'}, status=status.HTTP_404_NOT_FOUND)
 
         if action == 'delete':
+            # خواسته: کلاسی که دانش‌آموز ثبت‌نام‌شده دارد حذف نمی‌شود، تا وقتی همه‌ی افراد مسترد یا حذف شوند
+            blocked = [s for s in qs.annotate(enr_total=Count('enrollments')).filter(enr_total__gt=0)]
+            if blocked:
+                names = '، '.join(f'کلاس {b.number} ({b.enr_total} نفر)' for b in blocked[:10])
+                more = f' و {len(blocked) - 10} کلاس دیگر' if len(blocked) > 10 else ''
+                return Response(
+                    {'error': f'هیچ کلاسی حذف نشد. این کلاس‌ها دانش‌آموز ثبت‌نام‌شده دارند: {names}{more} — ابتدا دانش‌آموزان را استرداد یا حذف کنید.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
             qs.delete()
             return Response({'message': f'{match_count} کلاس حذف شد', 'deleted_count': match_count})
 

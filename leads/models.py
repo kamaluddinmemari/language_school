@@ -216,6 +216,12 @@ class UnregisteredStudent(models.Model):
         help_text='ترمی که این فرد در آن ثبت شده — برای فیلتر ترمی در صفحه‌ی پیگیری',
     )
 
+    claims_registered = models.BooleanField(
+        default=False,
+        help_text='فرد می‌گوید ثبت‌نام کرده است ولی اسمش در لیست نیست — نیازمند بررسی',
+    )
+    claim_reviewed = models.BooleanField(default=False, help_text='ادعای ثبت‌نام بررسی شده است')
+
     submitted_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='submitted_unregistered_students')
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -301,6 +307,12 @@ class Debtor(models.Model):
         'class_management.Term', on_delete=models.SET_NULL, null=True, blank=True, related_name='+',
         help_text='ترمی که این فرد در آن ثبت شده — برای فیلتر ترمی در صفحه‌ی پیگیری',
     )
+
+    claims_settled = models.BooleanField(
+        default=False,
+        help_text='فرد می‌گوید بدهی‌اش تسویه شده است — نیازمند بررسی',
+    )
+    claim_reviewed = models.BooleanField(default=False, help_text='ادعای تسویه بدهی بررسی شده است')
 
     created_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
     created_at = models.DateTimeField(auto_now_add=True)

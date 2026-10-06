@@ -136,3 +136,19 @@ class BookSale(models.Model):
 
     def __str__(self):
         return f"فروش {self.quantity} جلد {self.book.title}"
+
+
+class BookShortcut(models.Model):
+    """میانبر فروش: با زدن آن، پنجرهٔ کسر موجودی همان کتاب (با تعداد پیش‌فرض) باز می‌شود."""
+    book = models.ForeignKey(Book, on_delete=models.CASCADE, related_name='shortcuts')
+    label = models.CharField(max_length=80, blank=True, help_text='عنوان دکمه؛ اگر خالی باشد نام کتاب نمایش داده می‌شود')
+    default_quantity = models.PositiveIntegerField(default=1)
+    hotkey = models.CharField(max_length=40, blank=True, help_text='کلید میانبر کیبرد (یک یا دو کلید پشت‌سرهم)، مثل Digit1 یا Digit1,Digit2 یا Alt+KeyA')
+    order = models.PositiveIntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['order', 'id']
+
+    def __str__(self):
+        return self.label or self.book.title

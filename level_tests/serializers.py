@@ -45,13 +45,17 @@ class LevelTestIntakeSerializer(serializers.ModelSerializer):
 
     # فقط برای عبور از بررسی تداخلِ تایم — با تأیید صریح کاربر در هشدارِ «این تایم آزاد نیست»؛ در دیتابیس ذخیره نمی‌شود
     force_time_override = serializers.BooleanField(write_only=True, required=False, default=False)
+    # «فرد دانش‌آموز جدید نیست»: نام پدر و شماره همراه لازم نیست (در دیتابیس ذخیره نمی‌شود)
+    not_new_student = serializers.BooleanField(write_only=True, required=False, default=False)
 
     class Meta:
         model = LevelTest
-        fields = ['id', 'first_name', 'last_name', 'father_name', 'birth_date', 'national_code', 'phone', 'gender', 'student', 'price', 'payment_status', 'test_date', 'force_time_override']
+        fields = ['id', 'first_name', 'last_name', 'father_name', 'birth_date', 'national_code', 'phone', 'gender', 'student', 'price', 'payment_status', 'test_date', 'force_time_override', 'not_new_student']
 
     def validate(self, attrs):
-        for field in ['first_name', 'last_name', 'father_name', 'birth_date', 'national_code', 'phone', 'gender']:
+        not_new_student = attrs.pop('not_new_student', False)
+        required_fields = ['first_name', 'last_name', 'birth_date', 'national_code', 'gender'] if not_new_student else ['first_name', 'last_name', 'father_name', 'birth_date', 'national_code', 'phone', 'gender']
+        for field in required_fields:
             if not attrs.get(field) and not (self.instance and getattr(self.instance, field, None)):
                 raise serializers.ValidationError({field: 'این فیلد لازم است'})
         _ensure_slot_free(attrs, self.instance, force=attrs.pop('force_time_override', False))

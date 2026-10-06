@@ -570,6 +570,17 @@ def _normalize_excluded_row_ranges(ranges):
     return sorted(normalized)
 
 
+def _cell_text(value):
+    """مقدار خانهٔ اکسل را به متن تبدیل می‌کند؛ عدد صحیح اعشاری (مثل 1234567890.0 در xls) بدون «.0» برمی‌گردد."""
+    if value is None:
+        return ''
+    if isinstance(value, bool):
+        return str(value)
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    return str(value).strip()
+
+
 def _read_student_excel(uploaded_file, manual_mapping=None, start_row=None, end_row=None, excluded_row_ranges=None):
     """
     manual_mapping (اختیاری): dict از {field_key: (start_column, end_column)} که از پنل می‌آید.
@@ -630,13 +641,13 @@ def _read_student_excel(uploaded_file, manual_mapping=None, start_row=None, end_
             start_column, end_column = column_range
             selected_values = [
                 values[index] for index in range(start_column, min(end_column + 1, len(values)))
-                if values[index] not in (None, '') and str(values[index]).strip()
+                if values[index] not in (None, '') and _cell_text(values[index])
             ]
             if key == 'birth_date':
                 raw[key] = selected_values[0] if selected_values else ''
             else:
-                raw[key] = ' '.join(str(value).strip() for value in selected_values)
-        item = {key: (_parse_excel_date(value) if key == 'birth_date' else str(value or '').strip()) for key, value in raw.items()}
+                raw[key] = ' '.join(_cell_text(value) for value in selected_values)
+        item = {key: (_parse_excel_date(value) if key == 'birth_date' else _cell_text(value)) for key, value in raw.items()}
         item['_row_number'] = row_number
         output.append(item)
     return {
@@ -654,15 +665,27 @@ def _read_student_excel(uploaded_file, manual_mapping=None, start_row=None, end_
 
 def _student_import_preview(items):
     digit_translation = str.maketrans('۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩', '01234567890123456789')
-    gender_map = {'خانم': 'female', 'زن': 'female', 'دختر': 'female', 'female': 'female', 'آقا': 'male', 'مرد': 'male', 'پسر': 'male', 'male': 'male'}
+    gender_map = {'مؤنث': 'female', 'مونث': 'female', 'مذکر': 'male', 'خانم': 'female', 'زن': 'female', 'دختر': 'female', 'female': 'female', 'آقا': 'male', 'مرد': 'male', 'پسر': 'male', 'male': 'male'}
     result = []
     for item in items:
         item = dict(item)
         errors = []
-        national = re.sub(r'\D', '', str(item.get('national_code') or '').translate(digit_translation))
-        phone = re.sub(r'\D', '', str(item.get('phone') or '').translate(digit_translation))
+        # اگر کد ملی از چند ستون (مثلاً U تا V) ترکیب شده، هر عدد جدا بررسی می‌شود تا به هم نچسبند
+        national_groups = re.findall(r'\d+', str(item.get('national_code') or '').translate(digit_translation))
+        national = next((g for g in national_groups if len(g) == 10), None) or next((g for g in national_groups if 8 <= len(g) <= 9), None) or (national_groups[0] if national_groups else '')
+        if 8 <= len(national) <= 9:
+            national = national.zfill(10)  # صفر ابتدای کد ملی هنگام ذخیره عددی در اکسل از بین می‌رود
+        # اگر چند ستون موبایل ترکیب شده باشد (مثلاً S:T)، هر عدد جدا بررسی می‌شود؛ نه اینکه به هم بچسبند
+        phone_groups = re.findall(r'\d+', str(item.get('phone') or '').translate(digit_translation))
+        phone_groups = [('0' + g) if (len(g) == 10 and g.startswith('9')) else g for g in phone_groups]
+        mobile_like = [g for g in phone_groups if re.fullmatch(r'09\d{9}', g)]
+        ordered = mobile_like + [g for g in phone_groups if g not in mobile_like]
+        phone = ordered[0] if ordered else ''
+        phone2_existing = re.sub(r'\D', '', str(item.get('phone2') or '').translate(digit_translation))
+        phone2 = phone2_existing or (ordered[1] if len(ordered) > 1 else '')
         item['national_code'] = national
         item['phone'] = phone
+        item['phone2'] = phone2
         item['gender'] = gender_map.get(str(item.get('gender') or '').strip().lower(), str(item.get('gender') or '').strip())
         if not item.get('first_name') or not item.get('last_name'): errors.append('نام و نام خانوادگی الزامی است')
         if not national and not phone: errors.append('کد ملی یا شماره موبایل الزامی است')
@@ -742,7 +765,6 @@ class StudentExcelImportView(APIView):
             if mode != 'commit': return Response({'error': 'حالت واردکردن معتبر نیست'}, status=400)
             rows = request.data.get('rows') or []
             if isinstance(rows, str):
-                import json
                 rows = json.loads(rows)
             committed = []; skipped = []; errors = []
             with transaction.atomic():

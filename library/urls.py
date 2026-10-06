@@ -7,6 +7,8 @@ from .views import (
     BookSalesHistoryView,
     BookSalesPriceListView,
     LibraryStatsView,
+    BookShortcutListView,
+    BookShortcutDetailView,
 )
 
 urlpatterns = [
@@ -17,4 +19,6 @@ urlpatterns = [
     path('library/books/<int:pk>/add-stock/', AddBookStockView.as_view(), name='book_add_stock'),
     path('library/books/<int:pk>/sales/', BookSalesHistoryView.as_view(), name='book_sales_history'),
     path('library/stats/', LibraryStatsView.as_view(), name='library_stats'),
+    path('library/shortcuts/', BookShortcutListView.as_view(), name='book_shortcuts'),
+    path('library/shortcuts/<int:pk>/', BookShortcutDetailView.as_view(), name='book_shortcut_detail'),
 ]

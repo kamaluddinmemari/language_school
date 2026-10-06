@@ -6,8 +6,8 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 import jdatetime
-from .models import Book, BookSale, BookStockAddition
-from .serializers import BookSerializer, BookSaleSerializer, SellBookSerializer, AddBookStockSerializer, BookStockAdditionSerializer
+from .models import Book, BookSale, BookStockAddition, BookShortcut
+from .serializers import BookShortcutSerializer, BookSerializer, BookSaleSerializer, SellBookSerializer, AddBookStockSerializer, BookStockAdditionSerializer
 from accounts.menu_permissions import can_edit_menu
 
 # منسوخ — از تنظیمات دسترسی (accounts.menu_permissions.can_edit_menu) جایگزین شد.
@@ -233,3 +233,43 @@ class LibraryStatsView(APIView):
             'generated_at_jalali': generated_at_jalali,
             'books': books_data,
         })
+
+
+class BookShortcutListView(generics.ListCreateAPIView):
+    """میانبرهای فروش کتاب — برای همه‌ی کاربرانی که به منوی کتابخانه دسترسی دارند مشترک است"""
+    permission_classes = [IsAuthenticated]
+    serializer_class = BookShortcutSerializer
+
+    def get_queryset(self):
+        if not can_edit_menu(self.request.user, 'library'):
+            return BookShortcut.objects.none()
+        return BookShortcut.objects.select_related('book').all()
+
+    def create(self, request, *args, **kwargs):
+        if not can_edit_menu(request.user, 'library'):
+            return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
+        return super().create(request, *args, **kwargs)
+
+    def perform_create(self, serializer):
+        last = BookShortcut.objects.order_by('-order').first()
+        serializer.save(order=(last.order + 1) if last else 0)
+
+
+class BookShortcutDetailView(generics.RetrieveUpdateDestroyAPIView):
+    permission_classes = [IsAuthenticated]
+    serializer_class = BookShortcutSerializer
+    queryset = BookShortcut.objects.select_related('book').all()
+
+    def _denied(self, request):
+        return not can_edit_menu(request.user, 'library')
+
+    def update(self, request, *args, **kwargs):
+        if self._denied(request):
+            return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
+        return super().update(request, *args, **kwargs)
+
+    def destroy(self, request, *args, **kwargs):
+        if self._denied(request):
+            return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
+        return super().destroy(request, *args, **kwargs)
+

@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from .models import Book, BookSale, BookStockAddition
+from .models import Book, BookSale, BookStockAddition, BookShortcut
 
 
 class BookSerializer(serializers.ModelSerializer):
@@ -61,3 +61,32 @@ class BookStockAdditionSerializer(serializers.ModelSerializer):
 
     def get_added_by_name(self, obj):
         return f"{obj.added_by.first_name} {obj.added_by.last_name}" if obj.added_by else '—'
+
+
+class BookShortcutSerializer(serializers.ModelSerializer):
+    book_title = serializers.CharField(source='book.title', read_only=True)
+    book_category = serializers.CharField(source='book.category', read_only=True)
+
+    class Meta:
+        model = BookShortcut
+        fields = ['id', 'book', 'book_title', 'book_category', 'label', 'default_quantity', 'hotkey', 'order']
+
+    def validate_default_quantity(self, value):
+        if value < 1:
+            raise serializers.ValidationError('تعداد باید حداقل ۱ باشد')
+        return value
+
+    def validate_hotkey(self, value):
+        import re
+        value = (value or '').strip()
+        if not value:
+            return ''
+        part = r'(Alt\+)?(Shift\+)?(Key[A-Z]|Digit[0-9]|Numpad[0-9]|F([1-4]|[6-9]|10))'
+        if not re.fullmatch(part + '(,' + part + ')?', value):
+            raise serializers.ValidationError('کلید میانبر نامعتبر است')
+        clash = BookShortcut.objects.filter(hotkey=value)
+        if self.instance:
+            clash = clash.exclude(pk=self.instance.pk)
+        if clash.exists():
+            raise serializers.ValidationError('این کلید برای میانبر دیگری استفاده شده است')
+        return value

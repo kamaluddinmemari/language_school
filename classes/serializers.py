@@ -83,8 +83,9 @@ class ClassRequestAdminSerializer(serializers.ModelSerializer):
         if payment_status == ClassRequest.PaymentStatus.PAID:
             if not payment_method or not payment_confirmed_at:
                 raise serializers.ValidationError({'payment_status': 'برای پرداخت‌شده، نوع پرداخت و تاریخ و ساعت پرداخت الزامی است.'})
-            if payment_method == ClassRequest.PaymentMethod.POS and not str(payment_reference or '').strip():
-                raise serializers.ValidationError({'payment_reference': 'برای پرداخت با پوز، شناسه پرداخت الزامی است.'})
+            # فقط پرداخت کارت‌به‌کارت شناسه‌ی پرداخت می‌خواهد؛ نقدی و پوز نیازی به شناسه ندارند
+            if payment_method == ClassRequest.PaymentMethod.CARD_TO_CARD and not str(payment_reference or '').strip():
+                raise serializers.ValidationError({'payment_reference': 'برای پرداخت کارت‌به‌کارت، شناسه پرداخت الزامی است.'})
         return attrs
 
     class Meta:
@@ -173,6 +174,11 @@ class ClassRequestAdminCreateSerializer(serializers.Serializer):
 
     def validate(self, attrs):
         validate_active_identity(attrs)
+        if attrs.get('payment_status') == ClassRequest.PaymentStatus.PAID:
+            if not attrs.get('payment_method') or not attrs.get('payment_confirmed_at'):
+                raise serializers.ValidationError({'payment_status': 'برای پرداخت‌شده، نوع پرداخت و تاریخ و ساعت پرداخت الزامی است.'})
+            if attrs.get('payment_method') == ClassRequest.PaymentMethod.CARD_TO_CARD and not str(attrs.get('payment_reference') or '').strip():
+                raise serializers.ValidationError({'payment_reference': 'برای پرداخت کارت‌به‌کارت، شناسه پرداخت الزامی است.'})
         return attrs
 
     def create(self, validated_data):

@@ -1,7 +1,7 @@
 from django.urls import path
 from .views import (
     ClassSlotListView, ClassSlotDetailView, SwapClassLocationView, TransferClassLocationView, AllocateClassesView,
-    ConfirmOverflowView, TransferSurplusView, SpinOffSurplusView, ClassStatsView,
+    ConfirmOverflowView, EnrollmentPulseView, StudentClassSearchView, TransferSurplusView, SpinOffSurplusView, ClassStatsView,
     BulkCreatePhysicalClassesView, ClassSlotEnrollView, ClassSlotExcelImportView, ClassSlotUnenrollView, ClassSlotRosterView,
     TuitionSuggestionView, TuitionSettingListView, TuitionSettingDetailView, DiscountedPersonListView, DiscountedPersonDetailView,
     RefundEnrollmentView, TransferEnrollmentOptionsView, TransferEnrollmentView, CreditToWalletView,
@@ -43,6 +43,8 @@ urlpatterns = [
     path('class-management/allocate/', AllocateClassesView.as_view(), name='class_allocate'),
     path('class-management/allocate/confirm-overflow/', ConfirmOverflowView.as_view(), name='class_confirm_overflow'),
     path('class-management/stats/', ClassStatsView.as_view(), name='class_stats'),
+    path('class-management/enrollment-pulse/', EnrollmentPulseView.as_view(), name='enrollment_pulse'),
+    path('class-management/student-search/', StudentClassSearchView.as_view(), name='student_class_search'),
     path('class-management/tuition-settings/', TuitionSettingListView.as_view(), name='tuition_setting_list'),
     path('class-management/tuition-settings/<int:pk>/', TuitionSettingDetailView.as_view(), name='tuition_setting_detail'),
     path('class-management/discounted-persons/', DiscountedPersonListView.as_view(), name='discounted_person_list'),

@@ -124,7 +124,8 @@ class UnregisteredStudentSerializer(serializers.ModelSerializer):
             'id', 'first_name', 'last_name', 'class_level', 'national_code', 'phone', 'tuition_price',
             'status', 'status_display', 'registered_at', 'registered_at_jalali',
             'followup_count', 'last_followup_at_jalali', 'latest_level', 'followups',
-            'submitted_by_name', 'term', 'term_title', 'created_at', 'created_at_jalali', 'updated_at',
+            'submitted_by_name', 'term', 'term_title', 'claims_registered', 'claim_reviewed',
+            'created_at', 'created_at_jalali', 'updated_at',
         ]
         read_only_fields = ['status', 'registered_at', 'created_at', 'updated_at']
 
@@ -163,7 +164,7 @@ class DebtorSerializer(serializers.ModelSerializer):
             'id', 'first_name', 'last_name', 'phone', 'class_level', 'debt_amount', 'description',
             'status', 'status_display', 'settled_at', 'settled_at_jalali',
             'followup_count', 'last_followup_at_jalali', 'followups',
-            'term', 'term_title', 'created_at', 'created_at_jalali', 'updated_at',
+            'term', 'term_title', 'claims_settled', 'claim_reviewed', 'created_at', 'created_at_jalali', 'updated_at',
         ]
         read_only_fields = ['status', 'settled_at', 'created_at', 'updated_at']
 
