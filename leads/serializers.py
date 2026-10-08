@@ -117,6 +117,14 @@ class UnregisteredStudentSerializer(serializers.ModelSerializer):
     submitted_by_name = serializers.SerializerMethodField()
     followups = UnregisteredFollowupSerializer(many=True, read_only=True)
     term_title = serializers.ReadOnlyField()
+    dropout_from_term_title = serializers.SerializerMethodField()
+    misplaced_class_number = serializers.SerializerMethodField()
+
+    def get_misplaced_class_number(self, obj):
+        return obj.misplaced_from_slot.number if obj.misplaced_from_slot_id else None
+
+    def get_dropout_from_term_title(self, obj):
+        return obj.dropout_from_term.title if obj.dropout_from_term_id else None
 
     class Meta:
         model = UnregisteredStudent
@@ -125,9 +133,11 @@ class UnregisteredStudentSerializer(serializers.ModelSerializer):
             'status', 'status_display', 'registered_at', 'registered_at_jalali',
             'followup_count', 'last_followup_at_jalali', 'latest_level', 'followups',
             'submitted_by_name', 'term', 'term_title', 'claims_registered', 'claim_reviewed',
+            'is_dropout', 'dropout_from_term', 'dropout_from_term_title',
+            'is_misplaced', 'misplaced_from_slot', 'misplaced_class_number',
             'created_at', 'created_at_jalali', 'updated_at',
         ]
-        read_only_fields = ['status', 'registered_at', 'created_at', 'updated_at']
+        read_only_fields = ['status', 'registered_at', 'created_at', 'updated_at', 'is_dropout', 'dropout_from_term', 'is_misplaced', 'misplaced_from_slot']
 
     def get_submitted_by_name(self, obj):
         if not obj.submitted_by:
@@ -157,6 +167,14 @@ class DebtorSerializer(serializers.ModelSerializer):
     last_followup_at_jalali = serializers.ReadOnlyField()
     followups = DebtorFollowupSerializer(many=True, read_only=True)
     term_title = serializers.ReadOnlyField()
+    carried_from_term_title = serializers.SerializerMethodField()
+    source_slot_number = serializers.SerializerMethodField()
+
+    def get_carried_from_term_title(self, obj):
+        return obj.carried_from_term.title if obj.carried_from_term_id else None
+
+    def get_source_slot_number(self, obj):
+        return obj.source_slot.number if obj.source_slot_id else None
 
     class Meta:
         model = Debtor
@@ -165,8 +183,11 @@ class DebtorSerializer(serializers.ModelSerializer):
             'status', 'status_display', 'settled_at', 'settled_at_jalali',
             'followup_count', 'last_followup_at_jalali', 'followups',
             'term', 'term_title', 'claims_settled', 'claim_reviewed', 'created_at', 'created_at_jalali', 'updated_at',
+            'student', 'awaiting_registration', 'carried_from_term', 'carried_from_term_title',
+            'source_slot', 'source_slot_number',
         ]
-        read_only_fields = ['status', 'settled_at', 'created_at', 'updated_at']
+        read_only_fields = ['status', 'settled_at', 'created_at', 'updated_at', 'student', 'awaiting_registration', 'carried_from_term', 'source_slot']
+        extra_kwargs = {'phone': {'required': False, 'allow_blank': True}, 'debt_amount': {'required': False}}
 
 
 class DiscountedPersonSerializer(serializers.ModelSerializer):

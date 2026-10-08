@@ -2,9 +2,9 @@ from django.urls import path
 from .views import (
     NewLeadListView, NewLeadDetailView, NewLeadActionView,
     UnregisteredStudentListView, UnregisteredStudentDetailView,
-    UnregisteredStudentFollowupView, UnregisteredStudentRegisterView, UnregisteredStudentStatsView,
+    UnregisteredStudentFollowupView, UnregisteredStudentRegisterView, UnregisteredStudentRegisterOptionsView, UnregisteredStudentStatsView,
     DropoutStudentListView, DropoutStudentFollowupView,
-    DebtorListView, DebtorDetailView, DebtorFollowupView, DebtorSettleView, DebtorStatsView,
+    DebtorListView, DebtorDetailView, DebtorFollowupView, DebtorSettleView, DebtorRegisterOptionsView, DebtorStatsView,
     DiscountedPersonListView, DiscountedPersonDetailView,
 )
 
@@ -17,6 +17,7 @@ urlpatterns = [
     path('leads/unregistered-students/<int:pk>/', UnregisteredStudentDetailView.as_view(), name='unregistered_student_detail'),
     path('leads/unregistered-students/<int:pk>/followup/', UnregisteredStudentFollowupView.as_view(), name='unregistered_student_followup'),
     path('leads/unregistered-students/<int:pk>/register/', UnregisteredStudentRegisterView.as_view(), name='unregistered_student_register'),
+    path('leads/unregistered-students/<int:pk>/register-options/', UnregisteredStudentRegisterOptionsView.as_view(), name='unregistered_student_register_options'),
     path('leads/unregistered-students/stats/', UnregisteredStudentStatsView.as_view(), name='unregistered_student_stats'),
     path('leads/dropout-students/', DropoutStudentListView.as_view(), name='dropout_student_list'),
     path('leads/dropout-students/<int:student_id>/followup/', DropoutStudentFollowupView.as_view(), name='dropout_student_followup'),
@@ -25,6 +26,7 @@ urlpatterns = [
     path('leads/debtors/<int:pk>/', DebtorDetailView.as_view(), name='debtor_detail'),
     path('leads/debtors/<int:pk>/followup/', DebtorFollowupView.as_view(), name='debtor_followup'),
     path('leads/debtors/<int:pk>/settle/', DebtorSettleView.as_view(), name='debtor_settle'),
+    path('leads/debtors/<int:pk>/register-options/', DebtorRegisterOptionsView.as_view(), name='debtor_register_options'),
     path('leads/debtors/stats/', DebtorStatsView.as_view(), name='debtor_stats'),
 
     path('leads/discounts/', DiscountedPersonListView.as_view(), name='discounted_person_list'),

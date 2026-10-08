@@ -167,6 +167,27 @@ class ClassSlotEnrollmentSerializer(serializers.ModelSerializer):
     student_gender = serializers.CharField(source='student.gender', read_only=True)
     payment_method_display = serializers.CharField(source='get_payment_method_display', read_only=True)
     created_at_jalali = serializers.ReadOnlyField()
+    needs_follow_up = serializers.SerializerMethodField()
+    needs_follow_up_label = serializers.SerializerMethodField()
+    student_name_color = serializers.SerializerMethodField()
+    student_row_color = serializers.SerializerMethodField()
+
+    def get_needs_follow_up(self, obj):
+        return bool(
+            obj.is_carryover
+            and obj.payment_verified
+            and not obj.carryover_confirmed
+            and not getattr(obj, 'has_other_current_class', False)
+        )
+
+    def get_needs_follow_up_label(self, obj):
+        return 'منتظر ثبت‌نام' if self.get_needs_follow_up(obj) else ''
+
+    def get_student_name_color(self, obj):
+        return '#6c757d' if self.get_needs_follow_up(obj) else '#212529'
+
+    def get_student_row_color(self, obj):
+        return '#e9ecef' if self.get_needs_follow_up(obj) else '#ffffff'
 
     class Meta:
         model = ClassSlotEnrollment
@@ -175,9 +196,11 @@ class ClassSlotEnrollmentSerializer(serializers.ModelSerializer):
             'student_father_name', 'student_national_code', 'student_phone',
             'student_birth_date', 'student_gender', 'payment_method', 'payment_method_display',
             'tuition_amount', 'discount_percent', 'pos_reference_code', 'receipt_image',
-            'self_enrolled', 'payment_verified', 'created_at', 'created_at_jalali',
+            'self_enrolled', 'payment_verified', 'is_carryover', 'carryover_confirmed',
+            'carried_from_term', 'needs_follow_up', 'needs_follow_up_label', 'student_name_color',
+            'student_row_color', 'created_at', 'created_at_jalali',
         ]
-        read_only_fields = ['id', 'created_at']
+        read_only_fields = ['id', 'created_at', 'is_carryover', 'carryover_confirmed', 'carried_from_term', 'needs_follow_up']
 
 
 class TuitionSettingSerializer(serializers.ModelSerializer):

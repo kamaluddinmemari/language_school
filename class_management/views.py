@@ -5,8 +5,8 @@ import re
 import math
 import unicodedata
 from datetime import datetime, timedelta
-from django.db import models as django_models, transaction
-from django.db.models import Count, Max, Q
+from django.db import IntegrityError, models as django_models, transaction
+from django.db.models import Count, Exists, Max, OuterRef, Q
 from django.shortcuts import get_object_or_404
 from rest_framework import generics, status
 from rest_framework.views import APIView
@@ -14,7 +14,7 @@ from rest_framework.response import Response
 from rest_framework.parsers import MultiPartParser, FormParser
 from rest_framework.permissions import IsAuthenticated
 import jdatetime
-from .models import ClassSlot, ClassSlotEnrollment, TuitionSetting, DiscountedPerson, EnrollmentRefund, WalletTransaction, infer_age_group_from_level, _jalali, LevelRenewalApproval, Term, TermHoliday, OnlineCourse, OnlineCourseEnrollment, PaymentSettings, ClassAttendance, OnlineCourseActionRequest
+from .models import ClassSlot, ClassSlotEnrollment, TuitionSetting, DiscountedPerson, EnrollmentRefund, WalletTransaction, infer_age_group_from_level, _jalali, LevelRenewalApproval, Term, TermHoliday, TermRetentionFollowUp, OnlineCourse, OnlineCourseEnrollment, PaymentSettings, ClassAttendance, OnlineCourseActionRequest
 from .models import THREE_DAY_TIME_SLOTS, THURSDAY_MORNING_SLOT, THURSDAY_EVENING_SLOT, FRIDAY_SLOT, FRIDAY_MORNING_SLOT, FRIDAY_EVENING_SLOT
 
 # QR و جلسات استادان فعلاً غیرفعال هستند؛ نبودن مدل‌های این بخش‌ها نباید مانع اجرای ترم و کلاس شود.
@@ -38,6 +38,7 @@ from .serializers import (
 from level_tests.models import LevelTest
 from accounts.menu_permissions import can_edit_menu, can_view_menu
 from .allocation import allocate_classes
+from .carryover import create_awaiting_debtor, finalize_registration, register_student_in_slot, gray_enrollments
 from .attendance import DEFAULT_SESSION_COUNT, jalali_date, roster_attendance_payload, session_dates_for_slot, term_holiday_warnings_for_slot
 
 # منسوخ — از تنظیمات دسترسی (accounts.menu_permissions.can_edit_menu) جایگزین شد.
@@ -288,7 +289,7 @@ class CarryClassesToNextTermView(APIView):
                 if isinstance(carry_flag, str):
                     carry_flag = carry_flag.strip().lower() not in ('0', 'false', 'no', '')
                 if carry_flag:
-                    carried, student_skips = self._carry_students(source, target)
+                    carried, student_skips = self._carry_students(source, target, request.user)
                     students_carried_total += carried
                     for item in student_skips:
                         warnings.append({'source_id': source.id, 'number': source.number, 'level': source.assigned_level or '', 'message': item})
@@ -302,7 +303,7 @@ class CarryClassesToNextTermView(APIView):
         return Response({'message': message, 'created': created, 'skipped': skipped, 'warnings': warnings, 'students_carried': students_carried_total})
 
     @staticmethod
-    def _carry_students(source, target):
+    def _carry_students(source, target, user=None):
         """ثبت‌نام دانش‌آموزان تاییدشدهٔ کلاس مبدا در کلاس مقصد (کپی؛ ثبت‌نام ترم مبدا حفظ می‌شود).
 
         قواعد: هر کد ملی در یک ترم فقط یک کلاس؛ جنسیت باید با کلاس مقصد همخوان باشد (کلاس مختلط آزاد است).
@@ -326,7 +327,10 @@ class CarryClassesToNextTermView(APIView):
             ClassSlotEnrollment.objects.create(
                 class_slot=target, student=student, payment_method=enrollment.payment_method,
                 tuition_amount=0, discount_percent=enrollment.discount_percent,
+                is_carryover=True, carryover_confirmed=False, carried_from_term=source.term,
             )
+            # دانش‌آموز منتقل‌شده تا ثبت‌نام قطعی «ثبت‌نام‌نشده و بدهکار» است
+            create_awaiting_debtor(student, target, source.term, user)
             carried += 1
         return carried, skips
 
@@ -402,6 +406,15 @@ class ClassSlotDetailView(generics.RetrieveUpdateDestroyAPIView):
         obj = self.get_object()
 
         # خواسته: ویرایش کلاس حتی وقتی دانش‌آموز ثبت‌نام‌شده دارد مجاز است؛ فقط «حذف» کلاس مسدود می‌شود.
+        # استثنا: تغییر جنسیت کلاس فقط وقتی مجاز است که هیچ دانش‌آموزی در کلاس نباشد (حذف یا استرداد شده باشند).
+        new_gender = request.data.get('gender')
+        if new_gender not in (None, '') and new_gender != obj.gender:
+            enrolled_count = obj.enrollments.count()
+            if enrolled_count:
+                return Response(
+                    {'error': f'این کلاس {enrolled_count} دانش‌آموز ثبت‌نام‌شده دارد — برای تغییر جنسیت کلاس ابتدا باید همه‌ی دانش‌آموزان حذف یا مسترد شوند'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
 
         # خواسته: توی هر ردیفِ روز+ساعت (مثلاً همه‌ی کلاس‌های زوج ساعت ۳:۴۵ الی ۵:۱۵)، یک استاد
         # فقط می‌تواند همزمان روی یک کلاس باشد — نباید بین چند اتاق در همان روز/ساعت تداخل داشته باشد
@@ -836,6 +849,7 @@ class StudentClassSearchView(APIView):
                 'student_id': student.id,
                 'student_name': f'{student.first_name or ""} {student.last_name or ""}'.strip() or student.username,
                 'national_code': student.national_code or '',
+                'phone': student.phone or '',
                 'level': slot.assigned_level or '',
                 'class_number': slot.number,
                 'day': slot.day_type_display,
@@ -1048,7 +1062,17 @@ class ClassSlotEnrollView(APIView):
             return Response({'error': 'بیش از یک دانش‌آموز با این مشخصات ثبت شده — با مدیر سیستم هماهنگ کنید'}, status=status.HTTP_400_BAD_REQUEST)
 
         prior_enrollments = list(_same_term_enrollments(slot, [student.id]).filter(student=student))
-        if prior_enrollments:
+        # اسم‌های خاکستری (منتظر ثبت‌نام) — چه در همین کلاس چه در کلاس‌های دیگرِ همین ترم — مانع ثبت‌نام نیستند
+        all_gray = bool(prior_enrollments) and all(
+            item.is_carryover and not item.carryover_confirmed and item.payment_verified for item in prior_enrollments
+        )
+        carryover_to_confirm = None
+        if all_gray:
+            carryover_to_confirm = next((item for item in prior_enrollments if item.class_slot_id == slot.id), prior_enrollments[0])
+            for item in prior_enrollments:
+                if item.pk != carryover_to_confirm.pk:
+                    item.delete()
+        if prior_enrollments and not carryover_to_confirm:
             class_labels = '؛ '.join(_enrollment_class_label(item.class_slot) for item in prior_enrollments)
             return Response({
                 'error': f'خطای ثبت‌نام تکراری: این کد ملی قبلاً در همین ترم در {class_labels} ثبت‌نام شده است — برای جابه‌جایی از «انتقال کلاس» استفاده کنید'
@@ -1090,13 +1114,30 @@ class ClassSlotEnrollView(APIView):
                     'error': f'موجودی کیف پول این دانش‌آموز ({student.wallet_balance:,} تومان) برای این مبلغ کافی نیست'
                 }, status=status.HTTP_400_BAD_REQUEST)
 
-        enrollment = ClassSlotEnrollment.objects.create(
-            class_slot=slot, student=student,
-            payment_method=data['payment_method'],
-            tuition_amount=tuition_amount,
-            discount_percent=discount_percent,
-            pos_reference_code=data.get('pos_reference_code', ''),
-        )
+        if carryover_to_confirm:
+            enrollment = carryover_to_confirm
+            enrollment.class_slot = slot
+            enrollment.payment_method = data['payment_method']
+            enrollment.tuition_amount = tuition_amount
+            enrollment.discount_percent = discount_percent
+            enrollment.pos_reference_code = data.get('pos_reference_code', '')
+            enrollment.payment_verified = True
+            enrollment.self_enrolled = False
+            enrollment.receipt_image = None
+            enrollment.carryover_confirmed = True
+            enrollment.save(update_fields=[
+                'class_slot', 'payment_method', 'tuition_amount', 'discount_percent',
+                'pos_reference_code', 'payment_verified', 'self_enrolled', 'receipt_image',
+                'carryover_confirmed',
+            ])
+        else:
+            enrollment = ClassSlotEnrollment.objects.create(
+                class_slot=slot, student=student,
+                payment_method=data['payment_method'],
+                tuition_amount=tuition_amount,
+                discount_percent=discount_percent,
+                pos_reference_code=data.get('pos_reference_code', ''),
+            )
         # توجه: current_count دیگر اینجا دست‌کاری نمی‌شود — آن فیلد فقط برای عدد
         # انتزاعیِ «تخصیص خودکار» است؛ شمارش واقعی از خودِ ردیف‌های ClassSlotEnrollment
         # محاسبه می‌شود (real_enrolled_count) تا با ثبت‌نام تک‌به‌تک دوبار شمارش نشود (خواسته‌ی جدید)
@@ -1120,6 +1161,9 @@ class ClassSlotEnrollView(APIView):
                 student=student,
                 defaults={'discount_percent': discount_percent, 'class_slot': slot, 'approved_tuition': tuition_amount},
             )
+
+        # اگر فرد در این ترم خاکستری/بدهکارِ منتظر ثبت‌نام بود: مشکی شود، از کلاس‌های دیگر حذف و از بدهکاران تسویه شود
+        finalize_registration(student, slot)
 
         return Response({
             'enrollment': ClassSlotEnrollmentSerializer(enrollment).data,
@@ -1198,9 +1242,26 @@ class ClassSlotExcelImportView(APIView):
 
         student_ids = [student.id for matches in students_by_code.values() for student in matches]
         enrollments_by_student = {}
+        gray_slot_ids_by_student = {}
         if student_ids:
             for enrollment in _same_term_enrollments(slot, student_ids):
                 enrollments_by_student.setdefault(enrollment.student_id, []).append(enrollment.class_slot)
+                if enrollment.is_carryover and not enrollment.carryover_confirmed and enrollment.payment_verified:
+                    gray_slot_ids_by_student.setdefault(enrollment.student_id, set()).add(enrollment.class_slot_id)
+        previous_term = None
+        previous_enrollments_by_student = {}
+        if slot.term_id:
+            previous_term = Term.objects.filter(
+                Q(year__lt=slot.term.year)
+                | Q(year=slot.term.year, term_number__lt=slot.term.term_number)
+            ).order_by('-year', '-term_number').first()
+            if previous_term and student_ids:
+                for enrollment in ClassSlotEnrollment.objects.filter(
+                    class_slot__term=previous_term,
+                    student_id__in=student_ids,
+                    payment_verified=True,
+                ).select_related('class_slot').order_by('created_at'):
+                    previous_enrollments_by_student.setdefault(enrollment.student_id, enrollment)
         discount_by_student = {}
         if student_ids:
             for discount in DiscountedPerson.objects.filter(student_id__in=student_ids).order_by('-updated_at'):
@@ -1234,6 +1295,9 @@ class ClassSlotExcelImportView(APIView):
                 'row_number': row_number, 'first_name': first_name, 'last_name': last_name, 'national_code': national_code, 'phone': phone,
                 'status': '', 'status_label': '', 'note': '', 'student_id': None,
                 'discount_percent': 0, 'tuition_amount': tuition,
+                'is_carryover': False, 'carried_from_term_id': None,
+                'carried_from_term_title': '', 'carryover_payment_method': '',
+                'carryover_discount_percent': 0, 'awaiting_confirm': False,
             }
             if len(national_code) != 10:
                 result['status'] = 'invalid_national_code'
@@ -1263,11 +1327,28 @@ class ClassSlotExcelImportView(APIView):
                     if tuition is not None:
                         result['tuition_amount'] = round(tuition * (100 - result['discount_percent']) / 100)
                     prior_slots = enrollments_by_student.get(student.id, [])
-                    if prior_slots:
+                    gray_ids = gray_slot_ids_by_student.get(student.id, set())
+                    # فقط اسم خاکستری (منتظر ثبت‌نام) دارد؛ حضورش در لیست اکسل یعنی ثبت‌نام کرده است
+                    confirm_gray = bool(prior_slots) and all(prior.pk in gray_ids for prior in prior_slots)
+                    if prior_slots and not confirm_gray:
                         result['status'] = 'already_enrolled' if any(prior.pk == slot.pk for prior in prior_slots) else 'other_term'
                         class_labels = '؛ '.join(_enrollment_class_label(prior) for prior in prior_slots)
                         result['note'] = f'این کد ملی قبلاً در همین ترم ثبت‌نام شده است: {class_labels}'
                     else:
+                        if confirm_gray:
+                            result['awaiting_confirm'] = True
+                            result['note'] = 'منتظر ثبت‌نام بود — با ثبت، اسم از خاکستری به مشکی تغییر می‌کند'
+                        previous_enrollment = None if confirm_gray else previous_enrollments_by_student.get(student.id)
+                        if previous_enrollment:
+                            result.update({
+                                'is_carryover': True,
+                                'carried_from_term_id': previous_term.pk,
+                                'carried_from_term_title': previous_term.title,
+                                'carryover_payment_method': previous_enrollment.payment_method,
+                                'carryover_discount_percent': previous_enrollment.discount_percent,
+                                'discount_percent': previous_enrollment.discount_percent,
+                                'tuition_amount': 0,
+                            })
                         current_level = _compute_level_suggestion(student).get('level')
                         # تطابق جنسیت الزامی و غیرقابل‌عبور است (کلاس مختلط برای همه آزاد است)؛ پس قبل از
                         # بررسی سطح انجام می‌شود تا با تایید مدیر هم دور زده نشود.
@@ -1284,13 +1365,24 @@ class ClassSlotExcelImportView(APIView):
                         else:
                             result['status'] = 'existing'
             result['status_label'] = labels.get(result['status'], result['status'])
+            if result['is_carryover'] and result['status'] in ('existing', 'level_mismatch'):
+                result['status_label'] = f'دانش‌آموز ترم قبل — انتقالی و نیازمند پیگیری ({result["carried_from_term_title"]})'
             result['needs_admin_approval'] = result['status'] in self.ADMIN_OVERRIDABLE_STATUSES
             rows.append(result)
 
         eligible_count = sum(1 for row in rows if row['status'] in ('new', 'existing'))
         approvable_count = sum(1 for row in rows if row['status'] in self.ADMIN_OVERRIDABLE_STATUSES)
+        carryover_count = sum(1 for row in rows if row['is_carryover'] and row['status'] in ('existing', 'level_mismatch'))
+        if tariff_error and not any(
+            row['status'] in ('new', 'existing', *self.ADMIN_OVERRIDABLE_STATUSES) and not row['is_carryover']
+            for row in rows
+        ):
+            tariff_error = ''
         return {
-            'rows': rows, 'eligible_count': eligible_count, 'approvable_count': approvable_count, 'level': level,
+            'rows': rows, 'eligible_count': eligible_count, 'approvable_count': approvable_count,
+            'carryover_count': carryover_count,
+            'previous_term': {'id': previous_term.pk, 'title': previous_term.title} if previous_term else None,
+            'level': level,
             'age_group': age_group, 'base_tuition': tuition,
             'tariff_error': tariff_error,
         }
@@ -1416,11 +1508,9 @@ class ClassSlotExcelImportView(APIView):
             return Response({'error': 'در هر نوبت حداکثر ۲۰۰۰ سطر قابل ثبت است'}, status=status.HTTP_400_BAD_REQUEST)
         payment_method = str(request.data.get('payment_method', '')).strip()
         allowed_methods = {value for value, _label in ClassSlotEnrollment.PaymentMethod.choices}
-        if payment_method not in allowed_methods:
-            return Response({'error': 'روش پرداخت را انتخاب کنید'}, status=status.HTTP_400_BAD_REQUEST)
+        if payment_method and payment_method not in allowed_methods:
+            return Response({'error': 'روش پرداخت نامعتبر است'}, status=status.HTTP_400_BAD_REQUEST)
         pos_reference_code = str(request.data.get('pos_reference_code', '')).strip()
-        if payment_method == ClassSlotEnrollment.PaymentMethod.POS and not pos_reference_code:
-            return Response({'error': 'کد پیگیری مشترک دستگاه پوز را وارد کنید'}, status=status.HTTP_400_BAD_REQUEST)
         if len(pos_reference_code) > 50:
             return Response({'error': 'کد پیگیری پوز حداکثر ۵۰ نویسه است'}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -1460,11 +1550,19 @@ class ClassSlotExcelImportView(APIView):
                 {'row_number': row['row_number'], 'name': f"{row['first_name']} {row['last_name']}", 'reason': row['status_label'] + (f" — {row['note']}" if row['note'] else '')}
                 for row in preview['rows'] if not _is_candidate(row)
             ]
+            paid_candidates = [row for row in candidates if not row.get('is_carryover')]
+            if paid_candidates and payment_method not in allowed_methods:
+                return Response({'error': 'برای ثبت‌نام‌های جدید روش پرداخت را انتخاب کنید'}, status=status.HTTP_400_BAD_REQUEST)
+            if paid_candidates and payment_method == ClassSlotEnrollment.PaymentMethod.POS and not pos_reference_code:
+                return Response({'error': 'کد پیگیری مشترک دستگاه پوز را وارد کنید'}, status=status.HTTP_400_BAD_REQUEST)
             if payment_method == ClassSlotEnrollment.PaymentMethod.WALLET:
                 from django.contrib.auth import get_user_model
                 User = get_user_model()
                 eligible_after_wallet = []
                 for row in candidates:
+                    if row.get('is_carryover'):
+                        eligible_after_wallet.append(row)
+                        continue
                     student = User.objects.filter(pk=row['student_id'], role='student').first() if row['student_id'] else None
                     balance = student.wallet_balance if student else 0
                     if balance < row['tuition_amount']:
@@ -1476,17 +1574,19 @@ class ClassSlotExcelImportView(APIView):
                 return Response({'error': 'هیچ دانش‌آموز واجد شرایطی برای ثبت باقی نمانده است', 'rejected': rejected}, status=status.HTTP_400_BAD_REQUEST)
             current_enrolled_count = ClassSlotEnrollment.objects.filter(class_slot=slot).count()
             force_over_capacity = str(request.data.get('force_over_capacity', '')).lower() in ('1', 'true', 'yes')
-            if current_enrolled_count + len(candidates) > slot.capacity and not force_over_capacity:
+            new_seat_count = len([row for row in candidates if not row.get('awaiting_confirm')])
+            if current_enrolled_count + new_seat_count > slot.capacity and not force_over_capacity:
                 return Response({
                     'capacity_warning': True, 'error': f'با ثبت این افراد، تعداد ثبت‌نام‌شده‌ها از ظرفیت {slot.capacity} نفر عبور می‌کند.',
                     'current_enrolled_count': current_enrolled_count, 'capacity': slot.capacity,
-                    'eligible_count': len(candidates),
+                    'eligible_count': new_seat_count,
                 }, status=status.HTTP_409_CONFLICT)
 
             from django.contrib.auth import get_user_model
             User = get_user_model()
             created_students = 0
             enrolled_count = 0
+            carried_count = 0
             for row in candidates:
                 if row['student_id']:
                     student = User.objects.select_for_update().filter(pk=row['student_id'], role='student').first()
@@ -1508,24 +1608,47 @@ class ClassSlotExcelImportView(APIView):
                     student.save()
                     created_students += 1
 
-                if ClassSlotEnrollment.objects.filter(class_slot=slot, student=student).exists():
+                existing_here = ClassSlotEnrollment.objects.filter(class_slot=slot, student=student).first()
+                if existing_here and not (existing_here.is_carryover and not existing_here.carryover_confirmed):
                     rejected.append({'row_number': row['row_number'], 'name': f"{row['first_name']} {row['last_name']}", 'reason': 'در همین کلاس ثبت‌نام بود'})
                     continue
-                discount_percent = row['discount_percent']
-                tuition_amount = row['tuition_amount']
-                enrollment = ClassSlotEnrollment.objects.create(
-                    class_slot=slot, student=student, payment_method=payment_method,
-                    tuition_amount=tuition_amount, discount_percent=discount_percent,
-                    pos_reference_code=pos_reference_code if payment_method == ClassSlotEnrollment.PaymentMethod.POS else '',
-                )
-                if payment_method == ClassSlotEnrollment.PaymentMethod.WALLET:
+                is_carryover = bool(row.get('is_carryover'))
+                discount_percent = row['carryover_discount_percent'] if is_carryover else row['discount_percent']
+                tuition_amount = 0 if is_carryover else row['tuition_amount']
+                if existing_here:
+                    # اسم خاکستریِ همین کلاس: همان ردیف قطعی (مشکی) می‌شود
+                    enrollment = existing_here
+                    enrollment.payment_method = payment_method
+                    enrollment.tuition_amount = tuition_amount
+                    enrollment.discount_percent = discount_percent
+                    enrollment.pos_reference_code = pos_reference_code if payment_method == ClassSlotEnrollment.PaymentMethod.POS else ''
+                    enrollment.payment_verified = True
+                    enrollment.carryover_confirmed = True
+                    enrollment.save()
+                else:
+                    enrollment = ClassSlotEnrollment.objects.create(
+                        class_slot=slot, student=student,
+                        payment_method=(row.get('carryover_payment_method') or ClassSlotEnrollment.PaymentMethod.CASH) if is_carryover else payment_method,
+                        tuition_amount=tuition_amount, discount_percent=discount_percent,
+                        pos_reference_code=pos_reference_code if not is_carryover and payment_method == ClassSlotEnrollment.PaymentMethod.POS else '',
+                        payment_verified=True,
+                        is_carryover=is_carryover,
+                        carryover_confirmed=False,
+                        carried_from_term_id=row.get('carried_from_term_id') if is_carryover else None,
+                    )
+                if not is_carryover:
+                    # ثبت‌نام قطعی: خاکستریِ کلاس‌های دیگر حذف و بدهکارِ منتظر ثبت‌نام تسویه می‌شود
+                    finalize_registration(student, slot)
+                if is_carryover:
+                    carried_count += 1
+                if not is_carryover and payment_method == ClassSlotEnrollment.PaymentMethod.WALLET:
                     student.wallet_balance -= tuition_amount
                     student.save(update_fields=['wallet_balance'])
                     WalletTransaction.objects.create(
                         student=student, kind=WalletTransaction.Kind.DEBIT, amount=tuition_amount,
                         reason=f'پرداخت شهریهٔ کلاس {slot.number}', class_slot=slot,
                     )
-                if discount_percent > 0:
+                if not is_carryover and discount_percent > 0:
                     DiscountedPerson.objects.update_or_create(
                         student=student,
                         defaults={'discount_percent': discount_percent, 'class_slot': slot, 'approved_tuition': tuition_amount},
@@ -1533,6 +1656,7 @@ class ClassSlotExcelImportView(APIView):
                 enrolled_count += 1
             return Response({
                 'created_students': created_students, 'enrolled_count': enrolled_count,
+                'carried_count': carried_count,
                 'skipped_count': len(rejected), 'rejected': rejected,
                 'message': f'{enrolled_count} نفر به کلاس اضافه شدند',
             }, status=status.HTTP_201_CREATED)
@@ -1567,7 +1691,84 @@ class ClassSlotRosterView(generics.ListAPIView):
     def get_queryset(self):
         if not can_edit_menu(self.request.user, 'class-management'):
             return ClassSlotEnrollment.objects.none()
-        return ClassSlotEnrollment.objects.filter(class_slot_id=self.kwargs['pk'], payment_verified=True).select_related('student')
+        enrollment_in_other_class = ClassSlotEnrollment.objects.filter(
+            student_id=OuterRef('student_id'),
+            class_slot__term_id=OuterRef('class_slot__term_id'),
+            payment_verified=True,
+        ).filter(
+            Q(is_carryover=False) | Q(carryover_confirmed=True)
+        ).exclude(class_slot_id=OuterRef('class_slot_id'))
+        return ClassSlotEnrollment.objects.filter(
+            class_slot_id=self.kwargs['pk'], payment_verified=True,
+        ).select_related('student', 'class_slot').annotate(
+            has_other_current_class=Exists(enrollment_in_other_class),
+        )
+
+
+class ConfirmCarryoverEnrollmentView(APIView):
+    """تأیید دستیِ تمدید دانش‌آموز منتقل‌شده، بدون حذف او از فهرست حضور‌وغیاب."""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, pk, student_id):
+        if not can_edit_menu(request.user, 'class-management'):
+            return Response({'error': 'دسترسی ویرایش ندارید'}, status=status.HTTP_403_FORBIDDEN)
+        try:
+            enrollment = ClassSlotEnrollment.objects.select_related('class_slot').get(
+                class_slot_id=pk, student_id=student_id,
+            )
+        except ClassSlotEnrollment.DoesNotExist:
+            return Response({'error': 'ثبت‌نام پیدا نشد'}, status=status.HTTP_404_NOT_FOUND)
+        if not enrollment.is_carryover:
+            return Response({'error': 'این ردیف ثبت‌نام انتقالی نیست'}, status=status.HTTP_400_BAD_REQUEST)
+        if not enrollment.payment_verified:
+            return Response({'error': 'ابتدا پرداخت/ثبت‌نام را تأیید کنید'}, status=status.HTTP_400_BAD_REQUEST)
+        if not enrollment.carryover_confirmed:
+            enrollment.carryover_confirmed = True
+            enrollment.save(update_fields=['carryover_confirmed'])
+        finalize_registration(enrollment.student, enrollment.class_slot)
+        return Response({
+            'message': 'تمدید ثبت‌نام تأیید شد؛ دانش‌آموز در فهرست حضور‌وغیاب باقی می‌ماند',
+            'student_id': enrollment.student_id,
+            'class_slot_id': enrollment.class_slot_id,
+            'carryover_confirmed': enrollment.carryover_confirmed,
+            'needs_follow_up': False,
+        })
+
+
+class MarkCarryoverEnrollmentView(APIView):
+    """نشانه‌گذاری دستی رکوردهای منتقل‌شدهٔ قدیمی که پیش از افزودن فیلد provenance ساخته شده‌اند."""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, pk, student_id):
+        if not can_edit_menu(request.user, 'class-management'):
+            return Response({'error': 'دسترسی ویرایش ندارید'}, status=status.HTTP_403_FORBIDDEN)
+        try:
+            enrollment = ClassSlotEnrollment.objects.select_related('class_slot__term').get(
+                class_slot_id=pk, student_id=student_id,
+            )
+        except ClassSlotEnrollment.DoesNotExist:
+            return Response({'error': 'ثبت‌نام پیدا نشد'}, status=status.HTTP_404_NOT_FOUND)
+        source_term_id = request.data.get('source_term_id')
+        try:
+            source_term = Term.objects.get(pk=source_term_id)
+        except (Term.DoesNotExist, TypeError, ValueError):
+            return Response({'error': 'ترم مبدأ پیدا نشد'}, status=status.HTTP_404_NOT_FOUND)
+        target_term = enrollment.class_slot.term
+        if not target_term:
+            return Response({'error': 'کلاس مقصد به ترم متصل نیست'}, status=status.HTTP_400_BAD_REQUEST)
+        if (source_term.year, source_term.term_number) >= (target_term.year, target_term.term_number):
+            return Response({'error': 'ترم مبدأ باید قدیمی‌تر از ترم کلاس باشد'}, status=status.HTTP_400_BAD_REQUEST)
+        enrollment.is_carryover = True
+        enrollment.carryover_confirmed = False
+        enrollment.carried_from_term = source_term
+        enrollment.save(update_fields=['is_carryover', 'carryover_confirmed', 'carried_from_term'])
+        return Response({
+            'message': 'این رکورد به‌عنوان انتقالی علامت‌گذاری شد و اکنون نیازمند پیگیری است',
+            'student_id': enrollment.student_id,
+            'class_slot_id': enrollment.class_slot_id,
+            'is_carryover': True,
+            'needs_follow_up': True,
+        })
 
 
 class StudentEducationHistoryView(APIView):
@@ -1751,6 +1952,290 @@ class EnrollmentReportView(APIView):
             'summary_by_level': sorted(by_level.values(), key=lambda r: r['level']),
             'total_count': len(enrollments),
             'total_tuition': sum(r['tuition_amount'] for r in enrollments),
+        })
+
+
+class TermRetentionFollowUpView(APIView):
+    """مقایسهٔ دانش‌آموزان ثبت‌نام‌شدهٔ دو ترم و ذخیرهٔ نتیجهٔ پیگیری عدم ثبت‌نام."""
+    permission_classes = [IsAuthenticated]
+
+    @staticmethod
+    def _term_pair(params, require_explicit=False):
+        terms = list(Term.objects.order_by('-year', '-term_number'))
+        if len(terms) < 2:
+            raise ValueError('برای مقایسه، دست‌کم دو ترم باید تعریف شده باشد')
+
+        current_id = params.get('current_term_id')
+        previous_id = params.get('previous_term_id')
+        if require_explicit and (not current_id or not previous_id):
+            raise ValueError('ترم قبل و ترم جاری الزامی است')
+
+        current_term = next((term for term in terms if current_id and str(term.pk) == str(current_id)), None)
+        if current_id and current_term is None:
+            raise ValueError('ترم جاری پیدا نشد')
+        current_term = current_term or terms[0]
+
+        previous_term = next((term for term in terms if previous_id and str(term.pk) == str(previous_id)), None)
+        if previous_id and previous_term is None:
+            raise ValueError('ترم قبل پیدا نشد')
+        if previous_term is None:
+            current_index = terms.index(current_term)
+            previous_term = terms[current_index + 1] if current_index + 1 < len(terms) else None
+        if previous_term is None:
+            raise ValueError('برای ترم انتخاب‌شده، ترم قدیمی‌تری وجود ندارد')
+        if previous_term.pk == current_term.pk:
+            raise ValueError('ترم قبل و ترم جاری نمی‌توانند یکسان باشند')
+        if (previous_term.year, previous_term.term_number) >= (current_term.year, current_term.term_number):
+            raise ValueError('ترم قبل باید از نظر سال و شماره، قدیمی‌تر از ترم جاری باشد')
+        return previous_term, current_term
+
+    @staticmethod
+    def _class_payload(slot):
+        return {
+            'id': slot.pk,
+            'number': slot.number,
+            'title': slot.title,
+            'day_type': slot.day_type,
+            'day_type_display': slot.day_type_display,
+            'time_slot': slot.time_slot,
+            'level': slot.assigned_level,
+            'teacher_name': slot.teacher_name or '',
+            'gender': slot.gender,
+            'gender_display': slot.get_gender_display(),
+            'is_online': slot.is_online,
+        }
+
+    def get(self, request):
+        if not can_view_menu(request.user, 'class-management'):
+            return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
+        try:
+            previous_term, current_term = self._term_pair(request.query_params)
+        except ValueError as exc:
+            return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+        previous_enrollments = ClassSlotEnrollment.objects.filter(
+            class_slot__term_id=previous_term.pk,
+            payment_verified=True,
+            student__role='student',
+        ).select_related('student', 'class_slot').order_by('student__last_name', 'student__first_name', 'class_slot__number')
+
+        students = {}
+        for enrollment in previous_enrollments:
+            student = enrollment.student
+            row = students.setdefault(student.pk, {
+                'student': student,
+                'previous_classes': [],
+            })
+            row['previous_classes'].append(self._class_payload(enrollment.class_slot))
+
+        student_ids = list(students.keys())
+        current_states = {}
+        if student_ids:
+            current_enrollments = ClassSlotEnrollment.objects.filter(
+                class_slot__term_id=current_term.pk,
+                student_id__in=student_ids,
+            ).select_related('class_slot').order_by('student_id', 'class_slot__number')
+            for enrollment in current_enrollments:
+                state = current_states.setdefault(enrollment.student_id, {
+                    'kind': 'not_registered',
+                    'classes': [],
+                })
+                state['classes'].append({
+                    **self._class_payload(enrollment.class_slot),
+                    'payment_verified': enrollment.payment_verified,
+                    'is_carryover': enrollment.is_carryover,
+                    'carryover_confirmed': enrollment.carryover_confirmed,
+                })
+                if enrollment.payment_verified and (not enrollment.is_carryover or enrollment.carryover_confirmed):
+                    state['kind'] = 'registered'
+                elif not enrollment.payment_verified and state['kind'] != 'registered':
+                    state['kind'] = 'pending_payment'
+                elif enrollment.is_carryover and state['kind'] not in {'registered', 'pending_payment'}:
+                    state['kind'] = 'carried_forward'
+
+            for state in current_states.values():
+                verified_class_ids = {
+                    item['id'] for item in state['classes']
+                    if item['payment_verified'] and (not item['is_carryover'] or item['carryover_confirmed'])
+                }
+                if len(verified_class_ids) > 1:
+                    state['kind'] = 'registered'
+
+        followups = {
+            item.student_id: item
+            for item in TermRetentionFollowUp.objects.filter(
+                previous_term=previous_term,
+                current_term=current_term,
+                student_id__in=student_ids,
+            ).select_related('updated_by')
+        }
+
+        results = []
+        for student_id, item in students.items():
+            student = item['student']
+            followup = followups.get(student_id)
+            current = current_states.get(student_id, {'kind': 'not_registered', 'classes': []})
+            follow_up_status = followup.status if followup else TermRetentionFollowUp.Status.NEEDS_FOLLOW_UP
+            needs_follow_up = (
+                current['kind'] in {'carried_forward', 'not_registered'}
+                and follow_up_status not in {
+                    TermRetentionFollowUp.Status.DROPOUT_CONFIRMED,
+                    TermRetentionFollowUp.Status.GRADUATED,
+                    TermRetentionFollowUp.Status.TRANSFERRED,
+                }
+            )
+            results.append({
+                'student_id': student.pk,
+                'student_name': student.get_full_name().strip() or student.username,
+                'national_code': student.national_code or '',
+                'phone': student.phone or '',
+                'previous_classes': item['previous_classes'],
+                'current_classes': current['classes'],
+                'current_state': current['kind'],
+                'current_state_display': {
+                    'registered': 'ثبت‌نام تأییدشده در ترم جاری',
+                    'pending_payment': 'ثبت‌نام در انتظار تأیید پرداخت',
+                    'carried_forward': 'منتقل‌شده از ترم قبل؛ نیازمند تأیید تمدید',
+                    'not_registered': 'در ترم جاری ثبت‌نام ندارد',
+                }[current['kind']],
+                'needs_follow_up': needs_follow_up,
+                'follow_up_status': follow_up_status,
+                'follow_up_status_display': followup.get_status_display() if followup else TermRetentionFollowUp.Status.NEEDS_FOLLOW_UP.label,
+                'reason': followup.reason if followup else '',
+                'reason_display': followup.get_reason_display() if followup and followup.reason else '',
+                'notes': followup.notes if followup else '',
+                'next_follow_up_date': followup.next_follow_up_date.isoformat() if followup and followup.next_follow_up_date else '',
+                'last_contacted_at': followup.last_contacted_at.isoformat() if followup and followup.last_contacted_at else '',
+                'updated_by': followup.updated_by.get_full_name() if followup and followup.updated_by else '',
+            })
+
+        day_filter = request.query_params.get('day_type') or ''
+        level_filter = request.query_params.get('level') or ''
+        gender_filter = request.query_params.get('gender') or ''
+        teacher_filter = str(request.query_params.get('teacher_name') or '').strip()
+        teacher_options = sorted({
+            slot['teacher_name']
+            for row in results
+            for slot in (row['current_classes'] or row['previous_classes'])
+            if slot['teacher_name']
+        }, key=str.casefold)
+        if day_filter or level_filter or gender_filter or teacher_filter:
+            filtered_results = []
+            for row in results:
+                # فردِ منتقل‌شده با کلاس مقصدش فیلتر می‌شود؛ اگر اصلاً در ترم جاری کلاسی ندارد،
+                # کلاس‌های ترم مبدأ مبنا هستند تا از فهرست قابل پیگیری حذف نشود.
+                filter_classes = row['current_classes'] or row['previous_classes']
+                if any(
+                    (not day_filter or slot['day_type'] == day_filter)
+                    and (not level_filter or slot['level'] == level_filter)
+                    and (not gender_filter or slot['gender'] == gender_filter)
+                    and (not teacher_filter or slot['teacher_name'].casefold() == teacher_filter.casefold())
+                    for slot in filter_classes
+                ):
+                    filtered_results.append(row)
+            results = filtered_results
+
+        summary = {
+            'previous_total': len(results),
+            'registered_count': sum(1 for row in results if row['current_state'] == 'registered'),
+            'pending_payment_count': sum(1 for row in results if row['current_state'] == 'pending_payment'),
+            'carried_forward_count': sum(1 for row in results if row['current_state'] == 'carried_forward'),
+            'not_registered_count': sum(1 for row in results if row['current_state'] == 'not_registered'),
+            'needs_follow_up_count': sum(1 for row in results if row['needs_follow_up']),
+            'confirmed_dropout_count': sum(
+                1 for row in results
+                if row['current_state'] in {'carried_forward', 'not_registered'}
+                and row['follow_up_status'] == TermRetentionFollowUp.Status.DROPOUT_CONFIRMED
+            ),
+            'confirmed_in_other_or_same_class_count': sum(
+                1 for row in results if row['current_state'] == 'registered'
+            ),
+        }
+        return Response({
+            'previous_term': {'id': previous_term.pk, 'title': previous_term.title},
+            'current_term': {'id': current_term.pk, 'title': current_term.title},
+            'active_filters': {'day_type': day_filter, 'level': level_filter, 'gender': gender_filter, 'teacher_name': teacher_filter},
+            'teacher_options': teacher_options,
+            'summary': summary,
+            'status_options': [{'value': value, 'label': label} for value, label in TermRetentionFollowUp.Status.choices],
+            'reason_options': [{'value': value, 'label': label} for value, label in TermRetentionFollowUp.Reason.choices],
+            'results': results,
+        })
+
+    def post(self, request):
+        if not can_edit_menu(request.user, 'class-management'):
+            return Response({'error': 'دسترسی ویرایش ندارید'}, status=status.HTTP_403_FORBIDDEN)
+        try:
+            previous_term, current_term = self._term_pair(request.data, require_explicit=True)
+        except ValueError as exc:
+            return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+        student_id = request.data.get('student_id')
+        if not student_id:
+            return Response({'error': 'شناسهٔ دانش‌آموز الزامی است'}, status=status.HTTP_400_BAD_REQUEST)
+        if not ClassSlotEnrollment.objects.filter(
+            class_slot__term_id=previous_term.pk,
+            student_id=student_id,
+            student__role='student',
+            payment_verified=True,
+        ).exists():
+            return Response({'error': 'این دانش‌آموز در ترم قبل ثبت‌نام تأییدشده ندارد'}, status=status.HTTP_404_NOT_FOUND)
+        current_student_enrollments = ClassSlotEnrollment.objects.filter(
+            class_slot__term_id=current_term.pk,
+            student_id=student_id,
+        )
+        verified_current_rows = list(current_student_enrollments.filter(payment_verified=True).values(
+            'class_slot_id', 'is_carryover', 'carryover_confirmed',
+        ))
+        has_confirmed_registration = any(
+            not row['is_carryover'] or row['carryover_confirmed'] for row in verified_current_rows
+        ) or len({row['class_slot_id'] for row in verified_current_rows}) > 1
+        has_pending_payment = current_student_enrollments.filter(payment_verified=False).exists()
+        if has_confirmed_registration or has_pending_payment:
+            return Response({'error': 'این دانش‌آموز در ترم جاری ثبت‌نام قطعی یا پرداخت در انتظار تأیید دارد؛ وضعیت ریزش برای او ثبت نمی‌شود'}, status=status.HTTP_400_BAD_REQUEST)
+
+        follow_up_status = request.data.get('follow_up_status') or TermRetentionFollowUp.Status.NEEDS_FOLLOW_UP
+        allowed_statuses = {value for value, _ in TermRetentionFollowUp.Status.choices}
+        if follow_up_status not in allowed_statuses:
+            return Response({'error': 'وضعیت پیگیری نامعتبر است'}, status=status.HTTP_400_BAD_REQUEST)
+        reason = request.data.get('reason') or ''
+        allowed_reasons = {value for value, _ in TermRetentionFollowUp.Reason.choices}
+        if reason and reason not in allowed_reasons:
+            return Response({'error': 'علت پیگیری نامعتبر است'}, status=status.HTTP_400_BAD_REQUEST)
+
+        follow_up_date_text = request.data.get('next_follow_up_date') or ''
+        if follow_up_date_text:
+            try:
+                next_follow_up_date = datetime.strptime(str(follow_up_date_text), '%Y-%m-%d').date()
+            except ValueError:
+                return Response({'error': 'تاریخ پیگیری باید به صورت YYYY-MM-DD باشد'}, status=status.HTTP_400_BAD_REQUEST)
+        else:
+            next_follow_up_date = None
+
+        record_defaults = {
+            'status': follow_up_status,
+            'reason': reason,
+            'notes': str(request.data.get('notes') or '').strip(),
+            'next_follow_up_date': next_follow_up_date,
+            'updated_by': request.user,
+        }
+        if follow_up_status != TermRetentionFollowUp.Status.NEEDS_FOLLOW_UP:
+            record_defaults['last_contacted_at'] = timezone.now()
+        record, _ = TermRetentionFollowUp.objects.update_or_create(
+            student_id=student_id,
+            previous_term=previous_term,
+            current_term=current_term,
+            defaults=record_defaults,
+        )
+        return Response({
+            'message': 'نتیجهٔ پیگیری ذخیره شد',
+            'student_id': record.student_id,
+            'follow_up_status': record.status,
+            'follow_up_status_display': record.get_status_display(),
+            'reason': record.reason,
+            'reason_display': record.get_reason_display() if record.reason else '',
+            'next_follow_up_date': record.next_follow_up_date.isoformat() if record.next_follow_up_date else '',
+            'last_contacted_at': record.last_contacted_at.isoformat() if record.last_contacted_at else '',
         })
 
 
@@ -2029,7 +2514,15 @@ class SelfEnrollView(APIView):
             return Response({'error': 'تصویر رسید کارت‌به‌کارت الزامی است'}, status=status.HTTP_400_BAD_REQUEST)
 
         prior_enrollments = list(_same_term_enrollments(slot, [student.id]).filter(student=student))
-        if prior_enrollments:
+        carryover_to_confirm = (
+            prior_enrollments[0]
+            if len(prior_enrollments) == 1
+            and prior_enrollments[0].is_carryover
+            and not prior_enrollments[0].carryover_confirmed
+            and prior_enrollments[0].payment_verified
+            else None
+        )
+        if prior_enrollments and not carryover_to_confirm:
             class_labels = '؛ '.join(_enrollment_class_label(item.class_slot) for item in prior_enrollments)
             return Response({
                 'error': f'خطای ثبت‌نام تکراری: شما قبلاً در همین ترم در {class_labels} ثبت‌نام کرده‌اید — برای جابه‌جایی با مدرسه تماس بگیرید'
@@ -2050,16 +2543,31 @@ class SelfEnrollView(APIView):
         discount_percent = existing_discount.discount_percent if existing_discount else 0
         tuition_amount = round(base_tuition * (100 - discount_percent) / 100)
 
-        enrollment = ClassSlotEnrollment.objects.create(
-            class_slot=slot, student=student,
-            payment_method=payment_method, tuition_amount=tuition_amount, discount_percent=discount_percent,
-            receipt_image=receipt, self_enrolled=True, payment_verified=False,
-        )
+        if carryover_to_confirm:
+            enrollment = carryover_to_confirm
+            enrollment.class_slot = slot
+            enrollment.payment_method = payment_method
+            enrollment.tuition_amount = tuition_amount
+            enrollment.discount_percent = discount_percent
+            enrollment.receipt_image = receipt
+            enrollment.self_enrolled = True
+            enrollment.payment_verified = False
+            enrollment.carryover_confirmed = False
+            enrollment.save(update_fields=[
+                'class_slot', 'payment_method', 'tuition_amount', 'discount_percent',
+                'receipt_image', 'self_enrolled', 'payment_verified', 'carryover_confirmed',
+            ])
+        else:
+            enrollment = ClassSlotEnrollment.objects.create(
+                class_slot=slot, student=student,
+                payment_method=payment_method, tuition_amount=tuition_amount, discount_percent=discount_percent,
+                receipt_image=receipt, self_enrolled=True, payment_verified=False,
+            )
 
         return Response({
             'message': 'ثبت‌نام شما ثبت شد — بعد از بررسی رسید توسط مدیریت نهایی می‌شود',
             'enrollment': ClassSlotEnrollmentSerializer(enrollment).data,
-        }, status=status.HTTP_201_CREATED)
+        }, status=status.HTTP_200_OK if carryover_to_confirm else status.HTTP_201_CREATED)
 
 
 class PendingSelfEnrollmentsView(generics.ListAPIView):
@@ -2098,12 +2606,47 @@ class VerifyEnrollmentPaymentView(APIView):
     def post(self, request, pk, student_id):
         if not can_edit_menu(request.user, 'class-management'):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
+        target_slot_id = request.data.get('target_class_slot_id')
         try:
-            enrollment = ClassSlotEnrollment.objects.get(class_slot_id=pk, student_id=student_id)
+            with transaction.atomic():
+                enrollment = ClassSlotEnrollment.objects.select_for_update().select_related('class_slot', 'student').get(
+                    class_slot_id=pk, student_id=student_id,
+                )
+                original_slot_id = enrollment.class_slot_id
+                target_slot = enrollment.class_slot
+                if target_slot_id:
+                    try:
+                        target_slot = ClassSlot.objects.get(pk=target_slot_id)
+                    except ClassSlot.DoesNotExist:
+                        return Response({'error': 'کلاس مقصد پیدا نشد'}, status=status.HTTP_404_NOT_FOUND)
+                    if target_slot.term_id != enrollment.class_slot.term_id:
+                        return Response({'error': 'کلاس مقصد باید در همان ترم ثبت‌نام باشد'}, status=status.HTTP_400_BAD_REQUEST)
+                    if _normalize_level(target_slot.assigned_level) != _normalize_level(enrollment.class_slot.assigned_level):
+                        return Response({'error': 'کلاس مقصد باید هم‌سطح کلاس ثبت‌نام اولیه باشد'}, status=status.HTTP_400_BAD_REQUEST)
+                    student_gender = enrollment.student.gender
+                    if target_slot.gender != ClassSlot.Gender.MIXED and student_gender and (
+                        (target_slot.gender == ClassSlot.Gender.GIRLS and student_gender != 'female') or
+                        (target_slot.gender == ClassSlot.Gender.BOYS and student_gender != 'male')
+                    ):
+                        return Response({'error': 'جنسیت دانش‌آموز با کلاس مقصد همخوانی ندارد'}, status=status.HTTP_400_BAD_REQUEST)
+                    duplicate = ClassSlotEnrollment.objects.filter(
+                        class_slot__term_id=target_slot.term_id, student_id=student_id,
+                    ).exclude(pk=enrollment.pk).select_related('class_slot').first()
+                    if duplicate:
+                        return Response({
+                            'error': f'این دانش‌آموز در همین ترم در کلاس {duplicate.class_slot.number} نیز ثبت‌نام دارد؛ از مسیر انتقال کلاس استفاده کنید'
+                        }, status=status.HTTP_400_BAD_REQUEST)
+                    enrollment.class_slot = target_slot
+                enrollment.payment_verified = True
+                update_fields = ['payment_verified']
+                if enrollment.class_slot_id != original_slot_id:
+                    update_fields.append('class_slot')
+                if enrollment.is_carryover:
+                    enrollment.carryover_confirmed = True
+                    update_fields.append('carryover_confirmed')
+                enrollment.save(update_fields=update_fields)
         except ClassSlotEnrollment.DoesNotExist:
             return Response({'error': 'ثبت‌نام پیدا نشد'}, status=status.HTTP_404_NOT_FOUND)
-        enrollment.payment_verified = True
-        enrollment.save(update_fields=['payment_verified'])
         return Response({'message': 'پرداخت تایید شد', 'enrollment': ClassSlotEnrollmentSerializer(enrollment).data})
 
 
@@ -2393,6 +2936,12 @@ class TransferEnrollmentView(APIView):
             class_slot=target, student_id=student_id,
             payment_method=enrollment.payment_method, tuition_amount=enrollment.tuition_amount,
             discount_percent=enrollment.discount_percent, pos_reference_code=enrollment.pos_reference_code,
+            is_carryover=enrollment.is_carryover,
+            carryover_confirmed=(
+                enrollment.carryover_confirmed
+                or (enrollment.is_carryover and source.term_id == target.term_id)
+            ),
+            carried_from_term=enrollment.carried_from_term,
         )
         enrollment.delete()
         if not target.assigned_level:
@@ -3383,6 +3932,46 @@ def _user_can_manage_roster(user, slot):
     if user.role in User.TEACHER_LIKE_ROLES:
         return slot.teacher_name.strip().casefold() == user.get_full_name().strip().casefold()
     return False
+
+
+class RosterNotInClassView(APIView):
+    """
+    دکمه‌ی «فرد در این کلاس نیست» در حضور و غیاب: مشخصات فرد خودکار به «ثبت‌نام‌نشده‌های» پنل وب می‌رود
+    با برچسب قرمز «در کلاس درست ثبت‌نام نشده — جابجا شود». ثبت‌نامِ فعلی فرد در کلاس دست‌نخورده می‌ماند
+    تا مدیر جابجایی را انجام دهد.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        from leads.models import UnregisteredStudent
+        slot_id = request.data.get('class_slot')
+        student_id = request.data.get('student_id')
+        if not slot_id or not student_id:
+            return Response({'error': 'class_slot و student_id الزامی هستند'}, status=status.HTTP_400_BAD_REQUEST)
+        slot = get_object_or_404(ClassSlot.objects.select_related('term'), pk=slot_id)
+        if not _user_can_manage_roster(request.user, slot):
+            return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
+        enrollment = ClassSlotEnrollment.objects.filter(class_slot=slot, student_id=student_id).select_related('student').first()
+        if not enrollment:
+            return Response({'error': 'این دانش‌آموز در لیست این کلاس نیست'}, status=status.HTTP_404_NOT_FOUND)
+        student = enrollment.student
+        existing = UnregisteredStudent.objects.filter(
+            term=slot.term, is_misplaced=True, misplaced_from_slot=slot, status=UnregisteredStudent.Status.TRACKING,
+            first_name=student.first_name, last_name=student.last_name,
+        ).first()
+        if existing:
+            return Response({'message': 'قبلاً به ثبت‌نام‌نشده‌ها منتقل شده است', 'id': existing.id, 'already': True})
+        try:
+            with transaction.atomic():
+                item = UnregisteredStudent.objects.create(
+                    first_name=student.first_name, last_name=student.last_name,
+                    class_level=slot.assigned_level or 'نامشخص', national_code=student.national_code or '',
+                    phone=student.phone or '', term=slot.term, is_misplaced=True, misplaced_from_slot=slot,
+                    submitted_by=request.user,
+                )
+        except IntegrityError:
+            return Response({'error': 'این فرد قبلاً با همین مشخصات در ثبت‌نام‌نشده‌های این ترم ثبت شده است'}, status=status.HTTP_409_CONFLICT)
+        return Response({'message': 'به ثبت‌نام‌نشده‌ها منتقل شد', 'id': item.id, 'already': False}, status=status.HTTP_201_CREATED)
 
 
 class RosterAttendanceView(APIView):

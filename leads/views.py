@@ -232,6 +232,22 @@ class UnregisteredStudentListView(generics.ListCreateAPIView):
             return Response({'error': 'فقط استاد یا مدیر می‌تواند ثبت کند'}, status=status.HTTP_403_FORBIDDEN)
         data = request.data.copy()
         confirmed = str(data.pop('confirm_new_term', '')).lower() in ('1', 'true', 'yes')
+        # سطح خودکار از کلاسی که فرد در آن قرار دارد (نیازی به تایپ سطح نیست)
+        class_slot_id = data.pop('class_slot', None)
+        if isinstance(class_slot_id, list):
+            class_slot_id = class_slot_id[0] if class_slot_id else None
+        if class_slot_id not in (None, ''):
+            from class_management.models import ClassSlot
+            picked_slot = ClassSlot.objects.filter(pk=class_slot_id).first()
+            if not picked_slot:
+                return Response({'error': 'کلاس انتخاب‌شده پیدا نشد'}, status=status.HTTP_400_BAD_REQUEST)
+            data['class_level'] = picked_slot.assigned_level or data.get('class_level') or ''
+            if not data.get('term') and picked_slot.term_id:
+                data['term'] = picked_slot.term_id
+        if not str(data.get('class_level') or '').strip():
+            return Response({'error': 'کلاسی را که فرد در آن قرار دارد انتخاب کنید (سطح از کلاس خودکار پر می‌شود)'}, status=status.HTTP_400_BAD_REQUEST)
+        data['phone'] = str(data.get('phone') or '').strip()
+        data['national_code'] = str(data.get('national_code') or '').strip()
         term = data.get('term') or get_current_term()
         data['term'] = getattr(term, 'pk', term) if term else None
         identity = build_identity_key(data.get('national_code'), data.get('phone'), data.get('first_name'), data.get('last_name'), data.get('class_level'))
@@ -305,21 +321,104 @@ class UnregisteredStudentFollowupView(APIView):
         return Response(UnregisteredStudentSerializer(student).data, status=status.HTTP_201_CREATED)
 
 
+def _resolve_unregistered_student(item, create=False):
+    from accounts.models import User
+    from accounts.services import sync_student_from_lead
+    students = User.objects.filter(role='student')
+    found = None
+    if item.national_code:
+        found = students.filter(national_code=item.national_code).first()
+    if not found and item.phone:
+        found = students.filter(phone=item.phone).first()
+    if not found:
+        same_name = list(students.filter(first_name=item.first_name, last_name=item.last_name)[:2])
+        found = same_name[0] if len(same_name) == 1 else None
+    if not found and create:
+        found, _ = sync_student_from_lead(
+            first_name=item.first_name, last_name=item.last_name, phone=item.phone,
+            national_code=item.national_code, language_level=item.class_level,
+        )
+    return found
+
+
+class UnregisteredStudentRegisterOptionsView(APIView):
+    """GET: کلاس‌های پیشنهادی برای «ثبت در کلاس» یک فرد ثبت‌نام‌نشده (از جمله ریزشی‌های استخراج‌شده)."""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, pk):
+        if not can_edit_menu(request.user, "followups"):
+            return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
+        try:
+            item = UnregisteredStudent.objects.select_related('term').get(pk=pk)
+        except UnregisteredStudent.DoesNotExist:
+            return Response({'error': 'مورد پیدا نشد'}, status=status.HTTP_404_NOT_FOUND)
+        from class_management.models import Term
+        from class_management.carryover import gray_enrollments
+        term_param = request.query_params.get('term_id')
+        term = Term.objects.filter(pk=term_param).first() if str(term_param or '').isdigit() else None
+        term = term or item.term or get_current_term()
+        term_id = getattr(term, 'pk', None)
+        student = _resolve_unregistered_student(item, create=False)
+        gray_slot_ids = [row.class_slot_id for row in gray_enrollments(student, term_id)] if (student and term_id) else []
+        level, classes = _register_class_options(term_id, student, item.class_level, gray_slot_ids)
+        return Response({
+            'id': item.id, 'student_id': getattr(student, 'id', None),
+            'student_name': f'{item.first_name} {item.last_name}', 'level': level,
+            'term': term_id, 'term_title': getattr(term, 'title', ''),
+            'debt_amount': getattr(item, 'tuition_price', 0) or 0, 'has_gray_class': bool(gray_slot_ids),
+            'classes': classes,
+        })
+
+
 class UnregisteredStudentRegisterView(APIView):
-    """POST: ثبت‌نام شد — بایگانی می‌شود ولی همیشه قابل ویرایش باقی می‌ماند"""
+    """
+    POST: ثبت‌نام شد — بایگانی می‌شود ولی همیشه قابل ویرایش باقی می‌ماند.
+    با class_slot_id (همراه payment_method و tuition_amount): فرد واقعاً در همان کلاس ثبت‌نام قطعی می‌شود.
+    """
     permission_classes = [IsAuthenticated]
 
     def post(self, request, pk):
         if not can_edit_menu(request.user, "followups"):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
-        try:
-            student = UnregisteredStudent.objects.get(pk=pk)
-        except UnregisteredStudent.DoesNotExist:
-            return Response({'error': 'مورد پیدا نشد'}, status=status.HTTP_404_NOT_FOUND)
-        student.status = UnregisteredStudent.Status.REGISTERED
-        student.registered_at = timezone.now()
-        student.save()
-        return Response(UnregisteredStudentSerializer(student).data)
+        from django.db import transaction
+        with transaction.atomic():
+            try:
+                student = UnregisteredStudent.objects.select_for_update().get(pk=pk)
+            except UnregisteredStudent.DoesNotExist:
+                return Response({'error': 'مورد پیدا نشد'}, status=status.HTTP_404_NOT_FOUND)
+            slot_id = request.data.get('class_slot_id')
+            registered_class = None
+            if slot_id:
+                from class_management.models import ClassSlot, ClassSlotEnrollment
+                from class_management.carryover import register_student_in_slot
+                try:
+                    slot = ClassSlot.objects.select_for_update().get(pk=slot_id)
+                except (ClassSlot.DoesNotExist, ValueError, TypeError):
+                    return Response({'error': 'کلاس انتخاب‌شده پیدا نشد'}, status=status.HTTP_404_NOT_FOUND)
+                real_student = _resolve_unregistered_student(student, create=True)
+                if not real_student:
+                    return Response({'error': 'ساخت/پیدا کردن پرونده‌ی دانش‌آموز ممکن نشد'}, status=status.HTTP_400_BAD_REQUEST)
+                payment_method = str(request.data.get('payment_method') or ClassSlotEnrollment.PaymentMethod.CASH)
+                if payment_method not in {v for v, _l in ClassSlotEnrollment.PaymentMethod.choices}:
+                    return Response({'error': 'روش پرداخت نامعتبر است'}, status=status.HTTP_400_BAD_REQUEST)
+                try:
+                    tuition_amount = max(int(request.data.get('tuition_amount') or 0), 0)
+                except (TypeError, ValueError):
+                    return Response({'error': 'مبلغ نامعتبر است'}, status=status.HTTP_400_BAD_REQUEST)
+                _enrollment, error = register_student_in_slot(
+                    real_student, slot, payment_method=payment_method, tuition_amount=tuition_amount,
+                    pos_reference_code=str(request.data.get('pos_reference_code') or '')[:50],
+                )
+                if error:
+                    transaction.set_rollback(True)
+                    return Response({'error': error}, status=status.HTTP_400_BAD_REQUEST)
+                registered_class = slot.number
+            student.status = UnregisteredStudent.Status.REGISTERED
+            student.registered_at = timezone.now()
+            student.save()
+        data = UnregisteredStudentSerializer(student).data
+        data['registered_class_number'] = registered_class
+        return Response(data)
 
 
 class UnregisteredStudentStatsView(APIView):
@@ -408,6 +507,26 @@ class DropoutStudentListView(APIView):
                 'needs_retest': days_missing > 60,
                 'followups': [{'id': f.id, 'date': f.followed_up_at_jalali, 'by': f.followed_up_by_name, 'note': f.note} for f in followups],
             })
+        if from_term and to_term:
+            from .models import ExcelDropout
+            have = {row['student_id'] for row in rows}
+            for extracted in ExcelDropout.objects.filter(from_term=from_term, to_term=to_term).select_related('student'):
+                student = extracted.student
+                if student.id in have or ClassSlotEnrollment.objects.filter(class_slot__term=to_term, student=student).exists():
+                    continue
+                days_missing = max(0, (today - from_term.end_date).days) if getattr(from_term, 'end_date', None) else 0
+                followups = DropoutFollowup.objects.filter(student=student, from_term=from_term, to_term=to_term).select_related('followed_up_by').order_by('-followed_up_at')
+                rows.append({
+                    'student_id': student.id, 'first_name': student.first_name, 'last_name': student.last_name,
+                    'father_name': getattr(student, 'father_name', ''), 'national_code': getattr(student, 'national_code', ''),
+                    'phone': getattr(student, 'phone', ''), 'gender': getattr(student, 'gender', ''),
+                    'last_level': extracted.level or getattr(student, 'language_level', ''),
+                    'last_enrollment_date': extracted.created_at.date().isoformat(),
+                    'last_enrollment_date_jalali': None,
+                    'days_since_last_registration': days_missing, 'missing_terms': 1,
+                    'needs_retest': days_missing > 60, 'from_excel': True,
+                    'followups': [{'id': f.id, 'date': f.followed_up_at_jalali, 'by': f.followed_up_by_name, 'note': f.note} for f in followups],
+                })
         return Response(rows)
 
 
@@ -460,6 +579,23 @@ class DebtorListView(generics.ListCreateAPIView):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         data = request.data.copy()
         confirmed = str(data.pop('confirm_new_term', '')).lower() in ('1', 'true', 'yes')
+        # کلاسی که فرد در آن قرار دارد: سطح، (و در نبود مبلغ) شهریه‌ی همان سطح و شماره‌ی کلاس خودکار پر می‌شود
+        class_slot_id = data.pop('class_slot', None)
+        if isinstance(class_slot_id, list):
+            class_slot_id = class_slot_id[0] if class_slot_id else None
+        source_slot = None
+        if class_slot_id not in (None, ''):
+            from class_management.models import ClassSlot
+            source_slot = ClassSlot.objects.select_related('term').filter(pk=class_slot_id).first()
+            if not source_slot:
+                return Response({'error': 'کلاس انتخاب‌شده پیدا نشد'}, status=status.HTTP_400_BAD_REQUEST)
+            data['class_level'] = source_slot.assigned_level or data.get('class_level') or ''
+            if not data.get('term') and source_slot.term_id:
+                data['term'] = source_slot.term_id
+        if not str(data.get('debt_amount') or '').strip() or str(data.get('debt_amount')).strip() == '0':
+            from class_management.carryover import _tuition_for_level
+            data['debt_amount'] = _tuition_for_level(data.get('class_level'))
+        data['phone'] = str(data.get('phone') or '').strip()
         term = data.get('term') or get_current_term()
         data['term'] = getattr(term, 'pk', term) if term else None
         identity = build_identity_key('', data.get('phone'), data.get('first_name'), data.get('last_name'))
@@ -470,12 +606,16 @@ class DebtorListView(generics.ListCreateAPIView):
             return Response(warning, status=status.HTTP_409_CONFLICT)
         serializer = self.get_serializer(data=data)
         serializer.is_valid(raise_exception=True)
-        debtor = serializer.save(created_by=request.user, term=term)
-        sync_student_from_lead(
+        debtor = serializer.save(created_by=request.user, term=term, source_slot=source_slot)
+        student, _created = sync_student_from_lead(
             first_name=debtor.first_name, last_name=debtor.last_name,
             phone=debtor.phone, language_level=debtor.class_level,
+            national_code=''.join(ch for ch in str(request.data.get('national_code') or '') if ch.isdigit()),
         )
-        return Response(serializer.data, status=status.HTTP_201_CREATED)
+        if student and not debtor.student_id:
+            debtor.student = student
+            debtor.save(update_fields=['student'])
+        return Response(DebtorSerializer(debtor).data, status=status.HTTP_201_CREATED)
 
 
 class DebtorDetailView(generics.RetrieveUpdateDestroyAPIView):
@@ -508,20 +648,182 @@ class DebtorFollowupView(APIView):
         return Response(DebtorSerializer(debtor).data, status=status.HTTP_201_CREATED)
 
 
+def _resolve_debtor_student(debtor, create=False):
+    """دانش‌آموزِ واقعیِ یک بدهکار را پیدا می‌کند (student → موبایل → هم‌نامِ یکتا)؛ در صورت نیاز می‌سازد."""
+    from accounts.models import User
+    from accounts.services import sync_student_from_lead
+    if debtor.student_id:
+        return debtor.student
+    students = User.objects.filter(role='student')
+    phone = (debtor.phone or '').strip()
+    found = students.filter(phone=phone).first() if phone else None
+    if not found:
+        same_name = list(students.filter(first_name=debtor.first_name, last_name=debtor.last_name)[:2])
+        found = same_name[0] if len(same_name) == 1 else None
+    if not found and create:
+        found, _ = sync_student_from_lead(
+            first_name=debtor.first_name, last_name=debtor.last_name,
+            phone=debtor.phone, language_level=debtor.class_level,
+        )
+    if found and not debtor.student_id:
+        debtor.student = found
+        debtor.save(update_fields=['student'])
+    return found
+
+
+def _register_class_options(term_id, student, level_hint, gray_slot_ids):
+    """
+    کلاس‌های پیشنهادی برای ثبت در کلاس: اول کلاس خاکستری (پیشنهاد اصلی)، بعد هم‌سطح و هم‌جنسیت.
+    اگر سطح نامشخص باشد همه‌ی کلاس‌های هم‌جنسیت ترم نشان داده می‌شود (هیچ‌وقت خطای نبودن سطح نمی‌دهد).
+    """
+    from class_management.models import ClassSlot
+    from class_management.serializers import ClassSlotSerializer
+    from class_management.views import _compute_level_suggestion, _normalize_level
+
+    slots = list(ClassSlot.objects.filter(term_id=term_id).order_by('number', 'day_type', 'time_slot')) if term_id else []
+    by_id = {slot.id: slot for slot in slots}
+    level = ''
+    for slot_id in gray_slot_ids:
+        if by_id.get(slot_id) and by_id[slot_id].assigned_level:
+            level = by_id[slot_id].assigned_level
+            break
+    if not level:
+        level = (level_hint or '').strip()
+    if not level and student:
+        level = _compute_level_suggestion(student).get('level') or ''
+    gender = getattr(student, 'gender', '') if student else ''
+
+    def gender_ok(slot):
+        if slot.gender == ClassSlot.Gender.MIXED or not gender:
+            return True
+        return (slot.gender == ClassSlot.Gender.GIRLS and gender == 'female') or (slot.gender == ClassSlot.Gender.BOYS and gender == 'male')
+
+    target_level = _normalize_level(level)
+    suggested, same_level, others = [], [], []
+    for slot in slots:
+        if not gender_ok(slot):
+            continue
+        if slot.id in gray_slot_ids:
+            suggested.append(slot)
+        elif target_level and _normalize_level(slot.assigned_level) == target_level:
+            same_level.append(slot)
+        else:
+            others.append(slot)
+    rest = same_level if (target_level and (same_level or suggested)) else (same_level + others)
+    classes = []
+    for slot, tag in [(sl, 'suggested') for sl in suggested] + [(sl, 'other') for sl in rest]:
+        item = ClassSlotSerializer(slot).data
+        item['suggested'] = tag == 'suggested'
+        item['suggestion_reason'] = 'اسم فرد در این کلاس به‌صورت «منتظر ثبت‌نام» (خاکستری) آمده است' if tag == 'suggested' else (
+            'هم‌سطح و هم‌جنسیت' if target_level and _normalize_level(slot.assigned_level) == target_level else 'سطح فرد مشخص نیست / کلاس هم‌جنسیت'
+        )
+        classes.append(item)
+    return level, classes
+
+
+class DebtorRegisterOptionsView(APIView):
+    """
+    GET: کلاس‌های پیشنهادی برای «تسویه بدهی و ثبت در کلاس».
+    اول کلاسی که اسم فرد در آن خاکستری است (پیشنهاد اصلی)، بعد سایر کلاس‌های هم‌سطح و هم‌جنسیتِ همان ترم.
+    هیچ‌وقت به‌خاطر نداشتن سطح خطا نمی‌دهد: اگر سطح مشخص نباشد، همه‌ی کلاس‌های هم‌جنسیتِ ترم نشان داده می‌شود.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, pk):
+        if not can_edit_menu(request.user, "followups"):
+            return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
+        try:
+            debtor = Debtor.objects.select_related('term', 'source_slot').get(pk=pk)
+        except Debtor.DoesNotExist:
+            return Response({'error': 'مورد پیدا نشد'}, status=status.HTTP_404_NOT_FOUND)
+        from class_management.models import ClassSlot
+        from class_management.serializers import ClassSlotSerializer
+        from class_management.carryover import gray_enrollments
+        from class_management.views import _compute_level_suggestion, _normalize_level
+
+        from class_management.models import Term
+        term_param = request.query_params.get('term_id')
+        term = Term.objects.filter(pk=term_param).first() if str(term_param or '').isdigit() else None
+        term = term or debtor.term or get_current_term()
+        term_id = getattr(term, 'pk', None)
+        student = _resolve_debtor_student(debtor, create=False)
+        gray_slot_ids = []
+        if student and term_id:
+            gray_slot_ids = [row.class_slot_id for row in gray_enrollments(student, term_id)]
+        if debtor.source_slot_id and debtor.source_slot_id not in gray_slot_ids and debtor.awaiting_registration:
+            gray_slot_ids.append(debtor.source_slot_id)
+
+        level, classes = _register_class_options(term_id, student, debtor.class_level, gray_slot_ids)
+        return Response({
+            'debtor_id': debtor.id, 'student_id': getattr(student, 'id', None),
+            'student_name': f'{debtor.first_name} {debtor.last_name}', 'level': level,
+            'term': term_id, 'term_title': getattr(term, 'title', ''),
+            'debt_amount': debtor.debt_amount, 'has_gray_class': bool(gray_slot_ids),
+            'classes': classes,
+        })
+
+
 class DebtorSettleView(APIView):
+    """
+    POST: «تسویه بدهی و ثبت در کلاس».
+    body (اختیاری): class_slot_id, payment_method, tuition_amount, pos_reference_code.
+    - با class_slot_id: فرد در همان کلاس ثبت‌نام قطعی می‌شود (اسم خاکستری ← مشکی، خاکستریِ کلاس‌های دیگر حذف)
+    - بدون class_slot_id: فقط تسویه؛ اگر اسمش در کلاسی خاکستری بود همان کلاس مشکی می‌شود
+    """
     permission_classes = [IsAuthenticated]
 
     def post(self, request, pk):
         if not can_edit_menu(request.user, "followups"):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
-        try:
-            debtor = Debtor.objects.get(pk=pk)
-        except Debtor.DoesNotExist:
-            return Response({'error': 'مورد پیدا نشد'}, status=status.HTTP_404_NOT_FOUND)
-        debtor.status = Debtor.Status.SETTLED
-        debtor.settled_at = timezone.now()
-        debtor.save()
-        return Response(DebtorSerializer(debtor).data)
+        from django.db import transaction
+        from class_management.models import ClassSlot, ClassSlotEnrollment
+        from class_management.carryover import register_student_in_slot, finalize_registration, gray_enrollments
+
+        with transaction.atomic():
+            try:
+                debtor = Debtor.objects.select_for_update().get(pk=pk)
+            except Debtor.DoesNotExist:
+                return Response({'error': 'مورد پیدا نشد'}, status=status.HTTP_404_NOT_FOUND)
+            slot_id = request.data.get('class_slot_id')
+            registered_class = None
+            if slot_id:
+                try:
+                    slot = ClassSlot.objects.select_for_update().get(pk=slot_id)
+                except (ClassSlot.DoesNotExist, ValueError, TypeError):
+                    return Response({'error': 'کلاس انتخاب‌شده پیدا نشد'}, status=status.HTTP_404_NOT_FOUND)
+                student = _resolve_debtor_student(debtor, create=True)
+                if not student:
+                    return Response({'error': 'ساخت/پیدا کردن پرونده‌ی دانش‌آموز ممکن نشد'}, status=status.HTTP_400_BAD_REQUEST)
+                payment_method = str(request.data.get('payment_method') or ClassSlotEnrollment.PaymentMethod.CASH)
+                if payment_method not in {v for v, _l in ClassSlotEnrollment.PaymentMethod.choices}:
+                    return Response({'error': 'روش پرداخت نامعتبر است'}, status=status.HTTP_400_BAD_REQUEST)
+                try:
+                    tuition_amount = int(request.data.get('tuition_amount', debtor.debt_amount) or 0)
+                except (TypeError, ValueError):
+                    return Response({'error': 'مبلغ نامعتبر است'}, status=status.HTTP_400_BAD_REQUEST)
+                enrollment, error = register_student_in_slot(
+                    student, slot, payment_method=payment_method, tuition_amount=max(tuition_amount, 0),
+                    pos_reference_code=str(request.data.get('pos_reference_code') or '')[:50],
+                )
+                if error:
+                    transaction.set_rollback(True)
+                    return Response({'error': error}, status=status.HTTP_400_BAD_REQUEST)
+                registered_class = slot.number
+            else:
+                student = _resolve_debtor_student(debtor, create=False)
+                if student and debtor.term_id:
+                    grays = list(gray_enrollments(student, debtor.term_id))
+                    if grays:
+                        finalize_registration(student, grays[0].class_slot)
+                        registered_class = grays[0].class_slot.number
+            debtor.refresh_from_db()
+            debtor.status = Debtor.Status.SETTLED
+            debtor.settled_at = timezone.now()
+            debtor.awaiting_registration = False
+            debtor.save()
+        data = DebtorSerializer(debtor).data
+        data['registered_class_number'] = registered_class
+        return Response(data)
 
 
 class DebtorStatsView(APIView):

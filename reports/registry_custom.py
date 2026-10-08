@@ -146,7 +146,7 @@ register_source(DataSource(
         SourceField('phone', 'موبایل', 'phone'),
         SourceField('class_level', 'سطح کلاس', 'class_level'),
         SourceField('debt_amount', 'مبلغ بدهی', 'debt_amount', 'number'),
-        SourceField('status', 'وضعیت', 'status', 'choice', {'pending': 'در حال پیگیری', 'settled': 'تسویه شد'}),
+        SourceField('status', 'وضعیت', 'status', 'choice', {'pending': 'در حال پیگیری', 'settled': 'تسویه شد', 'registered': 'ثبت‌نام‌شده'}),
         SourceField('created_at', 'تاریخ ثبت', 'created_at', 'datetime'),
     ],
 ))

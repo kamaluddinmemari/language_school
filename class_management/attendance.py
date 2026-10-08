@@ -2,6 +2,7 @@
 from datetime import timedelta
 
 import jdatetime
+from django.db.models import Q
 from django.utils import timezone
 
 from .models import ClassAttendance, ClassSlotEnrollment, TeacherSessionEvent
@@ -171,6 +172,14 @@ def roster_attendance_payload(slot, session_count=DEFAULT_SESSION_COUNT):
         .select_related('student')
         .order_by('created_at')
     )
+    other_current_class_ids = set()
+    if slot.term_id:
+        other_current_class_ids = set(ClassSlotEnrollment.objects.filter(
+            class_slot__term_id=slot.term_id,
+            payment_verified=True,
+        ).filter(
+            Q(is_carryover=False) | Q(carryover_confirmed=True)
+        ).exclude(class_slot_id=slot.id).values_list('student_id', flat=True))
     attendance_by_student = {}
     if enrolled and sessions:
         attendance_rows = ClassAttendance.objects.filter(
@@ -184,6 +193,11 @@ def roster_attendance_payload(slot, session_count=DEFAULT_SESSION_COUNT):
     roster = []
     for enrollment in enrolled:
         student = enrollment.student
+        needs_follow_up = bool(
+            enrollment.is_carryover
+            and not enrollment.carryover_confirmed
+            and student.id not in other_current_class_ids
+        )
         rows = []
         for item in sessions:
             record = attendance_by_student.get(student.id, {}).get(item['date'])
@@ -201,6 +215,13 @@ def roster_attendance_payload(slot, session_count=DEFAULT_SESSION_COUNT):
             'student_national_code': getattr(student, 'national_code', '') or '',
             'student_phone': getattr(student, 'phone', '') or '',
             'enrollment_id': enrollment.id,
+            'is_carryover': enrollment.is_carryover,
+            'carryover_confirmed': enrollment.carryover_confirmed,
+            'needs_follow_up': needs_follow_up,
+            'needs_follow_up_label': 'منتظر ثبت‌نام' if needs_follow_up else '',
+            'registration_status': 'needs_follow_up' if needs_follow_up else 'registered',
+            'student_name_color': '#6c757d' if needs_follow_up else '#212529',
+            'student_row_color': '#e9ecef' if needs_follow_up else '#ffffff',
             'sessions': rows,
         })
 

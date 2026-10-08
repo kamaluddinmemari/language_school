@@ -1,10 +1,12 @@
 from django.urls import path
+from .dropout_extract import DropoutExtractParseView, DropoutExtractComputeView, DropoutExtractCommitView
 from .views import (
     ClassSlotListView, ClassSlotDetailView, SwapClassLocationView, TransferClassLocationView, AllocateClassesView,
     ConfirmOverflowView, EnrollmentPulseView, StudentClassSearchView, TransferSurplusView, SpinOffSurplusView, ClassStatsView,
     BulkCreatePhysicalClassesView, ClassSlotEnrollView, ClassSlotExcelImportView, ClassSlotUnenrollView, ClassSlotRosterView,
     TuitionSuggestionView, TuitionSettingListView, TuitionSettingDetailView, DiscountedPersonListView, DiscountedPersonDetailView,
     RefundEnrollmentView, TransferEnrollmentOptionsView, TransferEnrollmentView, CreditToWalletView,
+    ConfirmCarryoverEnrollmentView, MarkCarryoverEnrollmentView,
     StudentFinancialHistoryView, EnrollmentReportView, SplitClassView, DirectEnrollSuggestionsView,
     MyDirectEnrollSuggestionsView, SelfEnrollView, VerifyEnrollmentPaymentView, MyEnrollmentsView,
     LevelRenewalApprovalListView, LevelRenewalApprovalDecideView,
@@ -14,13 +16,14 @@ from .views import (
     OnlineCourseSelfEnrollView, PendingOnlineCourseEnrollmentsView, VerifyOnlineCourseEnrollmentPaymentView,
     RejectPendingOnlineCourseEnrollmentView, RefundOnlineCourseEnrollmentView, CreditOnlineCourseToWalletView,
     MyOnlineCourseEnrollmentsView, TeacherOnlineCoursesView, GatewayPaymentInitiateView, PaymentSettingsView,
-    MarkAttendanceView, ClassAttendanceListView, RosterAttendanceView, BulkRosterAttendanceView, BulkClassSlotActionView,
+    MarkAttendanceView, ClassAttendanceListView, RosterAttendanceView, RosterNotInClassView, BulkRosterAttendanceView, BulkClassSlotActionView,
     OnlineCourseRosterView, OnlineCourseUnenrollView, OnlineCourseTransferOptionsView, OnlineCourseTransferView,
     StudentCreateOnlineCourseActionRequestView, MyOnlineCourseActionRequestsView,
     AdminOnlineCourseActionRequestListView, ApproveOnlineCourseActionRequestView, RejectOnlineCourseActionRequestView,
     TeacherTermReportView, TeacherSessionEventListCreateView, TeacherSessionEventDetailView,
     RoomQrManageView, TeacherQrAttendanceView, TeacherSessionAttendanceListView, TeacherCompensationSettingsView,
     TeacherCompensationReportView,
+    TermRetentionFollowUpView,
 )
 
 urlpatterns = [
@@ -36,6 +39,8 @@ urlpatterns = [
     path('class-management/slots/<int:pk>/enroll/<int:student_id>/refund/', RefundEnrollmentView.as_view(), name='class_slot_refund'),
     path('class-management/slots/<int:pk>/enroll/<int:student_id>/transfer-options/', TransferEnrollmentOptionsView.as_view(), name='class_slot_transfer_options'),
     path('class-management/slots/<int:pk>/enroll/<int:student_id>/transfer/', TransferEnrollmentView.as_view(), name='class_slot_transfer'),
+    path('class-management/slots/<int:pk>/enroll/<int:student_id>/confirm-carryover/', ConfirmCarryoverEnrollmentView.as_view(), name='class_slot_confirm_carryover'),
+    path('class-management/slots/<int:pk>/enroll/<int:student_id>/mark-carryover/', MarkCarryoverEnrollmentView.as_view(), name='class_slot_mark_carryover'),
     path('class-management/slots/<int:pk>/enroll/<int:student_id>/to-wallet/', CreditToWalletView.as_view(), name='class_slot_to_wallet'),
     path('class-management/slots/<int:pk>/roster/', ClassSlotRosterView.as_view(), name='class_slot_roster'),
     path('class-management/slots/<int:pk>/tuition-suggestion/', TuitionSuggestionView.as_view(), name='class_tuition_suggestion'),
@@ -62,6 +67,10 @@ urlpatterns = [
     path('class-management/pending-self-enrollments/', PendingSelfEnrollmentsView.as_view(), name='pending_self_enrollments'),
     path('class-management/students/<int:student_id>/education-history/', StudentEducationHistoryView.as_view(), name='student_education_history'),
     path('class-management/enrollment-report/', EnrollmentReportView.as_view(), name='enrollment_report'),
+    path('class-management/term-retention/', TermRetentionFollowUpView.as_view(), name='term_retention_followup'),
+    path('class-management/dropout-extract/parse/', DropoutExtractParseView.as_view(), name='dropout_extract_parse'),
+    path('class-management/dropout-extract/compute/', DropoutExtractComputeView.as_view(), name='dropout_extract_compute'),
+    path('class-management/dropout-extract/commit/', DropoutExtractCommitView.as_view(), name='dropout_extract_commit'),
     path('class-management/terms/', TermListView.as_view(), name='term_list'),
     path('class-management/terms/<int:pk>/', TermDetailView.as_view(), name='term_detail'),
     path('class-management/terms/<int:term_id>/holidays/', TermHolidayListView.as_view(), name='term_holiday_list'),
@@ -104,6 +113,7 @@ urlpatterns = [
     path('class-management/payment-settings/', PaymentSettingsView.as_view(), name='payment_settings'),
     # لیست کلاسی ۲۰ سطری و حضور و غیاب دانش‌آموزان در پنل ادمین
     path('class-management/roster-attendance/', RosterAttendanceView.as_view(), name='roster_attendance'),
+    path('class-management/roster-attendance/not-in-class/', RosterNotInClassView.as_view(), name='roster_not_in_class'),
     path('class-management/roster-attendance/bulk/', BulkRosterAttendanceView.as_view(), name='roster_attendance_bulk'),
     path('class-management/attendance/mark/', MarkAttendanceView.as_view(), name='mark_attendance'),
     path('class-management/attendance/', ClassAttendanceListView.as_view(), name='attendance_list'),

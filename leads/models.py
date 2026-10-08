@@ -222,6 +222,18 @@ class UnregisteredStudent(models.Model):
     )
     claim_reviewed = models.BooleanField(default=False, help_text='ادعای ثبت‌نام بررسی شده است')
 
+    # ریزشیِ استخراج‌شده از مقایسه‌ی اکسلِ دو ترم متوالی (ترم اخیر و ترم قبلش) — بدون نیاز به رفتن به بخش ریزشی‌ها
+    is_dropout = models.BooleanField(default=False, help_text='ریزشی استخراج‌شده از مقایسه‌ی اکسل دو ترم متوالی')
+    dropout_from_term = models.ForeignKey(
+        'class_management.Term', on_delete=models.SET_NULL, null=True, blank=True, related_name='+',
+    )
+
+    # فرد در لیست یک کلاس هست ولی در کلاس درست ثبت‌نام نشده (از دکمه‌ی «فرد در این کلاس نیست» در حضور و غیاب)
+    is_misplaced = models.BooleanField(default=False, help_text='در کلاس درست ثبت‌نام نشده — جابجا شود')
+    misplaced_from_slot = models.ForeignKey(
+        'class_management.ClassSlot', on_delete=models.SET_NULL, null=True, blank=True, related_name='+',
+    )
+
     submitted_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='submitted_unregistered_students')
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -295,10 +307,10 @@ class Debtor(models.Model):
 
     first_name = models.CharField(max_length=150)
     last_name = models.CharField(max_length=150)
-    phone = models.CharField(max_length=20)
+    phone = models.CharField(max_length=20, blank=True, default='')
     identity_key = models.CharField(max_length=255, blank=True, default='', editable=False)
     class_level = models.CharField(max_length=50, blank=True)
-    debt_amount = models.PositiveIntegerField()
+    debt_amount = models.PositiveIntegerField(default=0)
     description = models.TextField(blank=True)
 
     status = models.CharField(max_length=10, choices=Status.choices, default=Status.PENDING)
@@ -313,6 +325,20 @@ class Debtor(models.Model):
         help_text='فرد می‌گوید بدهی‌اش تسویه شده است — نیازمند بررسی',
     )
     claim_reviewed = models.BooleanField(default=False, help_text='ادعای تسویه بدهی بررسی شده است')
+
+    # دانش‌آموزِ منتقل‌شده همراه «انتقال کلاس به ترم بعد» — تا ثبت‌نام قطعی، بدهکار و «منتظر ثبت‌نام» است
+    student = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
+    awaiting_registration = models.BooleanField(
+        default=False,
+        help_text='دانش‌آموز انتقالی از ترم قبل — در دست بررسی و منتظر ثبت‌نام',
+    )
+    carried_from_term = models.ForeignKey(
+        'class_management.Term', on_delete=models.SET_NULL, null=True, blank=True, related_name='+',
+    )
+    source_slot = models.ForeignKey(
+        'class_management.ClassSlot', on_delete=models.SET_NULL, null=True, blank=True, related_name='+',
+        help_text='کلاس ترم جدیدی که اسم فرد در آن به‌صورت خاکستری آمده است',
+    )
 
     created_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
     created_at = models.DateTimeField(auto_now_add=True)
@@ -427,3 +453,17 @@ class DropoutFollowup(models.Model):
     @property
     def followed_up_by_name(self):
         return self.followed_up_by.get_full_name() if self.followed_up_by else ''
+
+
+class ExcelDropout(models.Model):
+    """ریزشیِ استخراج‌شده از مقایسه‌ی اکسلِ دو ترم متوالی (برای جفت‌ترم‌هایی که «ترم اخیر و ترم قبلش» نیستند) — در بخش ریزشی‌ها نمایش داده می‌شود."""
+    student = models.ForeignKey(User, on_delete=models.CASCADE, related_name='excel_dropouts')
+    from_term = models.ForeignKey('class_management.Term', on_delete=models.CASCADE, related_name='+')
+    to_term = models.ForeignKey('class_management.Term', on_delete=models.CASCADE, related_name='+')
+    level = models.CharField(max_length=50, blank=True)
+    created_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-created_at']
+        constraints = [models.UniqueConstraint(fields=['student', 'from_term', 'to_term'], name='uniq_excel_dropout_pair')]

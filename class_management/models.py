@@ -327,6 +327,11 @@ class ClassSlotEnrollment(models.Model):
     receipt_image = models.ImageField(upload_to='enrollment_receipts/', null=True, blank=True, help_text='تصویر رسید کارت‌به‌کارت — فقط برای ثبت‌نامِ خودِ دانش‌آموز از طریق اپ')
     self_enrolled = models.BooleanField(default=False, help_text='True یعنی خودِ دانش‌آموز از طریق اپ ثبت‌نام کرده، نه مدیر')
     payment_verified = models.BooleanField(default=True, help_text='ثبت‌نام‌های دستیِ مدیر همیشه تاییدشده‌اند؛ ثبت‌نام خودِ دانش‌آموز (کارت‌به‌کارت) تا بررسی رسید توسط مدیر، False می‌ماند')
+    is_carryover = models.BooleanField(default=False, help_text='ثبت‌نام این ردیف برای حضور‌وغیاب از ترم قبل منتقل شده است')
+    carryover_confirmed = models.BooleanField(default=False, help_text='تمدید ثبت‌نامِ دانش‌آموز منتقل‌شده برای این ترم قطعی شده است')
+    carried_from_term = models.ForeignKey(
+        Term, on_delete=models.SET_NULL, null=True, blank=True, related_name='carried_class_enrollments',
+    )
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -341,6 +346,61 @@ class ClassSlotEnrollment(models.Model):
 
     def __str__(self):
         return f"{self.student.get_full_name()} — کلاس {self.class_slot.number}"
+
+
+class TermRetentionFollowUp(models.Model):
+    """پیگیری ماندگاری دانش‌آموز بین دو ترم؛ مستقل از ثبت‌نام‌های خودِ کلاس‌ها."""
+
+    class Status(models.TextChoices):
+        NEEDS_FOLLOW_UP = 'needs_follow_up', 'نیازمند پیگیری'
+        TEMPORARY_PAUSE = 'temporary_pause', 'وقفه موقت'
+        DROPOUT_CONFIRMED = 'dropout_confirmed', 'ریزش تأییدشده'
+        GRADUATED = 'graduated', 'پایان دوره / فارغ‌التحصیلی'
+        TRANSFERRED = 'transferred', 'انتقال به مؤسسهٔ دیگر'
+        NO_RESPONSE = 'no_response', 'عدم پاسخ'
+        OTHER = 'other', 'سایر'
+
+    class Reason(models.TextChoices):
+        FINANCIAL = 'financial', 'هزینه / شهریه'
+        SCHEDULE = 'schedule', 'زمان‌بندی کلاس'
+        DISSATISFACTION = 'dissatisfaction', 'نارضایتی از دوره یا آموزش'
+        RELOCATION = 'relocation', 'جابجایی / دوری مسیر'
+        FAMILY = 'family', 'شرایط خانوادگی یا شخصی'
+        COMPLETED = 'completed', 'پایان سطح یا دوره'
+        OTHER = 'other', 'سایر'
+
+    student = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='term_retention_followups'
+    )
+    previous_term = models.ForeignKey(
+        Term, on_delete=models.CASCADE, related_name='retention_followups_as_previous'
+    )
+    current_term = models.ForeignKey(
+        Term, on_delete=models.CASCADE, related_name='retention_followups_as_current'
+    )
+    status = models.CharField(max_length=24, choices=Status.choices, default=Status.NEEDS_FOLLOW_UP)
+    reason = models.CharField(max_length=24, choices=Reason.choices, blank=True)
+    notes = models.TextField(blank=True)
+    next_follow_up_date = models.DateField(null=True, blank=True)
+    last_contacted_at = models.DateTimeField(null=True, blank=True)
+    updated_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='updated_term_retention_followups'
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-updated_at']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['student', 'previous_term', 'current_term'],
+                name='unique_student_term_retention_pair',
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.student.get_full_name()} — {self.previous_term} → {self.current_term}"
 
 
 class TuitionSetting(models.Model):
