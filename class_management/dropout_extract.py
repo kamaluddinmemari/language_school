@@ -100,6 +100,16 @@ def _db_rows(term_ids):
     return list(rows.values())
 
 
+def _all_student_rows():
+    """کل دانش‌آموزان ثبت‌شده در بخش «اطلاعات دانش‌آموزان» (بدون نیاز به ثبت‌نام ترمی)."""
+    from django.contrib.auth import get_user_model
+    User = get_user_model()
+    return [{
+        'first_name': u.first_name, 'last_name': u.last_name, 'national_code': u.national_code or '',
+        'phone': u.phone or '', 'level_fallback': u.language_level or '',
+    } for u in User.objects.filter(role='student')]
+
+
 def _enrollment_info(codes, term_ids):
     """برای هر کد ملی، آخرین ثبت‌نام قطعی در `term_ids`: سطح، روز، ساعت، استاد، شماره کلاس و ترم."""
     if not codes:
@@ -153,7 +163,7 @@ def _difference(a_rows, b_rows, info_term_ids):
             'key': code, 'row_number': code,
             'first_name': str(row.get('first_name') or '').strip(), 'last_name': str(row.get('last_name') or '').strip(),
             'national_code': code, 'phone': phone,
-            'level': extra.get('level', ''), 'day': extra.get('day', ''), 'time_slot': extra.get('time_slot', ''),
+            'level': extra.get('level', '') or str(row.get('level_fallback') or ''), 'day': extra.get('day', ''), 'time_slot': extra.get('time_slot', ''),
             'teacher': extra.get('teacher', ''), 'class_number': extra.get('class_number'),
             'last_term_id': extra.get('last_term_id'), 'last_term_title': extra.get('last_term_title', ''),
         })
@@ -259,21 +269,28 @@ class DropoutExtractComputeView(APIView):
         if error:
             return Response({'error': error}, status=status.HTTP_400_BAD_REQUEST)
 
-        def side_rows(source, rows, db_term_ids, label):
+        def side_rows(source, rows, db_term_ids, label, all_students=False):
             if source == 'excel':
                 if not isinstance(rows, list) or not rows:
                     return None, f'اکسل «{label}» باید خوانده شده باشد'
                 return rows, ''
+            if all_students:
+                data = _all_student_rows()
+                if not data:
+                    return None, 'در بخش «اطلاعات دانش‌آموزان» دانش‌آموزی ثبت نشده است'
+                return data, ''
             data = _db_rows(db_term_ids)
             if not data:
-                return None, f'در سامانه دانش‌آموز ثبت‌نام‌شده‌ای برای «{label}» پیدا نشد'
+                total = ClassSlotEnrollment.objects.filter(class_slot__term_id__in=db_term_ids).count()
+                hint = f' ({total} ثبت‌نام در انتظار تأیید پرداخت یا خاکستری هست که قطعی حساب نمی‌شود)' if total else ''
+                return None, f'در سامانه برای «{label}» ثبت‌نام قطعی‌ای پیدا نشد{hint}. اگر لیست این ترم را دارید، گزینهٔ «ورود از Excel» را انتخاب کنید.'
             return data, ''
 
         if mode == 'all_vs_term':
             earlier = [t.id for t in terms if position[t.id] < position[term2.id]]
-            a_rows, err = side_rows(a_source, request.data.get('a_rows'), earlier, 'کل دانش‌آموزان ثبت‌شده')
+            a_rows, err = side_rows(a_source, request.data.get('a_rows'), earlier, 'کل دانش‌آموزان ثبت‌شده', all_students=True)
             info_terms = earlier
-            a_label = 'کل دانش‌آموزان ثبت‌شده قبل از این ترم'
+            a_label = 'کل دانش‌آموزان ثبت‌شده (اطلاعات دانش‌آموزان)'
         else:
             a_rows, err = side_rows(a_source, request.data.get('a_rows'), [term1.id], term1.title)
             info_terms = [term1.id]

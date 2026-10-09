@@ -206,6 +206,14 @@ class UnregisteredStudent(models.Model):
     class_level = models.CharField(max_length=50)
     national_code = models.CharField(max_length=20, blank=True)
     phone = models.CharField(max_length=20, blank=True)
+    class_slot = models.ForeignKey(
+        'class_management.ClassSlot', on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='unregistered_students', help_text='کلاسی که فرد برای آن ثبت شده است',
+    )
+    class_number = models.CharField(max_length=30, blank=True, default='')
+    class_teacher = models.CharField(max_length=150, blank=True, default='')
+    class_time = models.CharField(max_length=30, blank=True, default='')
+    class_day = models.CharField(max_length=100, blank=True, default='')
     identity_key = models.CharField(max_length=255, blank=True, default='', editable=False)
     tuition_price = models.PositiveIntegerField(null=True, blank=True, help_text='قیمت شهریه‌ی پیشنهادی')
 

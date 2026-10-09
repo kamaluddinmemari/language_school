@@ -897,9 +897,13 @@ class StudentQuickSearchView(APIView):
             return Response([])
 
         from django.db.models import Q
+        name_parts = q.split()
+        name_query = Q(first_name__icontains=q) | Q(last_name__icontains=q)
+        if len(name_parts) > 1:
+            name_query |= Q(first_name__icontains=name_parts[0], last_name__icontains=' '.join(name_parts[1:]))
         students = User.objects.filter(role='student').filter(
-            Q(national_code__icontains=q) | Q(last_name__icontains=q) | Q(first_name__icontains=q)
-        )[:10]
+            Q(national_code__icontains=q) | name_query
+        ).order_by('last_name', 'first_name', 'id')[:10]
         return Response([{
             'id': s.id,
             'first_name': s.first_name,

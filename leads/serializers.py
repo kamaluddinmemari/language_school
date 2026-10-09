@@ -119,6 +119,11 @@ class UnregisteredStudentSerializer(serializers.ModelSerializer):
     term_title = serializers.ReadOnlyField()
     dropout_from_term_title = serializers.SerializerMethodField()
     misplaced_class_number = serializers.SerializerMethodField()
+    class_slot_number = serializers.CharField(source='class_number', read_only=True)
+    class_slot_level = serializers.CharField(source='class_level', read_only=True)
+    class_slot_day = serializers.CharField(source='class_day', read_only=True)
+    class_slot_time = serializers.CharField(source='class_time', read_only=True)
+    class_slot_teacher = serializers.CharField(source='class_teacher', read_only=True)
 
     def get_misplaced_class_number(self, obj):
         return obj.misplaced_from_slot.number if obj.misplaced_from_slot_id else None
@@ -130,6 +135,8 @@ class UnregisteredStudentSerializer(serializers.ModelSerializer):
         model = UnregisteredStudent
         fields = [
             'id', 'first_name', 'last_name', 'class_level', 'national_code', 'phone', 'tuition_price',
+            'class_slot', 'class_number', 'class_teacher', 'class_time', 'class_day',
+            'class_slot_number', 'class_slot_level', 'class_slot_day', 'class_slot_time', 'class_slot_teacher',
             'status', 'status_display', 'registered_at', 'registered_at_jalali',
             'followup_count', 'last_followup_at_jalali', 'latest_level', 'followups',
             'submitted_by_name', 'term', 'term_title', 'claims_registered', 'claim_reviewed',

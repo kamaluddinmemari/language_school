@@ -242,6 +242,11 @@ class UnregisteredStudentListView(generics.ListCreateAPIView):
             if not picked_slot:
                 return Response({'error': 'کلاس انتخاب‌شده پیدا نشد'}, status=status.HTTP_400_BAD_REQUEST)
             data['class_level'] = picked_slot.assigned_level or data.get('class_level') or ''
+            data['class_slot'] = picked_slot.pk
+            data['class_number'] = str(picked_slot.number or '')
+            data['class_teacher'] = picked_slot.teacher_name or ''
+            data['class_time'] = picked_slot.time_slot or ''
+            data['class_day'] = picked_slot.get_day_type_display() or picked_slot.day_type or ''
             if not data.get('term') and picked_slot.term_id:
                 data['term'] = picked_slot.term_id
         if not str(data.get('class_level') or '').strip():
@@ -249,6 +254,9 @@ class UnregisteredStudentListView(generics.ListCreateAPIView):
         data['phone'] = str(data.get('phone') or '').strip()
         data['national_code'] = str(data.get('national_code') or '').strip()
         term = data.get('term') or get_current_term()
+        if term is not None and not hasattr(term, 'pk'):
+            from class_management.models import Term as _Term
+            term = _Term.objects.filter(pk=term).first()
         data['term'] = getattr(term, 'pk', term) if term else None
         identity = build_identity_key(data.get('national_code'), data.get('phone'), data.get('first_name'), data.get('last_name'), data.get('class_level'))
         person_prefix = build_person_key(data.get('national_code'), data.get('phone'), data.get('first_name'), data.get('last_name')) + '|level:'
@@ -597,6 +605,9 @@ class DebtorListView(generics.ListCreateAPIView):
             data['debt_amount'] = _tuition_for_level(data.get('class_level'))
         data['phone'] = str(data.get('phone') or '').strip()
         term = data.get('term') or get_current_term()
+        if term is not None and not hasattr(term, 'pk'):
+            from class_management.models import Term as _Term
+            term = _Term.objects.filter(pk=term).first()
         data['term'] = getattr(term, 'pk', term) if term else None
         identity = build_identity_key('', data.get('phone'), data.get('first_name'), data.get('last_name'))
         warning = duplicate_warning(Debtor.objects, identity, term)
