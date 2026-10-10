@@ -39,7 +39,7 @@ from level_tests.models import LevelTest
 from accounts.menu_permissions import can_edit_menu, can_view_menu
 from .allocation import allocate_classes
 from .carryover import create_awaiting_debtor, finalize_registration, register_student_in_slot, gray_enrollments
-from .attendance import DEFAULT_SESSION_COUNT, jalali_date, roster_attendance_payload, session_dates_for_slot, term_holiday_warnings_for_slot
+from .attendance import DEFAULT_SESSION_COUNT, jalali_date, roster_attendance_payload, session_date_and_sub, session_dates_for_slot, term_holiday_warnings_for_slot
 
 # منسوخ — از تنظیمات دسترسی (accounts.menu_permissions.can_edit_menu) جایگزین شد.
 # فقط برای مرجع/سازگاری با کد قدیمی نگه داشته شده؛ جایی از این فایل استفاده نمی‌شود.
@@ -3902,11 +3902,10 @@ def _save_roster_attendance(slot, student_id, session_number, attendance_status,
     ).exists():
         raise ValueError('دانش‌آموز در فهرست ثبت‌نام‌های تاییدشدهٔ این کلاس نیست')
 
-    dates = session_dates_for_slot(slot)
-    if len(dates) < session_number:
+    class_date, sub = session_date_and_sub(slot, session_number)
+    if class_date is None:
         raise ValueError('تاریخ خودکار این جلسه برای کلاس قابل محاسبه نیست؛ تاریخ ترم و روز برگزاری را بررسی کنید')
-    class_date = dates[session_number - 1]
-    lookup = {'class_slot': slot, 'student_id': student_id, 'date': class_date}
+    lookup = {'class_slot': slot, 'student_id': student_id, 'date': class_date, 'session_in_day': sub}
 
     if attendance_status == 'unmarked':
         ClassAttendance.objects.filter(**lookup).delete()

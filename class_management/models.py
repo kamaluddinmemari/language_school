@@ -577,6 +577,8 @@ class ClassAttendance(models.Model):
     class_slot = models.ForeignKey(ClassSlot, null=True, blank=True, on_delete=models.CASCADE, related_name='attendances')
     online_course = models.ForeignKey('OnlineCourse', null=True, blank=True, on_delete=models.CASCADE, related_name='attendances')
     student = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='class_attendances')
+    # کلاس‌های یک‌روز در هفته هر روز ۳ جلسه دارند؛ شمارهٔ جلسه در همان روز (۱ تا ۳). سایر کلاس‌ها همیشه ۱.
+    session_in_day = models.PositiveSmallIntegerField(default=1)
     date = models.DateField(default=timezone.now, help_text='تاریخ جلسه (میلادی ذخیره می‌شود؛ شمسی نمایش داده می‌شود)')
     # این فیلد برای سازگاری APIهای قدیمی باقی مانده و از روی status همگام می‌شود.
     is_present = models.BooleanField(default=True)
@@ -589,7 +591,7 @@ class ClassAttendance(models.Model):
     class Meta:
         ordering = ['-date']
         constraints = [
-            models.UniqueConstraint(fields=['class_slot', 'student', 'date'], name='unique_attendance_slot_per_day'),
+            models.UniqueConstraint(fields=['class_slot', 'student', 'date', 'session_in_day'], name='unique_attendance_slot_per_day'),
             models.UniqueConstraint(fields=['online_course', 'student', 'date'], name='unique_attendance_course_per_day'),
         ]
 

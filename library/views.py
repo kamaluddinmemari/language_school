@@ -9,6 +9,7 @@ import jdatetime
 from .models import Book, BookSale, BookStockAddition, BookShortcut
 from .serializers import BookShortcutSerializer, BookSerializer, BookSaleSerializer, SellBookSerializer, AddBookStockSerializer, BookStockAdditionSerializer
 from accounts.menu_permissions import can_edit_menu
+from . import forecast as fc
 
 # منسوخ — از تنظیمات دسترسی (accounts.menu_permissions.can_edit_menu) جایگزین شد.
 MANAGE_ROLES = ('admin', 'evaluator', 'office')
@@ -167,10 +168,12 @@ class LibraryStatsView(APIView):
             additions_qs = additions_qs.filter(added_at__date__lte=date_to)
 
         books = Book.objects.all()
+        forecast_ctx = fc.build_context(request.query_params.get('forecast_term'))
+        ser_ctx = {'request': request, 'forecast': forecast_ctx}
         total_titles = books.count()
         total_stock = sum(b.current_stock for b in books)
         total_stock_value = sum(b.stock_value for b in books)
-        total_predicted_need = sum(b.predicted_need for b in books)
+        total_predicted_need = 0
 
         books_data = []
         period_sales_quantity = 0
@@ -197,7 +200,8 @@ class LibraryStatsView(APIView):
             period_cost_of_goods_sold += b_cogs
             period_profit += b_profit
 
-            data = BookSerializer(b).data
+            data = BookSerializer(b, context=ser_ctx).data
+            total_predicted_need += data['order_needed']
             data['period_sales_quantity'] = b_sales_qty
             data['period_sales_revenue'] = b_sales_rev
             data['period_stock_added'] = b_added_qty
@@ -216,6 +220,9 @@ class LibraryStatsView(APIView):
             'total_stock': total_stock,
             'total_stock_value': total_stock_value,
             'total_predicted_need': total_predicted_need,
+            'forecast_mode': forecast_ctx.get('mode'),
+            'forecast_term': {'id': forecast_ctx['term'].id, 'title': forecast_ctx['term'].title} if forecast_ctx['term'] else None,
+            'terms': [{'id': t.id, 'title': t.title, 'is_latest': i == len(forecast_ctx['terms']) - 1} for i, t in enumerate(forecast_ctx['terms'])][::-1],
             # آمار درون‌بازه‌ای (اگه تاریخ داده نشه، یعنی از ابتدا تا الان = همون آمار کلی سابق)
             'period_sales_quantity': period_sales_quantity,
             'period_sales_revenue': period_sales_revenue,

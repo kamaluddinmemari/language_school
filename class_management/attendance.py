@@ -124,6 +124,15 @@ def attendance_session_dates_for_slot(slot, session_count=DEFAULT_SESSION_COUNT)
     return expanded[:session_count]
 
 
+def session_date_and_sub(slot, session_number, session_count=DEFAULT_SESSION_COUNT):
+    """(تاریخ جلسه، شمارهٔ جلسه در همان روز) برای شمارهٔ جلسهٔ ۱ تا ۱۵. کلاس‌های یک‌روزه سه جلسه در هر تاریخ دارند."""
+    dates = attendance_session_dates_for_slot(slot, session_count=session_count)
+    if session_number < 1 or session_number > len(dates):
+        return None, None
+    date_value = dates[session_number - 1]
+    return date_value, dates[:session_number - 1].count(date_value) + 1
+
+
 def jalali_date(date_value):
     """نمایش تاریخ میلادیِ ذخیره‌شده به قالب شمسی ثابت برای پنل و چاپ."""
     return jdatetime.date.fromgregorian(date=date_value).strftime('%Y/%m/%d') if date_value else ''
@@ -164,7 +173,10 @@ def roster_attendance_payload(slot, session_count=DEFAULT_SESSION_COUNT):
             'absence' if event.event_type == TeacherSessionEvent.EventType.ABSENCE else
             'makeup'
         )
+    seen_per_date = {}
     for item in sessions:
+        seen_per_date[item['date']] = seen_per_date.get(item['date'], 0) + 1
+        item['session_in_day'] = seen_per_date[item['date']]
         item['event_status'] = event_status_by_session.get((item['session_number'], item['date']), '')
         item['is_past'] = item['date'] < timezone.localdate().isoformat()
     enrolled = list(
@@ -188,7 +200,7 @@ def roster_attendance_payload(slot, session_count=DEFAULT_SESSION_COUNT):
             date__in=[item['date'] for item in sessions],
         )
         for row in attendance_rows:
-            attendance_by_student.setdefault(row.student_id, {})[row.date.isoformat()] = row
+            attendance_by_student.setdefault(row.student_id, {})[(row.date.isoformat(), row.session_in_day)] = row
 
     roster = []
     for enrollment in enrolled:
@@ -200,7 +212,7 @@ def roster_attendance_payload(slot, session_count=DEFAULT_SESSION_COUNT):
         )
         rows = []
         for item in sessions:
-            record = attendance_by_student.get(student.id, {}).get(item['date'])
+            record = attendance_by_student.get(student.id, {}).get((item['date'], item['session_in_day']))
             rows.append({
                 'session_number': item['session_number'],
                 'date': item['date'],

@@ -1,11 +1,21 @@
 from rest_framework import serializers
 from .models import Book, BookSale, BookStockAddition, BookShortcut
+from . import forecast as fc
 
 
 class BookSerializer(serializers.ModelSerializer):
     category_display = serializers.CharField(source='get_category_display', read_only=True)
     stock_value = serializers.ReadOnlyField()
-    predicted_need = serializers.ReadOnlyField()
+    predicted_students = serializers.SerializerMethodField()
+    predicted_need = serializers.SerializerMethodField()
+    forecast_auto = serializers.SerializerMethodField()
+    forecast_levels_effective = serializers.SerializerMethodField()
+    forecast_levels_default = serializers.SerializerMethodField()
+    forecast_term_id = serializers.SerializerMethodField()
+    forecast_term_title = serializers.SerializerMethodField()
+    forecast_text = serializers.SerializerMethodField()
+    predicted_is_manual = serializers.SerializerMethodField()
+    order_needed = serializers.SerializerMethodField()
     total_sales_quantity = serializers.ReadOnlyField()
     total_sales_revenue = serializers.ReadOnlyField()
     total_stock_added = serializers.ReadOnlyField()
@@ -20,12 +30,76 @@ class BookSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'title', 'category', 'category_display',
             'initial_stock', 'current_stock', 'predicted_students', 'predicted_need',
+            'predicted_override', 'extra_copies', 'forecast_levels', 'forecast_levels_effective', 'forecast_levels_default',
+            'forecast_auto', 'forecast_term_id', 'forecast_term_title', 'forecast_text',
+            'predicted_is_manual', 'order_needed',
             'unit_price', 'purchase_price', 'stock_value',
             'total_sales_quantity', 'total_sales_revenue',
             'total_stock_added', 'total_units_acquired', 'total_cost', 'cost_of_goods_sold', 'total_profit',
             'created_at', 'updated_at', 'updated_at_jalali',
         ]
         read_only_fields = ['created_at', 'updated_at']
+
+    def _fc(self, obj):
+        # یک‌بار برای کل درخواست ساخته می‌شود (context مشترک بین همه‌ی کتاب‌ها)
+        ctx = self.context.get('forecast')
+        if ctx is None:
+            request = self.context.get('request')
+            term_id = request.query_params.get('forecast_term') if request is not None else None
+            ctx = fc.build_context(term_id)
+            self.context['forecast'] = ctx
+        cache = ctx.setdefault('_books', {})
+        if obj.pk not in cache or cache[obj.pk][2] != (obj.forecast_levels, obj.title):
+            auto, levels = fc.forecast_for_book(obj, ctx)
+            cache[obj.pk] = (auto, levels, (obj.forecast_levels, obj.title))
+        return ctx, cache[obj.pk][0], cache[obj.pk][1]
+
+    def _effective(self, obj):
+        _ctx, auto, _levels = self._fc(obj)
+        if obj.predicted_override is not None:
+            return obj.predicted_override
+        return auto if auto is not None else 0
+
+    def get_predicted_students(self, obj):
+        return self._effective(obj)
+
+    def get_order_needed(self, obj):
+        return max(0, self._effective(obj) + int(obj.extra_copies or 0) - int(obj.current_stock or 0))
+
+    def get_predicted_need(self, obj):
+        return self.get_order_needed(obj)
+
+    def get_forecast_auto(self, obj):
+        return self._fc(obj)[1]
+
+    def get_forecast_levels_effective(self, obj):
+        return self._fc(obj)[2]
+
+    def get_forecast_levels_default(self, obj):
+        return fc.default_levels_for_title(obj.title)
+
+    def get_forecast_term_id(self, obj):
+        term = self._fc(obj)[0].get('term')
+        return term.id if term else None
+
+    def get_forecast_term_title(self, obj):
+        term = self._fc(obj)[0].get('term')
+        return term.title if term else ''
+
+    def get_predicted_is_manual(self, obj):
+        return obj.predicted_override is not None
+
+    def get_forecast_text(self, obj):
+        ctx, auto, levels = self._fc(obj)
+        term = ctx.get('term')
+        if auto is None or not term:
+            return 'برای این کتاب سطحی برای پیش‌بینی خودکار تعریف نشده است؛ عدد را دستی وارد کنید.'
+        if ctx.get('mode') == 'deposit':
+            return f"طبق بیعانه‌های ثبت‌شده ({term.title}، سطح {'، '.join(levels)})، {auto} نفر زبان‌آموز ترم بعد داریم"
+        return f"طبق محاسبات {term.title} (سطح {'، '.join(levels)})، {auto} نفر زبان‌آموز ترم بعد داریم"
+
+    def validate_forecast_levels(self, value):
+        return ','.join(fc.parse_levels(value))
 
 
 class BookSaleSerializer(serializers.ModelSerializer):

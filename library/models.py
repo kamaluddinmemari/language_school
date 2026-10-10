@@ -31,6 +31,10 @@ class Book(models.Model):
     initial_stock = models.PositiveIntegerField(default=0, help_text='موجودی اولیه‌ی ثبت‌شده (سابقه)')
     current_stock = models.IntegerField(default=0, help_text='موجودی فعلی — با فروش کم می‌شود')
     predicted_students = models.PositiveIntegerField(default=0, help_text='پیش‌بینی تعداد زبان‌آموزان نیازمند این کتاب در آینده')
+    # پیش‌بینی خودکار (library/forecast.py): اگر predicted_override خالی باشد، عدد خودکار از ثبت‌نام‌های ترم ملاک ملاک است.
+    predicted_override = models.PositiveIntegerField(null=True, blank=True, help_text='تعداد دستیِ زبان‌آموز ترم بعد؛ خالی = محاسبه‌ی خودکار')
+    extra_copies = models.PositiveIntegerField(default=2, help_text='تعداد اضافه‌ی احتیاطی که علاوه بر کسری سفارش داده می‌شود')
+    forecast_levels = models.CharField(max_length=200, blank=True, default='', help_text='سطح‌های ملاک پیش‌بینی با کاما (مثلاً 101,106)؛ خالی = تشخیص خودکار از عنوان کتاب')
     unit_price = models.PositiveIntegerField(default=0, help_text='قیمت فروش هر جلد (تومان)')
     purchase_price = models.PositiveIntegerField(default=0, help_text='قیمت خرید هر جلد (تومان) — برای محاسبه‌ی هزینه/درآمد/سود')
 
@@ -152,3 +156,38 @@ class BookShortcut(models.Model):
 
     def __str__(self):
         return self.label or self.book.title
+
+
+class LibrarySetting(models.Model):
+    """تنظیمات مشترک کتابخانه (یک ردیف): روش محاسبه‌ی تعداد زبان‌آموز ترم بعد برای سفارش کتاب و مبلغ پیش‌فرض بیعانه."""
+
+    class ForecastMode(models.TextChoices):
+        REGISTERED = 'registered', 'همه‌ی ثبت‌نام‌شده‌های ترم ملاک (روش قبلی)'
+        DEPOSIT = 'deposit', 'فقط افراد بیعانه‌داده (پیش‌ثبت‌نام)'
+
+    forecast_mode = models.CharField(max_length=12, choices=ForecastMode.choices, default=ForecastMode.REGISTERED)
+    default_deposit_amount = models.PositiveIntegerField(default=0, help_text='مبلغ پیش‌فرض بیعانه (تومان)')
+
+    @classmethod
+    def get(cls):
+        obj, _created = cls.objects.get_or_create(pk=1)
+        return obj
+
+
+class BookDeposit(models.Model):
+    """بیعانه / پیش‌ثبت‌نامِ یک زبان‌آموز برای ترم بعد — مبنای محاسبه‌ی سفارش کتاب در حالت «بیعانه»."""
+    student = models.ForeignKey(User, on_delete=models.CASCADE, related_name='book_deposits')
+    term = models.ForeignKey('class_management.Term', on_delete=models.CASCADE, related_name='+', help_text='ترم ملاک که زبان‌آموز در آن ثبت‌نام است')
+    amount = models.PositiveIntegerField(default=0, help_text='مبلغ بیعانه (تومان)')
+    paid = models.BooleanField(default=False, help_text='بیعانه داده است')
+    note = models.CharField(max_length=200, blank=True)
+    updated_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-updated_at']
+        constraints = [models.UniqueConstraint(fields=['student', 'term'], name='uniq_book_deposit_student_term')]
+
+    def __str__(self):
+        return f"بیعانه {self.student_id} — {self.amount}"

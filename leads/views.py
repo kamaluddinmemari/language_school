@@ -31,6 +31,26 @@ def duplicate_warning(queryset, identity_key, term):
 # لیست انتظار ورودی‌های جدید — فقط مدیر
 # ---------------------------------------------------------------------------
 
+ARCHIVE_KEEP_DAYS = 5
+
+
+def purge_old_archives():
+    """
+    بدهکارِ تسویه‌شده و فرد ثبت‌نام‌شده فقط ۵ روز (از زمان تسویه/ثبت‌نام) در بایگانی می‌ماند و بعد خودکار حذف می‌شود.
+    هر بار که فهرست‌ها باز می‌شوند اجرا می‌شود (بدون نیاز به زمان‌بند).
+    """
+    from datetime import timedelta
+    from django.db.models import Q
+    cutoff = timezone.now() - timedelta(days=ARCHIVE_KEEP_DAYS)
+    Debtor.objects.filter(status=Debtor.Status.SETTLED).filter(
+        Q(settled_at__lt=cutoff) | Q(settled_at__isnull=True, updated_at__lt=cutoff)
+    ).delete()
+    UnregisteredStudent.objects.filter(status=UnregisteredStudent.Status.REGISTERED).filter(
+        Q(registered_at__lt=cutoff) | Q(registered_at__isnull=True, updated_at__lt=cutoff)
+    ).delete()
+
+
+
 class NewLeadListView(generics.ListCreateAPIView):
     permission_classes = [IsAuthenticated]
     serializer_class = NewLeadSerializer
@@ -206,6 +226,7 @@ class UnregisteredStudentListView(generics.ListCreateAPIView):
     def get_queryset(self):
         if not can_edit_menu(self.request.user, "followups"):
             return UnregisteredStudent.objects.none()
+        purge_old_archives()
         qs = UnregisteredStudent.objects.all()
         term_id = self.request.query_params.get('term_id')
         if term_id:
@@ -242,11 +263,6 @@ class UnregisteredStudentListView(generics.ListCreateAPIView):
             if not picked_slot:
                 return Response({'error': 'کلاس انتخاب‌شده پیدا نشد'}, status=status.HTTP_400_BAD_REQUEST)
             data['class_level'] = picked_slot.assigned_level or data.get('class_level') or ''
-            data['class_slot'] = picked_slot.pk
-            data['class_number'] = str(picked_slot.number or '')
-            data['class_teacher'] = picked_slot.teacher_name or ''
-            data['class_time'] = picked_slot.time_slot or ''
-            data['class_day'] = picked_slot.get_day_type_display() or picked_slot.day_type or ''
             if not data.get('term') and picked_slot.term_id:
                 data['term'] = picked_slot.term_id
         if not str(data.get('class_level') or '').strip():
@@ -562,6 +578,7 @@ class DebtorListView(generics.ListCreateAPIView):
     def get_queryset(self):
         if not can_edit_menu(self.request.user, "followups"):
             return Debtor.objects.none()
+        purge_old_archives()
         qs = Debtor.objects.all()
         term_id = self.request.query_params.get('term_id')
         if term_id:

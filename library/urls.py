@@ -11,6 +11,8 @@ from .views import (
     BookShortcutDetailView,
 )
 
+from .deposits import LibrarySettingView, BookDepositListView, BookDepositSaveView
+
 urlpatterns = [
     path('library/books/', BookListView.as_view(), name='book_list'),
     path('library/books/sale-prices/', BookSalesPriceListView.as_view(), name='book_sale_prices'),
@@ -18,6 +20,9 @@ urlpatterns = [
     path('library/books/<int:pk>/sell/', SellBookView.as_view(), name='book_sell'),
     path('library/books/<int:pk>/add-stock/', AddBookStockView.as_view(), name='book_add_stock'),
     path('library/books/<int:pk>/sales/', BookSalesHistoryView.as_view(), name='book_sales_history'),
+    path('library/settings/', LibrarySettingView.as_view(), name='library_settings'),
+    path('library/deposits/', BookDepositListView.as_view(), name='library_deposits'),
+    path('library/deposits/save/', BookDepositSaveView.as_view(), name='library_deposits_save'),
     path('library/stats/', LibraryStatsView.as_view(), name='library_stats'),
     path('library/shortcuts/', BookShortcutListView.as_view(), name='book_shortcuts'),
     path('library/shortcuts/<int:pk>/', BookShortcutDetailView.as_view(), name='book_shortcut_detail'),
