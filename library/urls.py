@@ -6,6 +6,7 @@ from .views import (
     AddBookStockView,
     BookSalesHistoryView,
     BookSalesPriceListView,
+    BookReorderView,
     LibraryStatsView,
     BookShortcutListView,
     BookShortcutDetailView,
@@ -15,6 +16,7 @@ from .deposits import LibrarySettingView, BookDepositListView, BookDepositSaveVi
 
 urlpatterns = [
     path('library/books/', BookListView.as_view(), name='book_list'),
+    path('library/books/reorder/', BookReorderView.as_view(), name='book_reorder'),
     path('library/books/sale-prices/', BookSalesPriceListView.as_view(), name='book_sale_prices'),
     path('library/books/<int:pk>/', BookDetailView.as_view(), name='book_detail'),
     path('library/books/<int:pk>/sell/', SellBookView.as_view(), name='book_sell'),

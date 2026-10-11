@@ -882,3 +882,21 @@ class TeacherCompensationSetting(models.Model):
             return 0
         daily = float(self.insurance_base_monthly) / 30
         return round(daily * int(self.insurance_days_per_term) * float(self.insurance_rate_percent) / 100)
+
+
+
+# ── حذف خودکار از لیست «ثبت‌نام‌نشده‌ها» وقتی فرد به هر روش ثبت‌نام می‌شود ──
+from django.db.models.signals import post_save as _post_save
+from django.dispatch import receiver as _receiver
+
+
+@_receiver(_post_save, sender=ClassSlotEnrollment)
+def _auto_clear_unregistered(sender, instance, **kwargs):
+    if instance.is_carryover or not instance.payment_verified:
+        return
+    try:
+        from leads.models import auto_mark_unregistered_registered
+        auto_mark_unregistered_registered(instance.student, instance.class_slot.term_id, instance.class_slot_id)
+    except Exception:  # هرگز نباید ثبت‌نام را خراب کند
+        import logging
+        logging.getLogger(__name__).exception('auto_mark_unregistered_registered failed')

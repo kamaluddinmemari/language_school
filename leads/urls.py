@@ -5,7 +5,8 @@ from .views import (
     UnregisteredStudentFollowupView, UnregisteredStudentRegisterView, UnregisteredStudentRegisterOptionsView, UnregisteredStudentStatsView,
     DropoutStudentListView, DropoutStudentFollowupView,
     DebtorListView, DebtorDetailView, DebtorFollowupView, DebtorSettleView, DebtorRegisterOptionsView, DebtorStatsView,
-    DiscountedPersonListView, DiscountedPersonDetailView,
+    DiscountedPersonListView, DiscountedPersonDetailView, FollowupStaffListView,
+    UnregisteredMoveOptionsView, UnregisteredMoveView,
 )
 
 urlpatterns = [
@@ -18,6 +19,8 @@ urlpatterns = [
     path('leads/unregistered-students/<int:pk>/followup/', UnregisteredStudentFollowupView.as_view(), name='unregistered_student_followup'),
     path('leads/unregistered-students/<int:pk>/register/', UnregisteredStudentRegisterView.as_view(), name='unregistered_student_register'),
     path('leads/unregistered-students/<int:pk>/register-options/', UnregisteredStudentRegisterOptionsView.as_view(), name='unregistered_student_register_options'),
+    path('leads/unregistered-students/<int:pk>/move-options/', UnregisteredMoveOptionsView.as_view(), name='unregistered_student_move_options'),
+    path('leads/unregistered-students/<int:pk>/move/', UnregisteredMoveView.as_view(), name='unregistered_student_move'),
     path('leads/unregistered-students/stats/', UnregisteredStudentStatsView.as_view(), name='unregistered_student_stats'),
     path('leads/dropout-students/', DropoutStudentListView.as_view(), name='dropout_student_list'),
     path('leads/dropout-students/<int:student_id>/followup/', DropoutStudentFollowupView.as_view(), name='dropout_student_followup'),
@@ -29,6 +32,7 @@ urlpatterns = [
     path('leads/debtors/<int:pk>/register-options/', DebtorRegisterOptionsView.as_view(), name='debtor_register_options'),
     path('leads/debtors/stats/', DebtorStatsView.as_view(), name='debtor_stats'),
 
+    path('leads/followup-staff/', FollowupStaffListView.as_view(), name='followup_staff_list'),
     path('leads/discounts/', DiscountedPersonListView.as_view(), name='discounted_person_list'),
     path('leads/discounts/<int:pk>/', DiscountedPersonDetailView.as_view(), name='discounted_person_detail'),
 ]

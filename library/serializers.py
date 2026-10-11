@@ -32,7 +32,7 @@ class BookSerializer(serializers.ModelSerializer):
             'initial_stock', 'current_stock', 'predicted_students', 'predicted_need',
             'predicted_override', 'extra_copies', 'forecast_levels', 'forecast_levels_effective', 'forecast_levels_default',
             'forecast_auto', 'forecast_term_id', 'forecast_term_title', 'forecast_text',
-            'predicted_is_manual', 'order_needed',
+            'predicted_is_manual', 'order_needed', 'sort_order',
             'unit_price', 'purchase_price', 'stock_value',
             'total_sales_quantity', 'total_sales_revenue',
             'total_stock_added', 'total_units_acquired', 'total_cost', 'cost_of_goods_sold', 'total_profit',

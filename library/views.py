@@ -55,6 +55,21 @@ class BookDetailView(generics.RetrieveUpdateDestroyAPIView):
         return super().destroy(request, *args, **kwargs)
 
 
+class BookReorderView(APIView):
+    """POST {ids:[...]}: ترتیب دلخواه کتاب‌ها (ترتیب همین فهرست ذخیره می‌شود)."""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        if not can_edit_menu(request.user, 'library'):
+            return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
+        ids = request.data.get('ids')
+        if not isinstance(ids, list):
+            return Response({'error': 'ids الزامی است'}, status=status.HTTP_400_BAD_REQUEST)
+        for position, book_id in enumerate(ids, start=1):
+            Book.objects.filter(pk=book_id).update(sort_order=position)
+        return Response({'ok': True})
+
+
 class BookSalesPriceListView(APIView):
     """GET: داده‌ی فشرده‌ی جدول «قیمت فروش کتاب‌ها» برای نمایش سریع در پنل."""
     permission_classes = [IsAuthenticated]
@@ -221,6 +236,7 @@ class LibraryStatsView(APIView):
             'total_stock_value': total_stock_value,
             'total_predicted_need': total_predicted_need,
             'forecast_mode': forecast_ctx.get('mode'),
+            'available_levels': fc.available_levels(forecast_ctx['term']),
             'forecast_term': {'id': forecast_ctx['term'].id, 'title': forecast_ctx['term'].title} if forecast_ctx['term'] else None,
             'terms': [{'id': t.id, 'title': t.title, 'is_latest': i == len(forecast_ctx['terms']) - 1} for i, t in enumerate(forecast_ctx['terms'])][::-1],
             # آمار درون‌بازه‌ای (اگه تاریخ داده نشه، یعنی از ابتدا تا الان = همون آمار کلی سابق)

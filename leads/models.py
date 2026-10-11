@@ -60,6 +60,43 @@ def build_identity_key(national_code, phone, first_name, last_name, level=''):
     return f'{person}|level:{normalized_level}' if normalized_level else person
 
 
+def auto_mark_unregistered_registered(student, term_id=None, slot_id=None):
+    """
+    اگر دانش‌آموز (به هر روش) در کلاسی ثبت‌نام شد، ردیف «ثبت‌نام‌نشده»ِ در حال پیگیریِ او
+    (هم‌ترم؛ مطابقت با کد ملی، موبایل یا نام و نام‌خانوادگی) خودکار «ثبت‌نام شد» می‌شود
+    تا از لیست ثبت‌نام‌نشده‌ها خارج شود.
+    """
+    from django.db.models import Q
+    q = Q()
+    national = (getattr(student, 'national_code', '') or '').strip()
+    phone = (getattr(student, 'phone', '') or '').strip()
+    first = (getattr(student, 'first_name', '') or '').strip()
+    last = (getattr(student, 'last_name', '') or '').strip()
+    if national:
+        q |= Q(national_code=national)
+    if phone:
+        q |= Q(phone=phone)
+    if first and last:
+        q |= Q(first_name=first, last_name=last)
+    if not q:
+        return 0
+    rows = UnregisteredStudent.objects.filter(q, status=UnregisteredStudent.Status.TRACKING)
+    if slot_id:
+        # فردِ «در کلاس درست ثبت‌نام نشده» با ثبت‌نامِ فعلی‌اش در همان کلاسِ اشتباه حل‌شده حساب نمی‌شود
+        rows = rows.exclude(is_misplaced=True, misplaced_from_slot_id=slot_id)
+    if term_id:
+        rows = rows.filter(Q(term_id=term_id) | Q(term__isnull=True))
+    count = 0
+    for row in rows:
+        row.status = UnregisteredStudent.Status.REGISTERED
+        row.registered_at = timezone.now()
+        if term_id and not row.term_id:
+            row.term_id = term_id
+        row.save()
+        count += 1
+    return count
+
+
 def get_current_term():
     """
     ترمی که تاریخ امروز داخل بازه‌ی start_date/end_date آن است؛ اگر هیچ ترمی امروز را
@@ -206,16 +243,12 @@ class UnregisteredStudent(models.Model):
     class_level = models.CharField(max_length=50)
     national_code = models.CharField(max_length=20, blank=True)
     phone = models.CharField(max_length=20, blank=True)
-    class_slot = models.ForeignKey(
-        'class_management.ClassSlot', on_delete=models.SET_NULL, null=True, blank=True,
-        related_name='unregistered_students', help_text='کلاسی که فرد برای آن ثبت شده است',
-    )
-    class_number = models.CharField(max_length=30, blank=True, default='')
-    class_teacher = models.CharField(max_length=150, blank=True, default='')
-    class_time = models.CharField(max_length=30, blank=True, default='')
-    class_day = models.CharField(max_length=100, blank=True, default='')
     identity_key = models.CharField(max_length=255, blank=True, default='', editable=False)
     tuition_price = models.PositiveIntegerField(null=True, blank=True, help_text='قیمت شهریه‌ی پیشنهادی')
+    gender = models.CharField(
+        max_length=10, blank=True, default='',
+        help_text='جنسیت فرد (male/female) — خودکار از جنسیت کلاسی که در آن قرار دارد؛ خالی = نامشخص (کلاس مختلط)',
+    )
 
     status = models.CharField(max_length=10, choices=Status.choices, default=Status.TRACKING)
     registered_at = models.DateTimeField(null=True, blank=True)
@@ -243,6 +276,10 @@ class UnregisteredStudent(models.Model):
     )
 
     submitted_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='submitted_unregistered_students')
+    assigned_to = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True, blank=True, related_name='assigned_unregistered_students',
+        help_text='کارمندی که پیگیری این فرد به او سپرده شده است',
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -348,6 +385,10 @@ class Debtor(models.Model):
         help_text='کلاس ترم جدیدی که اسم فرد در آن به‌صورت خاکستری آمده است',
     )
 
+    assigned_to = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True, blank=True, related_name='assigned_debtors',
+        help_text='کارمندی که پیگیری این بدهکار به او سپرده شده است',
+    )
     created_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

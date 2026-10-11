@@ -35,6 +35,7 @@ class Book(models.Model):
     predicted_override = models.PositiveIntegerField(null=True, blank=True, help_text='تعداد دستیِ زبان‌آموز ترم بعد؛ خالی = محاسبه‌ی خودکار')
     extra_copies = models.PositiveIntegerField(default=2, help_text='تعداد اضافه‌ی احتیاطی که علاوه بر کسری سفارش داده می‌شود')
     forecast_levels = models.CharField(max_length=200, blank=True, default='', help_text='سطح‌های ملاک پیش‌بینی با کاما (مثلاً 101,106)؛ خالی = تشخیص خودکار از عنوان کتاب')
+    sort_order = models.PositiveIntegerField(default=0, help_text='ترتیب دلخواه نمایش کتاب‌ها (کمتر = بالاتر)')
     unit_price = models.PositiveIntegerField(default=0, help_text='قیمت فروش هر جلد (تومان)')
     purchase_price = models.PositiveIntegerField(default=0, help_text='قیمت خرید هر جلد (تومان) — برای محاسبه‌ی هزینه/درآمد/سود')
 
@@ -42,7 +43,7 @@ class Book(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
-        ordering = ['category', 'title']
+        ordering = ['sort_order', 'category', 'title']
 
     @property
     def stock_value(self):

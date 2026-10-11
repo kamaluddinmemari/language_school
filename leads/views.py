@@ -263,6 +263,8 @@ class UnregisteredStudentListView(generics.ListCreateAPIView):
             if not picked_slot:
                 return Response({'error': 'کلاس انتخاب‌شده پیدا نشد'}, status=status.HTTP_400_BAD_REQUEST)
             data['class_level'] = picked_slot.assigned_level or data.get('class_level') or ''
+            # جنسیت خودکار از نوع کلاس (دخترانه/پسرانه)؛ کلاس مختلط = نامشخص
+            data['gender'] = {'girls': 'female', 'boys': 'male'}.get(picked_slot.gender, '')
             if not data.get('term') and picked_slot.term_id:
                 data['term'] = picked_slot.term_id
         if not str(data.get('class_level') or '').strip():
@@ -304,11 +306,18 @@ class UnregisteredStudentListView(generics.ListCreateAPIView):
         serializer = self.get_serializer(data=data)
         serializer.is_valid(raise_exception=True)
         lead = serializer.save(submitted_by=request.user, term=term)
-        sync_student_from_lead(
+        synced = sync_student_from_lead(
             first_name=lead.first_name, last_name=lead.last_name,
             phone=lead.phone, national_code=lead.national_code,
             language_level=lead.class_level,
         )
+        try:
+            user_obj = synced[0] if isinstance(synced, (tuple, list)) else synced
+            if lead.gender and user_obj is not None and not getattr(user_obj, 'gender', ''):
+                user_obj.gender = lead.gender
+                user_obj.save(update_fields=['gender'])
+        except Exception:
+            pass
         return Response(serializer.data, status=status.HTTP_201_CREATED)
 
 
@@ -384,11 +393,12 @@ class UnregisteredStudentRegisterOptionsView(APIView):
         term_id = getattr(term, 'pk', None)
         student = _resolve_unregistered_student(item, create=False)
         gray_slot_ids = [row.class_slot_id for row in gray_enrollments(student, term_id)] if (student and term_id) else []
-        level, classes = _register_class_options(term_id, student, item.class_level, gray_slot_ids)
+        level, classes = _register_class_options(term_id, student, item.class_level, gray_slot_ids, item.gender)
         return Response({
             'id': item.id, 'student_id': getattr(student, 'id', None),
             'student_name': f'{item.first_name} {item.last_name}', 'level': level,
             'term': term_id, 'term_title': getattr(term, 'title', ''),
+            'standard_level': _standard_level(student),
             'debt_amount': getattr(item, 'tuition_price', 0) or 0, 'has_gray_class': bool(gray_slot_ids),
             'classes': classes,
         })
@@ -422,6 +432,10 @@ class UnregisteredStudentRegisterView(APIView):
                 real_student = _resolve_unregistered_student(student, create=True)
                 if not real_student:
                     return Response({'error': 'ساخت/پیدا کردن پرونده‌ی دانش‌آموز ممکن نشد'}, status=status.HTTP_400_BAD_REQUEST)
+                person_gender = real_student.gender or student.gender
+                if not _slot_gender_ok(slot, person_gender):
+                    transaction.set_rollback(True)
+                    return Response({'error': 'جنسیت این فرد با کلاس انتخاب‌شده (دخترانه/پسرانه) مغایرت دارد؛ ثبت‌نام انجام نشد'}, status=status.HTTP_400_BAD_REQUEST)
                 payment_method = str(request.data.get('payment_method') or ClassSlotEnrollment.PaymentMethod.CASH)
                 if payment_method not in {v for v, _l in ClassSlotEnrollment.PaymentMethod.choices}:
                     return Response({'error': 'روش پرداخت نامعتبر است'}, status=status.HTTP_400_BAD_REQUEST)
@@ -643,6 +657,11 @@ class DebtorListView(generics.ListCreateAPIView):
         if student and not debtor.student_id:
             debtor.student = student
             debtor.save(update_fields=['student'])
+        if student and source_slot and not getattr(student, 'gender', ''):
+            slot_gender = {'girls': 'female', 'boys': 'male'}.get(source_slot.gender, '')
+            if slot_gender:
+                student.gender = slot_gender
+                student.save(update_fields=['gender'])
         return Response(DebtorSerializer(debtor).data, status=status.HTTP_201_CREATED)
 
 
@@ -699,7 +718,26 @@ def _resolve_debtor_student(debtor, create=False):
     return found
 
 
-def _register_class_options(term_id, student, level_hint, gray_slot_ids):
+def _slot_gender_ok(slot, gender):
+    """کلاس مختلط یا جنسیت نامشخص = مجاز؛ وگرنه جنسیت باید با کلاس بخواند."""
+    from class_management.models import ClassSlot
+    if not gender or slot.gender == ClassSlot.Gender.MIXED:
+        return True
+    return (slot.gender == ClassSlot.Gender.GIRLS and gender == 'female') or (slot.gender == ClassSlot.Gender.BOYS and gender == 'male')
+
+
+def _standard_level(student):
+    """سطح استاندارد (پیشنهادیِ سیستم) دانش‌آموز؛ اگر دانش‌آموز پرونده ندارد خالی."""
+    if not student:
+        return ''
+    try:
+        from class_management.views import _compute_level_suggestion
+        return _compute_level_suggestion(student).get('level') or ''
+    except Exception:
+        return ''
+
+
+def _register_class_options(term_id, student, level_hint, gray_slot_ids, gender_hint=''):
     """
     کلاس‌های پیشنهادی برای ثبت در کلاس: اول کلاس خاکستری (پیشنهاد اصلی)، بعد هم‌سطح و هم‌جنسیت.
     اگر سطح نامشخص باشد همه‌ی کلاس‌های هم‌جنسیت ترم نشان داده می‌شود (هیچ‌وقت خطای نبودن سطح نمی‌دهد).
@@ -719,7 +757,7 @@ def _register_class_options(term_id, student, level_hint, gray_slot_ids):
         level = (level_hint or '').strip()
     if not level and student:
         level = _compute_level_suggestion(student).get('level') or ''
-    gender = getattr(student, 'gender', '') if student else ''
+    gender = (getattr(student, 'gender', '') if student else '') or gender_hint or ''
 
     def gender_ok(slot):
         if slot.gender == ClassSlot.Gender.MIXED or not gender:
@@ -738,10 +776,22 @@ def _register_class_options(term_id, student, level_hint, gray_slot_ids):
         else:
             others.append(slot)
     rest = same_level if (target_level and (same_level or suggested)) else (same_level + others)
+    from class_management.models import TuitionSetting, infer_age_group_from_level
+    tuition_cache = {}
+
+    def slot_tuition(slot):
+        lvl = str(slot.assigned_level or '').strip()
+        if lvl not in tuition_cache:
+            age = infer_age_group_from_level(lvl) if lvl else ''
+            st = TuitionSetting.objects.filter(level=lvl, age_group=age).first() if lvl and age else None
+            tuition_cache[lvl] = st.amount if st else 0
+        return tuition_cache[lvl]
+
     classes = []
     for slot, tag in [(sl, 'suggested') for sl in suggested] + [(sl, 'other') for sl in rest]:
         item = ClassSlotSerializer(slot).data
         item['suggested'] = tag == 'suggested'
+        item['tuition_amount'] = slot_tuition(slot)
         item['suggestion_reason'] = 'اسم فرد در این کلاس به‌صورت «منتظر ثبت‌نام» (خاکستری) آمده است' if tag == 'suggested' else (
             'هم‌سطح و هم‌جنسیت' if target_level and _normalize_level(slot.assigned_level) == target_level else 'سطح فرد مشخص نیست / کلاس هم‌جنسیت'
         )
@@ -786,6 +836,7 @@ class DebtorRegisterOptionsView(APIView):
             'debtor_id': debtor.id, 'student_id': getattr(student, 'id', None),
             'student_name': f'{debtor.first_name} {debtor.last_name}', 'level': level,
             'term': term_id, 'term_title': getattr(term, 'title', ''),
+            'standard_level': _standard_level(student),
             'debt_amount': debtor.debt_amount, 'has_gray_class': bool(gray_slot_ids),
             'classes': classes,
         })
@@ -911,3 +962,163 @@ class DiscountedPersonDetailView(generics.RetrieveUpdateDestroyAPIView):
         if not can_edit_menu(request.user, "discounts"):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         return super().destroy(request, *args, **kwargs)
+
+
+class FollowupStaffListView(APIView):
+    """GET: فهرست کارمندان دفتر برای «ارجاع پیگیری» ثبت‌نام‌نشده‌ها و بدهکاران."""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        if not can_edit_menu(request.user, 'followups'):
+            return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
+        from accounts.models import User
+        users = User.objects.filter(role__in=('admin', 'office', 'employee'), is_active=True).order_by('first_name', 'last_name')
+        return Response([
+            {'id': u.id, 'name': (f'{u.first_name} {u.last_name}'.strip() or u.username), 'role': u.role}
+            for u in users
+        ])
+
+
+def _misplaced_enrollment(item):
+    """ثبت‌نامِ فعلیِ فردِ «در کلاس درست ثبت‌نام نشده» در همان کلاس اشتباه."""
+    from django.db.models import Q
+    from class_management.models import ClassSlotEnrollment
+    q = Q(student__first_name=item.first_name, student__last_name=item.last_name)
+    if item.national_code:
+        q |= Q(student__national_code=item.national_code)
+    if item.phone:
+        q |= Q(student__phone=item.phone)
+    qs = ClassSlotEnrollment.objects.filter(q).select_related('student', 'class_slot')
+    if item.misplaced_from_slot_id:
+        return qs.filter(class_slot_id=item.misplaced_from_slot_id).first()
+    return qs.filter(class_slot__term_id=item.term_id).exclude(is_carryover=True, carryover_confirmed=False).order_by('-created_at').first()
+
+
+class UnregisteredMoveOptionsView(APIView):
+    """
+    GET: برای «انتقال کلاس» / «تغییر سطح» فردِ «در این کلاس نیست».
+    بدون level: کلاس‌های هم‌سطح (سطح کلاس فعلی)؛ با level: کلاس‌های همان سطح.
+    همیشه: همان ترم، همه‌ی روزهای هفته، فقط هم‌جنس یا مختلط. به‌علاوه فهرست سطح‌های دارای کلاس برای «تغییر سطح».
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, pk):
+        if not can_edit_menu(request.user, 'followups'):
+            return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
+        try:
+            item = UnregisteredStudent.objects.select_related('misplaced_from_slot').get(pk=pk)
+        except UnregisteredStudent.DoesNotExist:
+            return Response({'error': 'مورد پیدا نشد'}, status=status.HTTP_404_NOT_FOUND)
+        enrollment = _misplaced_enrollment(item)
+        if not enrollment:
+            return Response({'error': 'ثبت‌نام فعلی این فرد در کلاس مبدأ پیدا نشد (شاید قبلاً جابجا شده است)'}, status=status.HTTP_404_NOT_FOUND)
+        from class_management.models import ClassSlot
+        from class_management.serializers import ClassSlotSerializer
+        from class_management.views import _normalize_level, tuition_difference
+        source = enrollment.class_slot
+        gender = enrollment.student.gender or item.gender or {'girls': 'female', 'boys': 'male'}.get(source.gender, '')
+        level = (request.query_params.get('level') or '').strip() or source.assigned_level or ''
+        pool = [
+            c for c in ClassSlot.objects.filter(term_id=source.term_id).exclude(pk=source.pk).order_by('number', 'day_type', 'time_slot')
+            if _slot_gender_ok(c, gender)
+        ]
+        # همه‌ی سطوح استاندارد؛ available=False یعنی در این ترم (برای این جنسیت/مختلط) کلاسی با آن سطح نداریم
+        from level_tests.models import StandardLevel
+        have = {}
+        for c in pool:
+            if c.assigned_level:
+                have.setdefault(_normalize_level(c.assigned_level), c.assigned_level)
+        group_labels = dict(StandardLevel.AgeGroup.choices)
+        all_levels, seen = [], set()
+        for lv in StandardLevel.objects.all().order_by('age_group', 'order', 'code'):
+            key = _normalize_level(lv.code)
+            if key in seen:
+                continue
+            seen.add(key)
+            all_levels.append({
+                'value': have.get(key, lv.code), 'label': lv.code, 'group': lv.age_group,
+                'group_label': group_labels.get(lv.age_group, lv.age_group), 'available': key in have,
+            })
+        for key, label in have.items():  # سطح‌هایی که کلاس دارند ولی جزو سطوح استاندارد نیستند
+            if key not in seen:
+                all_levels.append({'value': label, 'label': label, 'group': 'other', 'group_label': 'سایر', 'available': True})
+        levels = [l['value'] for l in all_levels if l['available']]
+        target = _normalize_level(level)
+        classes = []
+        for c in pool:
+            if target and _normalize_level(c.assigned_level) != target:
+                continue
+            row = ClassSlotSerializer(c).data
+            row['seats_left'] = c.real_seats_left
+            diff = tuition_difference(enrollment, c)
+            row['tuition_amount'] = diff['target_due']
+            row['tuition_difference'] = diff['difference']
+            row['tuition_message'] = diff['message']
+            classes.append(row)
+        return Response({
+            'id': item.id, 'student_id': enrollment.student_id,
+            'student_name': f'{item.first_name} {item.last_name}',
+            'source_slot': source.id, 'source_number': source.number, 'source_level': source.assigned_level,
+            'gender': gender, 'level': level, 'levels': levels, 'all_levels': all_levels, 'classes': classes,
+        })
+
+
+class UnregisteredMoveView(APIView):
+    """
+    POST {target_slot_id, change_level?, force_over_capacity?}: فرد از کلاس اشتباه به کلاس مقصد منتقل می‌شود
+    (در لیست کلاسیِ مدیریت کلاس‌ها هم جابجا می‌شود) و از لیست ثبت‌نام‌نشده‌ها خارج می‌شود.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, pk):
+        if not can_edit_menu(request.user, 'followups'):
+            return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
+        from django.db import transaction
+        from class_management.models import ClassSlot, ClassSlotEnrollment
+        from class_management.views import _same_term_enrollments, _enrollment_class_label, tuition_difference
+        with transaction.atomic():
+            try:
+                item = UnregisteredStudent.objects.select_for_update().get(pk=pk)
+            except UnregisteredStudent.DoesNotExist:
+                return Response({'error': 'مورد پیدا نشد'}, status=status.HTTP_404_NOT_FOUND)
+            enrollment = _misplaced_enrollment(item)
+            if not enrollment:
+                return Response({'error': 'ثبت‌نام فعلی این فرد در کلاس مبدأ پیدا نشد'}, status=status.HTTP_404_NOT_FOUND)
+            try:
+                target = ClassSlot.objects.select_for_update().get(pk=request.data.get('target_slot_id'))
+            except (ClassSlot.DoesNotExist, ValueError, TypeError):
+                return Response({'error': 'کلاس مقصد پیدا نشد'}, status=status.HTTP_404_NOT_FOUND)
+            source = enrollment.class_slot
+            student = enrollment.student
+            if target.pk == source.pk:
+                return Response({'error': 'کلاس مقصد نمی‌تواند همان کلاس فعلی باشد'}, status=status.HTTP_400_BAD_REQUEST)
+            if not _slot_gender_ok(target, student.gender or item.gender):
+                return Response({'error': 'جنسیت این فرد با کلاس مقصد (دخترانه/پسرانه) مغایرت دارد؛ جابجایی انجام نشد'}, status=status.HTTP_400_BAD_REQUEST)
+            force = str(request.data.get('force_over_capacity', '')).lower() in ('1', 'true', 'yes')
+            if target.real_seats_left <= 0 and not force:
+                return Response({'error': 'کلاس مقصد ظرفیت خالی ندارد', 'over_capacity': True}, status=status.HTTP_400_BAD_REQUEST)
+            others = list(_same_term_enrollments(target, [student.id]).exclude(pk=enrollment.pk))
+            if others:
+                labels = '؛ '.join(_enrollment_class_label(o.class_slot) for o in others)
+                return Response({'error': f'این فرد در همین ترم در {labels} هم ثبت‌نام دارد'}, status=status.HTTP_400_BAD_REQUEST)
+            ClassSlotEnrollment.objects.create(
+                class_slot=target, student=student,
+                payment_method=enrollment.payment_method, tuition_amount=enrollment.tuition_amount,
+                discount_percent=enrollment.discount_percent, pos_reference_code=enrollment.pos_reference_code,
+                is_carryover=enrollment.is_carryover,
+                carryover_confirmed=(enrollment.carryover_confirmed or (enrollment.is_carryover and source.term_id == target.term_id)),
+                carried_from_term=enrollment.carried_from_term,
+            )
+            tuition_note = tuition_difference(enrollment, target)
+            enrollment.delete()
+            if str(request.data.get('change_level', '')).lower() in ('1', 'true', 'yes') and target.assigned_level:
+                student.language_level = target.assigned_level
+                student.save(update_fields=['language_level'])
+                item.class_level = target.assigned_level
+            item.status = UnregisteredStudent.Status.REGISTERED
+            item.registered_at = timezone.now()
+            item.save()
+        return Response({
+            'message': f'{item.first_name} {item.last_name} به کلاس {target.number} منتقل شد',
+            'target_number': target.number, 'tuition_difference': tuition_note,
+        })

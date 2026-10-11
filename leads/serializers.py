@@ -150,6 +150,21 @@ class _CrossListIndex:
 
 
 class UnregisteredStudentSerializer(serializers.ModelSerializer):
+    has_current_class = serializers.SerializerMethodField()
+
+    def get_has_current_class(self, obj):
+        if obj.status == 'registered':
+            return False
+        if obj.is_misplaced:
+            return True
+        from django.db.models import Q
+        from class_management.models import ClassSlotEnrollment
+        q = Q(student__first_name=obj.first_name, student__last_name=obj.last_name)
+        if obj.national_code:
+            q |= Q(student__national_code=obj.national_code)
+        if obj.phone:
+            q |= Q(student__phone=obj.phone)
+        return ClassSlotEnrollment.objects.filter(q, class_slot__term_id=obj.term_id).exclude(is_carryover=True, carryover_confirmed=False).exists()
     status_display = serializers.CharField(source='get_status_display', read_only=True)
     created_at_jalali = serializers.ReadOnlyField()
     registered_at_jalali = serializers.ReadOnlyField()
@@ -162,6 +177,11 @@ class UnregisteredStudentSerializer(serializers.ModelSerializer):
     misplaced_class_number = serializers.SerializerMethodField()
     also_debtor = serializers.SerializerMethodField()
     also_debtor_amount = serializers.SerializerMethodField()
+    assigned_to_name = serializers.SerializerMethodField()
+
+    def get_assigned_to_name(self, obj):
+        u = obj.assigned_to
+        return (f'{u.first_name} {u.last_name}'.strip() or u.username) if u else None
 
     def _debtor_matches(self, obj):
         if not hasattr(self, '_debtor_index'):
@@ -189,7 +209,7 @@ class UnregisteredStudentSerializer(serializers.ModelSerializer):
             'submitted_by_name', 'term', 'term_title', 'claims_registered', 'claim_reviewed',
             'is_dropout', 'dropout_from_term', 'dropout_from_term_title',
             'is_misplaced', 'misplaced_from_slot', 'misplaced_class_number',
-            'also_debtor', 'also_debtor_amount',
+            'also_debtor', 'also_debtor_amount', 'assigned_to', 'assigned_to_name', 'gender', 'has_current_class',
             'created_at', 'created_at_jalali', 'updated_at',
         ]
         read_only_fields = ['status', 'registered_at', 'created_at', 'updated_at', 'is_dropout', 'dropout_from_term', 'is_misplaced', 'misplaced_from_slot']
@@ -225,6 +245,11 @@ class DebtorSerializer(serializers.ModelSerializer):
     carried_from_term_title = serializers.SerializerMethodField()
     source_slot_number = serializers.SerializerMethodField()
     also_unregistered = serializers.SerializerMethodField()
+    assigned_to_name = serializers.SerializerMethodField()
+
+    def get_assigned_to_name(self, obj):
+        u = obj.assigned_to
+        return (f'{u.first_name} {u.last_name}'.strip() or u.username) if u else None
 
     def get_also_unregistered(self, obj):
         if not hasattr(self, '_unreg_index'):
@@ -246,7 +271,7 @@ class DebtorSerializer(serializers.ModelSerializer):
             'followup_count', 'last_followup_at_jalali', 'followups',
             'term', 'term_title', 'claims_settled', 'claim_reviewed', 'created_at', 'created_at_jalali', 'updated_at',
             'student', 'awaiting_registration', 'carried_from_term', 'carried_from_term_title',
-            'source_slot', 'source_slot_number', 'also_unregistered',
+            'source_slot', 'source_slot_number', 'also_unregistered', 'assigned_to', 'assigned_to_name',
         ]
         read_only_fields = ['status', 'settled_at', 'created_at', 'updated_at', 'student', 'awaiting_registration', 'carried_from_term', 'source_slot']
         extra_kwargs = {'phone': {'required': False, 'allow_blank': True}, 'debt_amount': {'required': False}}

@@ -149,3 +149,18 @@ def forecast_for_book(book, ctx):
     for level in levels:
         students |= ctx['index'].get(level, set())
     return len(students), levels
+
+
+def available_levels(term):
+    """سطح‌های قابل انتخاب برای ملاک سفارش — از «سطوح استاندارد» سامانه؛ با تعداد ثبت‌نام‌شده‌ی ترم ملاک."""
+    from level_tests.models import StandardLevel
+    counts = {}
+    if term:
+        ctx = build_context(term.id, mode='registered')
+        counts = {k: len(v) for k, v in ctx['index'].items()}
+    group_labels = dict(StandardLevel.AgeGroup.choices)
+    out = []
+    for lv in StandardLevel.objects.all().order_by('age_group', 'order', 'code'):
+        key = normalize_level(lv.code)
+        out.append({'key': key, 'label': lv.code, 'group': lv.age_group, 'group_label': group_labels.get(lv.age_group, lv.age_group), 'count': counts.get(key, 0)})
+    return out

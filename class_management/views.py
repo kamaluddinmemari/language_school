@@ -2290,6 +2290,34 @@ class MyEnrollmentsView(APIView):
 MAX_LEVELS_NEEDING_RETEST = {'i5', 'teen15', 'teen 15'}  # آخرین سطح کودکان/نوجوانان — عبور از این‌ها همیشه به تعیین‌سطح تازه نیاز دارد
 
 
+def class_tariff_amount(slot):
+    """شهریه‌ی مصوب سطح کلاس (۰ اگر تعریف نشده)."""
+    level = str(slot.assigned_level or '').strip()
+    age_group = infer_age_group_from_level(level) if level else ''
+    setting = TuitionSetting.objects.filter(level=level, age_group=age_group).first() if level and age_group else None
+    return setting.amount if setting else 0
+
+
+def tuition_difference(enrollment, target):
+    """
+    اختلاف شهریه‌ی کلاس مبدأ و مقصد برای انتقال. مبلغ پرداخت‌شده‌ی فرد (با همان تخفیفش) با شهریه‌ی کلاس مقصد مقایسه می‌شود.
+    difference > 0 یعنی فرد باید مابه‌التفاوت بپردازد؛ < 0 یعنی مبلغی به او برمی‌گردد.
+    """
+    paid = int(enrollment.tuition_amount or 0)
+    target_base = class_tariff_amount(target)
+    target_due = round(target_base * (100 - int(enrollment.discount_percent or 0)) / 100)
+    diff = target_due - paid if target_base else 0
+    if not target_base:
+        message = 'شهریه‌ی سطح کلاس مقصد تعریف نشده است؛ اختلاف شهریه قابل محاسبه نیست'
+    elif diff > 0:
+        message = f'⚠ شهریه‌ی کلاس مقصد {diff:,} تومان بیشتر از مبلغ پرداختی است ({paid:,} ← {target_due:,}) — مابه‌التفاوت باید از فرد دریافت شود'
+    elif diff < 0:
+        message = f'⚠ شهریه‌ی کلاس مقصد {abs(diff):,} تومان کمتر از مبلغ پرداختی است ({paid:,} ← {target_due:,}) — این مبلغ باید به فرد برگردانده شود (مثلاً کیف پول)'
+    else:
+        message = ''
+    return {'paid': paid, 'target_due': target_due, 'difference': diff, 'message': message}
+
+
 def _normalize_level(level):
     return str(level or '').strip().lower()
 
@@ -2890,6 +2918,7 @@ class TransferEnrollmentOptionsView(APIView):
         return Response([{
             'id': c.id, 'number': c.number, 'day_type_display': c.day_type_display,
             'time_slot': c.time_slot, 'teacher_name': c.teacher_name, 'seats_left': c.real_seats_left,
+            'tuition_amount': class_tariff_amount(c),
         } for c in candidates])
 
 
@@ -2943,13 +2972,20 @@ class TransferEnrollmentView(APIView):
             ),
             carried_from_term=enrollment.carried_from_term,
         )
+        tuition_note = tuition_difference(enrollment, target)
         enrollment.delete()
+        if str(request.data.get('change_level', '')).lower() in ('1', 'true', 'yes') and target.assigned_level:
+            _student = User.objects.filter(pk=student_id).first()
+            if _student:
+                _student.language_level = target.assigned_level
+                _student.save(update_fields=['language_level'])
         if not target.assigned_level:
             target.assigned_level = source.assigned_level
             target.save()
 
         return Response({
-            'message': f'دانش‌آموز به کلاس {target.number} منتقل شد',
+            'message': f'دانش‌آموز به کلاس {target.number} منتقل شد' + (f'\n{tuition_note["message"]}' if tuition_note['message'] else ''),
+            'tuition_difference': tuition_note,
             'source': ClassSlotSerializer(source).data,
             'target': ClassSlotSerializer(target).data,
         })
@@ -3966,6 +4002,7 @@ class RosterNotInClassView(APIView):
                     first_name=student.first_name, last_name=student.last_name,
                     class_level=slot.assigned_level or 'نامشخص', national_code=student.national_code or '',
                     phone=student.phone or '', term=slot.term, is_misplaced=True, misplaced_from_slot=slot,
+                    gender=student.gender or {'girls': 'female', 'boys': 'male'}.get(slot.gender, ''),
                     submitted_by=request.user,
                 )
         except IntegrityError:
@@ -4771,3 +4808,104 @@ class BulkClassSlotActionView(APIView):
         if skipped:
             msg += f' — {skipped} مورد به‌خاطر تداخل (مثلاً یکتاییِ شماره کلاس در همون روز/ساعت) رد شد'
         return Response({'message': msg, 'updated_count': updated, 'skipped_count': skipped})
+
+
+class TermOverviewView(APIView):
+    """
+    GET ?term_id=&gender=female|male&level=  — «کلاس‌های ترم در یک نگاه».
+    همه‌ی سطوح استاندارد را با وضعیت موجود/ناموجود (برای ترم و جنسیتِ انتخابی؛ کلاس مختلط همیشه حساب می‌شود) برمی‌گرداند
+    و اگر level داده شود، همه‌ی کلاس‌های آن سطح را با مشخصات کامل.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        if not can_edit_menu(request.user, 'class-management'):
+            return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
+        from level_tests.models import StandardLevel
+        term_id = request.query_params.get('term_id')
+        term = Term.objects.filter(pk=term_id).first() if str(term_id or '').isdigit() else None
+        if not term:
+            term = sorted(Term.objects.all(), key=lambda t: (t.year, t.term_number))[-1] if Term.objects.exists() else None
+        if not term:
+            return Response({'term': None, 'all_levels': [], 'classes': []})
+        gender = request.query_params.get('gender', '')
+        student_param = request.query_params.get('student_id')
+        if not gender and str(student_param or '').isdigit():
+            from django.contrib.auth import get_user_model
+            gender = getattr(get_user_model().objects.filter(pk=student_param).first(), 'gender', '') or ''
+
+        def gender_ok(slot):
+            if not gender or slot.gender == ClassSlot.Gender.MIXED:
+                return True
+            return (slot.gender == ClassSlot.Gender.GIRLS and gender == 'female') or (slot.gender == ClassSlot.Gender.BOYS and gender == 'male')
+
+        pool = [c for c in ClassSlot.objects.filter(term=term).order_by('number', 'day_type', 'time_slot') if gender_ok(c)]
+        have = {}
+        for c in pool:
+            if c.assigned_level:
+                key = _normalize_level(c.assigned_level)
+                have.setdefault(key, [c.assigned_level, 0])[1] += 1
+        group_labels = dict(StandardLevel.AgeGroup.choices)
+        all_levels, seen = [], set()
+        for lv in StandardLevel.objects.all().order_by('age_group', 'order', 'code'):
+            key = _normalize_level(lv.code)
+            if key in seen:
+                continue
+            seen.add(key)
+            all_levels.append({
+                'value': have[key][0] if key in have else lv.code, 'label': lv.code, 'group': lv.age_group,
+                'group_label': group_labels.get(lv.age_group, lv.age_group),
+                'available': key in have, 'class_count': have[key][1] if key in have else 0,
+            })
+        for key, (label, count) in have.items():
+            if key not in seen:
+                all_levels.append({'value': label, 'label': label, 'group': 'other', 'group_label': 'سایر', 'available': True, 'class_count': count})
+        classes = []
+        level = (request.query_params.get('level') or '').strip()
+        if level:
+            target = _normalize_level(level)
+            classes = [ClassSlotSerializer(c).data for c in pool if _normalize_level(c.assigned_level) == target]
+        return Response({'term': term.id, 'term_title': term.title, 'gender': gender, 'level': level, 'all_levels': all_levels, 'classes': classes})
+
+
+class AttendanceStatusView(APIView):
+    """
+    GET ?term_id=&date=YYYY-MM-DD (پیش‌فرض: امروز، آخرین ترم) — وضعیت ثبت حضور و غیاب کلاس‌های ترم در آن تاریخ.
+    held=True یعنی آن کلاس طبق تقویمش در آن روز جلسه دارد؛ recorded=True یعنی حداقل یک حضور/غیاب برایش ثبت شده.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        import datetime as _dt
+        from .attendance import attendance_session_dates_for_slot
+        from django.db.models import Count
+        term_id = request.query_params.get('term_id')
+        term = Term.objects.filter(pk=term_id).first() if str(term_id or '').isdigit() else None
+        if not term:
+            term = sorted(Term.objects.all(), key=lambda t: (t.year, t.term_number))[-1] if Term.objects.exists() else None
+        if not term:
+            return Response({'date': None, 'classes': []})
+        try:
+            day = _dt.date.fromisoformat(request.query_params.get('date') or '')
+        except ValueError:
+            day = timezone.localdate()
+        slots = list(ClassSlot.objects.filter(term=term).select_related('term').prefetch_related('term__holidays').order_by('number', 'day_type', 'time_slot'))
+        marked = {
+            row['class_slot_id']: row['n']
+            for row in ClassAttendance.objects.filter(class_slot__in=slots, date=day).values('class_slot_id').annotate(n=Count('id'))
+        }
+        enrolled = {
+            row['class_slot_id']: row['n']
+            for row in ClassSlotEnrollment.objects.filter(class_slot__in=slots, payment_verified=True).values('class_slot_id').annotate(n=Count('id'))
+        }
+        out = []
+        for slot in slots:
+            held = day in set(attendance_session_dates_for_slot(slot))
+            out.append({
+                'slot_id': slot.id, 'number': slot.number, 'assigned_level': slot.assigned_level,
+                'day_type_display': slot.day_type_display, 'time_slot': slot.time_slot,
+                'gender_display': slot.get_gender_display(), 'teacher_name': slot.teacher_name,
+                'enrolled': enrolled.get(slot.id, 0), 'held': held,
+                'recorded': marked.get(slot.id, 0) > 0, 'marked_count': marked.get(slot.id, 0),
+            })
+        return Response({'date': day.isoformat(), 'term': term.id, 'term_title': term.title, 'classes': out})
