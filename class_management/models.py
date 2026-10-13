@@ -900,3 +900,55 @@ def _auto_clear_unregistered(sender, instance, **kwargs):
     except Exception:  # هرگز نباید ثبت‌نام را خراب کند
         import logging
         logging.getLogger(__name__).exception('auto_mark_unregistered_registered failed')
+
+
+class DropoutExtractList(models.Model):
+    """لیست ریزشیِ استخراج‌شده که برای پیگیری ذخیره شده است (همیشه در پنل «استخراج ریزشی» در دسترس است)."""
+    name = models.CharField(max_length=200)
+    term = models.ForeignKey(Term, on_delete=models.CASCADE, related_name='dropout_extract_lists')
+    mode = models.CharField(max_length=16, default='pair')   # pair | all_vs_term | carryover (ساخته‌شده خودکار از «انتقال کلاس به ترم بعد»)
+    source_term = models.ForeignKey(Term, on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
+    meta = models.JSONField(default=dict, blank=True)   # برچسب‌ها و تنظیمات مقایسه (a, b, term1, term2, is_recent_pair, ...)
+    rows = models.JSONField(default=list, blank=True)   # همان ردیف‌های ریزشی در لحظه‌ی ذخیره
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name='+',
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return self.name
+
+
+class DropoutExtractFollowUp(models.Model):
+    """
+    پیگیری تلفنی هر فرد در لیست «استخراج ریزشی دو ترم متوالی»: کارمند ارجاع‌شده، چک‌مارک «تماس گرفته شد» و توضیحات.
+    کلید: کد ملی + ترم مقصد + حالت مقایسه (pair / all_vs_term).
+    """
+    national_code = models.CharField(max_length=10, db_index=True)
+    saved_list = models.ForeignKey(
+        'DropoutExtractList', on_delete=models.CASCADE, null=True, blank=True, related_name='followups',
+    )  # خالی = پیگیریِ لیستِ ذخیره‌نشده (فقط بر پایه‌ی ترم و حالت)
+    term = models.ForeignKey(Term, on_delete=models.CASCADE, related_name='dropout_extract_followups')
+    mode = models.CharField(max_length=16, default='pair')
+    assigned_to = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name='+',
+    )
+    contacted = models.BooleanField(default=False)
+    contacted_at = models.DateTimeField(null=True, blank=True)
+    note = models.TextField(blank=True)
+    updated_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name='+',
+    )
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=['national_code', 'term', 'mode'], condition=models.Q(saved_list__isnull=True), name='uniq_dropout_extract_followup'),
+            models.UniqueConstraint(fields=['national_code', 'saved_list'], condition=models.Q(saved_list__isnull=False), name='uniq_dropout_extract_followup_list'),
+        ]
+
+    def __str__(self):
+        return f'{self.national_code} — {self.term_id}'

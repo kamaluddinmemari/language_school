@@ -238,7 +238,7 @@ class LibraryStatsView(APIView):
             'forecast_mode': forecast_ctx.get('mode'),
             'available_levels': fc.available_levels(forecast_ctx['term']),
             'forecast_term': {'id': forecast_ctx['term'].id, 'title': forecast_ctx['term'].title} if forecast_ctx['term'] else None,
-            'terms': [{'id': t.id, 'title': t.title, 'is_latest': i == len(forecast_ctx['terms']) - 1} for i, t in enumerate(forecast_ctx['terms'])][::-1],
+            'terms': [{'id': t.id, 'title': t.title, 'is_latest': bool(forecast_ctx['term'] and t.id == forecast_ctx['term'].id)} for t in reversed(forecast_ctx['terms'])],
             # آمار درون‌بازه‌ای (اگه تاریخ داده نشه، یعنی از ابتدا تا الان = همون آمار کلی سابق)
             'period_sales_quantity': period_sales_quantity,
             'period_sales_revenue': period_sales_revenue,
@@ -295,4 +295,3 @@ class BookShortcutDetailView(generics.RetrieveUpdateDestroyAPIView):
         if self._denied(request):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         return super().destroy(request, *args, **kwargs)
-

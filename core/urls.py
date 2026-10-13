@@ -21,6 +21,7 @@ urlpatterns = [
     path('api/', include('grading.urls')),
     path('api/', include('payroll.urls')),
     path('api/', include('reports.urls')),
+    path('api/', include('teacher_priority.urls')),
 ]
 
 if settings.DEBUG:

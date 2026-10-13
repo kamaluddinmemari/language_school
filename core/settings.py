@@ -51,6 +51,7 @@ INSTALLED_APPS = [
     'grading',
     'payroll',
     'reports',
+    'teacher_priority',
     'django_jalali',
 ]
 

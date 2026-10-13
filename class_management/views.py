@@ -38,7 +38,7 @@ from .serializers import (
 from level_tests.models import LevelTest
 from accounts.menu_permissions import can_edit_menu, can_view_menu
 from .allocation import allocate_classes
-from .carryover import create_awaiting_debtor, finalize_registration, register_student_in_slot, gray_enrollments
+from .carryover import sync_carryover_followup_list, create_awaiting_debtor, finalize_registration, register_student_in_slot, gray_enrollments
 from .attendance import DEFAULT_SESSION_COUNT, jalali_date, roster_attendance_payload, session_date_and_sub, session_dates_for_slot, term_holiday_warnings_for_slot
 
 # منسوخ — از تنظیمات دسترسی (accounts.menu_permissions.can_edit_menu) جایگزین شد.
@@ -238,6 +238,7 @@ class CarryClassesToNextTermView(APIView):
             qs = qs.filter(time_slot__in=time_slots)
         assignment_by_id = {str(row.get('source_id')): row for row in assignments if row.get('source_id')}
         created, skipped, warnings = [], [], []
+        created_targets = []
         students_carried_total = 0
         with transaction.atomic():
             for source in qs.select_for_update().order_by('number', 'day_type', 'time_slot'):
@@ -293,14 +294,19 @@ class CarryClassesToNextTermView(APIView):
                     students_carried_total += carried
                     for item in student_skips:
                         warnings.append({'source_id': source.id, 'number': source.number, 'level': source.assigned_level or '', 'message': item})
+                created_targets.append(target)
                 created.append({
                     'source_id': source.id, 'target': ClassSlotSerializer(target).data,
                     'students_carried': carried, 'students_skipped': len(student_skips), 'carry_students': bool(carry_flag),
                 })
+            # فایل پیگیریِ خودکارِ انتقالی‌های منتظر ثبت‌نام (ارجاع/چک‌مارک/توضیحات در پنل «استخراج ریزشی»)
+            followup_list = sync_carryover_followup_list(created_targets, None if legacy_source else source_term, target_term, request.user) if students_carried_total else None
         message = f'{len(created)} کلاس به ترم مقصد منتقل شد'
         if students_carried_total:
             message += f' و {students_carried_total} دانش‌آموز در کلاس‌های جدید ثبت‌نام شدند'
-        return Response({'message': message, 'created': created, 'skipped': skipped, 'warnings': warnings, 'students_carried': students_carried_total})
+        if followup_list:
+            message += f' — فایل پیگیری «{followup_list.name}» خودکار ذخیره شد'
+        return Response({'message': message, 'created': created, 'skipped': skipped, 'warnings': warnings, 'students_carried': students_carried_total, 'followup_list_id': followup_list.id if followup_list else None})
 
     @staticmethod
     def _carry_students(source, target, user=None):
@@ -825,7 +831,10 @@ class StudentClassSearchView(APIView):
 
         query = ' '.join(self._digits_to_en(request.query_params.get('q', '')).split())
         term_param = request.query_params.get('term')
-        term = Term.objects.filter(pk=term_param).first() if term_param else Term.objects.order_by('-year', '-term_number').first()
+        term = Term.objects.filter(pk=term_param).first() if term_param else None
+        if not term:
+            from leads.models import get_current_term
+            term = get_current_term()
         if term_param and not term:
             return Response({'error': 'ترم پیدا نشد'}, status=status.HTTP_404_NOT_FOUND)
         term_title = term.title if term else ''
@@ -2386,7 +2395,7 @@ def _compute_level_suggestion(student):
 
     eligible = []
     if level:
-        eligible = [c for c in _classes_matching_level(level, student.gender) if c.real_seats_left > 0]
+        eligible = _classes_matching_level(level, student.gender)
 
     age_group = infer_age_group_from_level(level)
     base_tuition = None
@@ -2441,7 +2450,7 @@ class DirectEnrollSuggestionsView(APIView):
         # خواسته‌ی ۲: اگه سطح پیشنهادی درست نبود، مدیر می‌تونه دستی سطح رو بزنه — کلاس‌های
         # همون سطح (در همه‌ی ساعت‌ها، هم‌جنسیت) دوباره لیست می‌شن، بدون چک انقضا/سطح‌پایانی
         if manual_level:
-            info['eligible'] = [c for c in _classes_matching_level(manual_level, student.gender) if c.real_seats_left > 0]
+            info['eligible'] = _classes_matching_level(manual_level, student.gender)
             info['level'] = manual_level
             info['age_group'] = infer_age_group_from_level(manual_level)
             setting = TuitionSetting.objects.filter(level=manual_level, age_group=info['age_group']).first()
@@ -3235,10 +3244,8 @@ class TeacherTermClassesView(APIView):
         if request.user.role not in User.TEACHER_LIKE_ROLES:
             return Response({'error': 'این بخش فقط برای اساتید است'}, status=status.HTTP_403_FORBIDDEN)
 
-        today = timezone.now().date()
-        term = Term.objects.filter(start_date__lte=today, end_date__gte=today).order_by('-start_date').first()
-        if not term:
-            term = Term.objects.order_by('-year', '-term_number').first()
+        from leads.models import get_current_term
+        term = get_current_term()
         if not term:
             return Response({'term': None, 'classes': []})
 
@@ -4268,15 +4275,18 @@ def _teacher_report_payload(slot, events):
     }
 
 
-def _teacher_attendance_data(record):
+def _teacher_attendance_data(record, pay_factors=None):
     setting = getattr(record.teacher, 'teacher_compensation_setting', None)
+    # ضریب امتیاز اولویت (teacher_priority) — فقط وقتی تیک «اثر روی قیمت» روشن است غیر از ۱ می‌شود
+    priority_factor = float((pay_factors or {}).get(record.teacher_id, 1.0))
     multiplier = 1.0
     if setting:
         if record.class_slot.day_type in (ClassSlot.DayType.FRIDAY, ClassSlot.DayType.FRIDAY_MORNING, ClassSlot.DayType.FRIDAY_EVENING): multiplier = float(setting.friday_multiplier)
         elif record.class_slot.day_type in (ClassSlot.DayType.THURSDAY_MORNING, ClassSlot.DayType.THURSDAY_EVENING): multiplier = float(setting.thursday_multiplier)
-    base = (setting.session_price if setting and record.check_out_at else 0) * multiplier
+    session_price = (setting.session_price * priority_factor) if setting else 0
+    base = (session_price if setting and record.check_out_at else 0) * multiplier
     allowed = max(1, int(setting.allowed_minutes_per_session)) if setting else 90
-    rate = (int(setting.adjustment_per_minute) if setting and setting.adjustment_per_minute else ((setting.session_price / allowed) if setting else 0)) * multiplier
+    rate = ((int(setting.adjustment_per_minute) * priority_factor) if setting and setting.adjustment_per_minute else ((session_price / allowed) if setting else 0)) * multiplier
     shortage = max(0, allowed - record.minutes_worked) if setting and record.check_out_at else 0
     overtime = max(0, record.minutes_worked - allowed) if setting and record.check_out_at else 0
     gross = round(base + (overtime * rate) - (shortage * rate))
@@ -4293,6 +4303,7 @@ def _teacher_attendance_data(record):
         'check_out_at': record.check_out_at, 'minutes_worked': record.minutes_worked,
         'status': record.status, 'notes': record.notes,
         'session_price': setting.session_price if setting else 0, 'multiplier': multiplier,
+        'priority_factor': priority_factor, 'effective_session_price': round(session_price),
         'allowed_minutes': allowed, 'shortage_minutes': shortage, 'overtime_minutes': overtime,
         'gross_amount': gross, 'insurance_deduction': 0, 'net_amount': gross,
     }
@@ -4431,7 +4442,9 @@ class TeacherSessionAttendanceListView(APIView):
         if request.query_params.get('term'): qs = qs.filter(class_slot__term_id=request.query_params['term'])
         if request.query_params.get('teacher'): qs = qs.filter(teacher_id=request.query_params['teacher'])
         if request.query_params.get('class_slot'): qs = qs.filter(class_slot_id=request.query_params['class_slot'])
-        records = [_teacher_attendance_data(x) for x in qs]
+        from teacher_priority.services import pay_factor_map
+        pay_factors = pay_factor_map()
+        records = [_teacher_attendance_data(x, pay_factors) for x in qs]
         totals = {}
         for row in records:
             key = str(row['teacher'])
@@ -4501,7 +4514,9 @@ class TeacherCompensationReportView(APIView):
         teacher_id = request.query_params.get('teacher_id') or request.query_params.get('teacher')
         if teacher_id: qs = qs.filter(teacher_id=teacher_id)
 
-        records = [_teacher_attendance_data(x) for x in qs]
+        from teacher_priority.services import pay_factor_map
+        pay_factors = pay_factor_map()
+        records = [_teacher_attendance_data(x, pay_factors) for x in qs]
 
         totals, subject_totals, teacher_terms, settings_cache = {}, {}, {}, {}
         for row in records:
@@ -4810,6 +4825,17 @@ class BulkClassSlotActionView(APIView):
         return Response({'message': msg, 'updated_count': updated, 'skipped_count': skipped})
 
 
+def _student_gender_from_class(slot):
+    """روز فرد=آقا و روز زوج=خانم؛ اگر جنسیت صریح کلاس با قاعده روز ناسازگار باشد، جنسیت کلاس مقدم است."""
+    if not slot:
+        return ''
+    day_gender = {'even': 'female', 'odd': 'male'}.get(slot.day_type, '')
+    class_gender = {'girls': 'female', 'boys': 'male'}.get(slot.gender, '')
+    if class_gender and day_gender and class_gender != day_gender:
+        return class_gender
+    return day_gender or class_gender or ''
+
+
 class TermOverviewView(APIView):
     """
     GET ?term_id=&gender=female|male&level=  — «کلاس‌های ترم در یک نگاه».
@@ -4831,8 +4857,11 @@ class TermOverviewView(APIView):
         gender = request.query_params.get('gender', '')
         student_param = request.query_params.get('student_id')
         if not gender and str(student_param or '').isdigit():
-            from django.contrib.auth import get_user_model
-            gender = getattr(get_user_model().objects.filter(pk=student_param).first(), 'gender', '') or ''
+            enrolled = ClassSlotEnrollment.objects.filter(
+                student_id=student_param,
+            ).select_related('class_slot').order_by('-created_at', '-id').first()
+            # اگر برای فرد هیچ ثبت‌نامی وجود نداشته باشد، جنسیت نامعلوم می‌ماند و همه‌ی کلاس‌ها نمایش داده می‌شوند.
+            gender = _student_gender_from_class(enrolled.class_slot) if enrolled else ''
 
         def gender_ok(slot):
             if not gender or slot.gender == ClassSlot.Gender.MIXED:

@@ -13,7 +13,7 @@ from django.db import IntegrityError, transaction
 from django.db.models import Q
 from django.utils import timezone
 
-from .models import ClassSlot, ClassSlotEnrollment, TuitionSetting, WalletTransaction, infer_age_group_from_level
+from .models import ClassSlot, ClassSlotEnrollment, DropoutExtractList, TuitionSetting, WalletTransaction, infer_age_group_from_level
 
 AWAITING_LABEL = 'منتظر ثبت‌نام'
 DEBTOR_CARRY_DESCRIPTION = 'دانش‌آموز انتقالی از ترم قبل — در دست بررسی و منتظر ثبت‌نام'
@@ -157,3 +157,88 @@ def register_student_in_slot(student, slot, payment_method='cash', tuition_amoun
         slot.save()
     finalize_registration(student, slot)
     return enrollment, ''
+
+
+# ---------------------------------------------------------------------------
+# فایل پیگیریِ خودکارِ «انتقالی‌های منتظر ثبت‌نام» — با هر «انتقال کلاس به ترم بعد» ساخته/تکمیل می‌شود
+# و در پنل «استخراج ریزشی» بخش «لیست‌های ذخیره‌شده برای پیگیری» (ارجاع، چک‌مارک، توضیحات) در دسترس است.
+# ---------------------------------------------------------------------------
+def _row_key(student):
+    code = ''.join(ch for ch in str(student.national_code or '') if ch.isdigit())
+    return code if len(code) == 10 else f'S{student.pk}'
+
+
+def sync_carryover_followup_list(target_slots, source_term, target_term, user=None):
+    """
+    همه‌ی دانش‌آموزانِ خاکستریِ (منتقل‌شده و هنوز بدون ثبت‌نام قطعی) کلاس‌های ساخته‌شده را در یک فایل پیگیری می‌ریزد.
+    برای هر جفت «ترم مبدا ← ترم مقصد» فقط یک فایل وجود دارد؛ انتقال‌های بعدی به همان فایل اضافه می‌شوند.
+    """
+    slot_ids = [slot.id for slot in target_slots]
+    if not slot_ids or not target_term:
+        return None
+    enrollments = ClassSlotEnrollment.objects.filter(
+        class_slot_id__in=slot_ids, is_carryover=True, carryover_confirmed=False,
+    ).select_related('student', 'class_slot').order_by('class_slot__number', 'student__last_name', 'student__first_name')
+    new_rows = []
+    for enrollment in enrollments:
+        student, slot = enrollment.student, enrollment.class_slot
+        phone = ''.join(ch for ch in str(student.phone or '') if ch.isdigit())
+        if len(phone) == 10 and phone.startswith('9'):
+            phone = '0' + phone
+        key = _row_key(student)
+        new_rows.append({
+            'key': key, 'row_number': key, 'student_id': student.pk,
+            'first_name': student.first_name, 'last_name': student.last_name,
+            'national_code': key if not key.startswith('S') else '', 'phone': phone,
+            'level': slot.assigned_level or '', 'day': slot.day_type_display or '', 'time_slot': slot.time_slot or '',
+            'teacher': slot.teacher_name or '', 'class_number': slot.number,
+            'last_term_id': source_term.id if source_term else None, 'last_term_title': source_term.title if source_term else '',
+        })
+    if not new_rows:
+        return None
+    saved = DropoutExtractList.objects.filter(mode='carryover', term=target_term, source_term=source_term).first()
+    if saved:
+        rows = list(saved.rows or [])
+        index = {row.get('key'): i for i, row in enumerate(rows)}
+        for row in new_rows:
+            if row['key'] in index:
+                rows[index[row['key']]] = row   # همان فرد با کلاس جدیدتر
+            else:
+                rows.append(row)
+        saved.rows = rows
+        saved.save(update_fields=['rows'])
+        return saved
+    source_title = source_term.title if source_term else 'ترم قبل'
+    return DropoutExtractList.objects.create(
+        name=f'انتقالی‌های منتظر ثبت‌نام: {source_title} ← {target_term.title}',
+        term=target_term, source_term=source_term, mode='carryover', rows=new_rows, created_by=user,
+        meta={
+            'auto': True, 'mode': 'carryover', 'is_recent_pair': True,
+            'a': {'label': source_title, 'source': 'db'}, 'b': {'label': target_term.title, 'source': 'db'},
+            'term1': {'id': source_term.id, 'title': source_term.title} if source_term else None,
+            'term2': {'id': target_term.id, 'title': target_term.title},
+            'term1_id': source_term.id if source_term else '', 'term2_id': target_term.id,
+        },
+    )
+
+
+def carryover_registration_status(saved):
+    """وضعیت لحظه‌ایِ ثبت‌نام هر نفرِ فایل پیگیریِ انتقالی‌ها در ترم مقصد: {کلید ردیف: متن وضعیت}."""
+    rows = saved.rows or []
+    ids = [row.get('student_id') for row in rows if row.get('student_id')]
+    by_student = {}
+    for e in ClassSlotEnrollment.objects.filter(class_slot__term_id=saved.term_id, student_id__in=ids):
+        by_student.setdefault(e.student_id, []).append(e)
+    result = {}
+    for row in rows:
+        items = by_student.get(row.get('student_id'), [])
+        if any(e.payment_verified and (not e.is_carryover or e.carryover_confirmed) for e in items):
+            label = 'ثبت‌نام قطعی شد'
+        elif any(e.is_carryover and not e.carryover_confirmed and e.payment_verified for e in items):
+            label = 'منتظر ثبت‌نام'
+        elif items:
+            label = 'در انتظار تأیید پرداخت'
+        else:
+            label = 'از کلاس خارج شد / بدون ثبت‌نام'
+        result[row.get('key')] = label
+    return result

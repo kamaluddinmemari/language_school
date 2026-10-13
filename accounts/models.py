@@ -279,6 +279,13 @@ class ClassRequest(models.Model):
     payment_method = models.CharField(max_length=20, choices=PaymentMethod.choices, blank=True)
     payment_reference = models.CharField(max_length=100, blank=True)
     payment_confirmed_at = models.DateTimeField(null=True, blank=True)
+    # ثبت حسابداری استرداد وجه؛ پرداخت اصلی حفظ می‌شود و استرداد جداگانه بایگانی می‌شود.
+    is_refunded = models.BooleanField(default=False)
+    refund_amount = models.PositiveIntegerField(default=0)
+    refund_date = models.DateTimeField(null=True, blank=True)
+    refund_reference = models.CharField(max_length=100, blank=True)
+    refund_note = models.TextField(blank=True)
+    refund_recorded_by = models.ForeignKey('accounts.User', on_delete=models.SET_NULL, null=True, blank=True, related_name='recorded_class_refunds')
     status = models.CharField(max_length=10, choices=Status.choices, default=Status.PENDING)
     notes = models.TextField(blank=True)
     # خواسته: وقتی این درخواست خودکار از نتیجه‌ی «تعیین سطح» (نیاز به خصوصی/جبرانی) ساخته شده،
@@ -378,16 +385,36 @@ class ClassRequest(models.Model):
         local_dt = timezone.localtime(self.payment_confirmed_at)
         return jdatetime.datetime.fromgregorian(datetime=local_dt).strftime('%Y/%m/%d - %H:%M')
 
+    @property
+    def refund_date_jalali(self):
+        if not self.refund_date:
+            return None
+        local_dt = timezone.localtime(self.refund_date)
+        return jdatetime.datetime.fromgregorian(datetime=local_dt).strftime('%Y/%m/%d - %H:%M')
+
     def save(self, *args, **kwargs):
         if self.class_type in ['makeup', 'other']:
             self.total_price = 0
             self.teacher_share = 0
             self.school_share = 0
         else:
+            # فقط ستون‌های قدیمی را در fallback بخوان؛ این باعث می‌شود ثبت کلاس
+            # خصوصی در زمان ناقص‌بودن تنظیمات قیمت یا قبل از اجرای migration جدید
+            # با خطای داخلی HTML متوقف نشود.
             try:
                 price_setting = PriceSetting.objects.latest('updated_at')
-            except PriceSetting.DoesNotExist:
-                price_setting = None
+            except Exception:
+                try:
+                    price_setting = PriceSetting.objects.values(
+                        'one_hour_price', 'one_half_hour_price',
+                        'teacher_share_percent', 'school_share_percent',
+                    ).latest('updated_at')
+                except Exception:
+                    price_setting = None
+            def setting_value(name, default):
+                if isinstance(price_setting, dict):
+                    return price_setting.get(name, default)
+                return getattr(price_setting, name, default) if price_setting else default
             # خواسته: قیمت خصوصی چند نفره — سهم هرنفر بسته به تعداد کل نفراتِ همین کلاس مشترک
             # (۲نفره یا ۳نفر‌به‌بالا) با کلاس خصوصی تک‌نفره‌ی معمولی فرق دارد.
             group_size = self.group_size or 1
@@ -401,11 +428,11 @@ class ClassRequest(models.Model):
                 one_hour_field, one_half_field = 'one_hour_price', 'one_half_hour_price'
                 default_one_hour, default_one_half = 400000, 550000
             if self.session_duration == '1':
-                price_per_session = getattr(price_setting, one_hour_field) if price_setting else default_one_hour
+                price_per_session = setting_value(one_hour_field, default_one_hour)
             else:
-                price_per_session = getattr(price_setting, one_half_field) if price_setting else default_one_half
-            teacher_percent = price_setting.teacher_share_percent if price_setting else 70
-            school_percent = price_setting.school_share_percent if price_setting else 30
+                price_per_session = setting_value(one_half_field, default_one_half)
+            teacher_percent = setting_value('teacher_share_percent', 70)
+            school_percent = setting_value('school_share_percent', 30)
             self.total_price = price_per_session * self.session_count
             self.teacher_share = int(self.total_price * teacher_percent / 100)
             self.school_share = int(self.total_price * school_percent / 100)

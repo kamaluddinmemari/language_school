@@ -91,7 +91,7 @@ def levels_for_book(book):
 
 def ordered_terms():
     from class_management.models import Term
-    return sorted(Term.objects.all(), key=lambda t: (t.year, t.term_number))
+    return sorted(Term.objects.all(), key=lambda t: (t.start_date, t.id))
 
 
 def resolve_term(term_id=None):
@@ -106,7 +106,9 @@ def resolve_term(term_id=None):
                     return t, terms
         except (TypeError, ValueError):
             pass
-    return terms[-1], terms
+    from leads.models import get_current_term
+    current = get_current_term()
+    return current, terms
 
 
 def current_mode():

@@ -11,6 +11,7 @@ import re
 
 from django.db import IntegrityError, transaction
 from django.db.models import Q
+from django.utils import timezone
 from rest_framework import status
 from rest_framework.parsers import FormParser, MultiPartParser
 from rest_framework.permissions import IsAuthenticated
@@ -18,7 +19,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from accounts.menu_permissions import can_edit_menu
-from .models import ClassSlotEnrollment, Term
+from .models import ClassSlotEnrollment, DropoutExtractFollowUp, DropoutExtractList, Term
 from .views import ClassSlotExcelImportView
 
 _COLUMN_RE = re.compile(r'^[A-Z]{1,2}$')
@@ -264,6 +265,13 @@ class DropoutExtractComputeView(APIView):
         if mode == 'all_vs_term':
             term2, error, is_recent = _single_term(request.data.get('term_id'))
             term1 = None
+        elif a_source == 'excel' and not request.data.get('term1_id'):
+            term1, term2, error, is_recent = None, None, '', False
+            try:
+                term2 = next(t for t in terms if t.id == int(request.data.get('term2_id')))
+                is_recent = bool(terms and terms[-1].id == term2.id)
+            except (StopIteration, TypeError, ValueError):
+                error = 'ترم دوم را انتخاب کنید'
         else:
             term1, term2, error, is_recent = _term_pair(request.data.get('term1_id'), request.data.get('term2_id'))
         if error:
@@ -292,9 +300,9 @@ class DropoutExtractComputeView(APIView):
             info_terms = earlier
             a_label = 'کل دانش‌آموزان ثبت‌شده (اطلاعات دانش‌آموزان)'
         else:
-            a_rows, err = side_rows(a_source, request.data.get('a_rows'), [term1.id], term1.title)
-            info_terms = [term1.id]
-            a_label = term1.title
+            a_rows, err = side_rows(a_source, request.data.get('a_rows'), [term1.id] if term1 else [], term1.title if term1 else 'اطلاعات ورودی از اکسل')
+            info_terms = [term1.id] if term1 else [t.id for t in terms if position[t.id] < position[term2.id]]
+            a_label = term1.title if term1 else 'اطلاعات ورودی از اکسل'
         if err:
             return Response({'error': err}, status=status.HTTP_400_BAD_REQUEST)
         b_rows, err = side_rows(b_source, request.data.get('b_rows'), [term2.id], term2.title)
@@ -322,12 +330,19 @@ class DropoutExtractCommitView(APIView):
         from accounts.services import sync_student_from_lead
         from leads.models import ExcelDropout, UnregisteredStudent, build_identity_key, build_person_key
         all_mode = request.data.get('mode') == 'all_vs_term'
+        excel_source = request.data.get('a_source') == 'excel'
         ordered = _ordered_terms()
         terms_by_id = {t.id: t for t in ordered}
         previous_term = None
         if all_mode:
             term2, error, is_recent = _single_term(request.data.get('term_id'))
             term1 = None
+            if term2:
+                idx = [t.id for t in ordered].index(term2.id)
+                previous_term = ordered[idx - 1] if idx > 0 else None
+        elif excel_source and not request.data.get('term1_id'):
+            term1 = None
+            term2, error, is_recent = _single_term(request.data.get('term2_id'))
             if term2:
                 idx = [t.id for t in ordered].index(term2.id)
                 previous_term = ordered[idx - 1] if idx > 0 else None
@@ -363,12 +378,12 @@ class DropoutExtractCommitView(APIView):
                 if not student:
                     failed += 1
                     continue
-                row_term1 = (terms_by_id.get(int(row.get('last_term_id') or 0)) or previous_term) if all_mode else term1
-                if not row_term1 or row_term1.id == term2.id:
+                row_term1 = (terms_by_id.get(int(row.get('last_term_id') or 0)) or previous_term) if all_mode or excel_source else term1
+                if row_term1 and row_term1.id == term2.id:
                     failed += 1
                     continue
                 last_enrollment = ClassSlotEnrollment.objects.filter(
-                    student=student, class_slot__term=row_term1).select_related('class_slot').order_by('-created_at').first()
+                    student=student, class_slot__term=row_term1).select_related('class_slot').order_by('-created_at').first() if row_term1 else None
                 level = (last_enrollment.class_slot.assigned_level if last_enrollment else '') or getattr(student, 'language_level', '') or ''
                 if is_recent:
                     prefix = build_person_key(national_code, phone, first_name, last_name) + '|level:'
@@ -398,3 +413,198 @@ class DropoutExtractCommitView(APIView):
             'message': (f'{created} نفر به «ثبت‌نام‌نشده‌ها» (با برچسب ریزشی) اضافه شد — از همان‌جا می‌توانید در کلاس ثبتشان کنید یا حذفشان کنید.'
                         if is_recent else f'{created} نفر به بخش «ریزشی‌ها» منتقل شد.'),
         })
+
+
+class DropoutExtractFollowUpView(APIView):
+    """
+    پیگیری لیست ریزشی‌ها (ارجاع به کارمند، چک‌مارک تماس، توضیحات).
+    GET  ?term_id=&mode=  : وضعیت ذخیره‌شده‌ی همه‌ی افراد این ترم/حالت + فهرست کارمندان
+    POST {term_id, mode, items:[{national_code, assigned_to?, contacted?, note?}]} : ذخیره‌ی جزئی (فقط فیلدهای ارسال‌شده)
+    """
+    permission_classes = [IsAuthenticated]
+
+    @staticmethod
+    def _payload(item):
+        return {
+            'national_code': item.national_code,
+            'assigned_to': item.assigned_to_id,
+            'contacted': item.contacted,
+            'contacted_at': item.contacted_at.isoformat() if item.contacted_at else '',
+            'note': item.note,
+        }
+
+    @staticmethod
+    def _scope(data):
+        """(term, mode, saved_list, error) — با list_id پیگیری مخصوص همان لیست ذخیره‌شده است، وگرنه بر پایه‌ی ترم و حالت."""
+        list_id = data.get('list_id')
+        if list_id not in (None, ''):
+            try:
+                saved = DropoutExtractList.objects.select_related('term').get(pk=int(list_id))
+            except (DropoutExtractList.DoesNotExist, TypeError, ValueError):
+                return None, None, None, 'لیست ذخیره‌شده پیدا نشد'
+            return saved.term, saved.mode, saved, ''
+        mode = data.get('mode') or 'pair'
+        try:
+            term = Term.objects.get(pk=int(data.get('term_id')))
+        except (Term.DoesNotExist, TypeError, ValueError):
+            return None, None, None, 'ترم پیدا نشد'
+        return term, mode, None, ''
+
+    def get(self, request):
+        if not can_edit_menu(request.user, 'class-management'):
+            return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
+        term, mode, saved, error = self._scope(request.query_params)
+        if error:
+            return Response({'error': error}, status=status.HTTP_400_BAD_REQUEST)
+        from accounts.models import User
+        staff = User.objects.filter(role__in=('admin', 'office', 'employee'), is_active=True).order_by('first_name', 'last_name')
+        items = DropoutExtractFollowUp.objects.filter(saved_list=saved) if saved else DropoutExtractFollowUp.objects.filter(term=term, mode=mode, saved_list__isnull=True)
+        return Response({
+            'items': {i.national_code: self._payload(i) for i in items},
+            'staff': [{'id': u.id, 'name': (f'{u.first_name} {u.last_name}'.strip() or u.username)} for u in staff],
+        })
+
+    def post(self, request):
+        if not can_edit_menu(request.user, 'class-management'):
+            return Response({'error': 'دسترسی ویرایش ندارید'}, status=status.HTTP_403_FORBIDDEN)
+        term, mode, saved, error = self._scope(request.data)
+        if error:
+            return Response({'error': error}, status=status.HTTP_400_BAD_REQUEST)
+        rows = request.data.get('items')
+        if not isinstance(rows, list) or not rows:
+            return Response({'error': 'موردی برای ذخیره ارسال نشده است'}, status=status.HTTP_400_BAD_REQUEST)
+        if len(rows) > 3000:
+            return Response({'error': 'در هر نوبت حداکثر ۳۰۰۰ مورد قابل ذخیره است'}, status=status.HTTP_400_BAD_REQUEST)
+        from accounts.models import User
+        staff_ids = set(User.objects.filter(role__in=('admin', 'office', 'employee'), is_active=True).values_list('id', flat=True))
+        saved_result = {}
+        # در لیست‌های ذخیره‌شده، کلید ردیف می‌تواند کد ملی یا (برای افراد بدون کد ملی) شناسه‌ی داخلی «S…» باشد
+        list_keys = {str(r.get('key')) for r in (saved.rows or [])} if saved else set()
+        with transaction.atomic():
+            for row in rows:
+                raw_key = str(row.get('national_code') or '').strip()
+                code = raw_key if raw_key in list_keys else _valid_code(raw_key)
+                if not code:
+                    continue
+                item, _ = DropoutExtractFollowUp.objects.get_or_create(national_code=code, term=term, mode=mode, saved_list=saved)
+                if 'assigned_to' in row:
+                    value = row.get('assigned_to')
+                    if value in (None, ''):
+                        item.assigned_to_id = None
+                    else:
+                        try:
+                            value = int(value)
+                        except (TypeError, ValueError):
+                            return Response({'error': 'کارمند نامعتبر است'}, status=status.HTTP_400_BAD_REQUEST)
+                        if value not in staff_ids:
+                            return Response({'error': 'کارمند انتخاب‌شده معتبر نیست'}, status=status.HTTP_400_BAD_REQUEST)
+                        item.assigned_to_id = value
+                if 'contacted' in row:
+                    contacted = bool(row.get('contacted'))
+                    if contacted and not item.contacted:
+                        item.contacted_at = timezone.now()
+                    if not contacted:
+                        item.contacted_at = None
+                    item.contacted = contacted
+                if 'note' in row:
+                    item.note = str(row.get('note') or '')[:2000]
+                item.updated_by = request.user
+                item.save()
+                saved_result[code] = self._payload(item)
+        return Response({'items': saved_result})
+
+
+_LIST_ROW_KEYS = ('key', 'row_number', 'first_name', 'last_name', 'national_code', 'phone', 'level', 'day', 'time_slot',
+                  'teacher', 'class_number', 'last_term_id', 'last_term_title', 'student_id')
+
+
+class DropoutExtractListView(APIView):
+    """
+    لیست‌های ریزشیِ ذخیره‌شده برای پیگیری.
+    GET  : فهرست لیست‌ها (با آمار) | GET ?id=N : یک لیست کامل (ردیف‌ها + meta)
+    POST {name, term_id, mode, meta, rows} : ذخیره‌ی لیست؛ پیگیری‌های قبلیِ همان افراد (ارجاع/چک‌مارک/توضیحات) به لیست منتقل می‌شود
+    DELETE ?id=N : حذف لیست
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        if not can_edit_menu(request.user, 'class-management'):
+            return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
+        list_id = request.query_params.get('id')
+        if list_id:
+            try:
+                saved = DropoutExtractList.objects.select_related('term', 'created_by').get(pk=int(list_id))
+            except (DropoutExtractList.DoesNotExist, TypeError, ValueError):
+                return Response({'error': 'لیست پیدا نشد'}, status=status.HTTP_404_NOT_FOUND)
+            rows = saved.rows or []
+            if saved.mode == 'carryover':
+                # وضعیت لحظه‌ای ثبت‌نام هر نفر در ترم مقصد (خاکستری / قطعی شده / خارج شده)
+                from .carryover import carryover_registration_status
+                statuses = carryover_registration_status(saved)
+                rows = [{**row, 'reg_status': statuses.get(row.get('key'), '')} for row in rows]
+            return Response({
+                'id': saved.id, 'name': saved.name, 'mode': saved.mode, 'term_id': saved.term_id,
+                'meta': saved.meta, 'rows': rows, 'created_at': saved.created_at.isoformat(),
+            })
+        data = []
+        for saved in DropoutExtractList.objects.select_related('term', 'created_by').all()[:200]:
+            follow = DropoutExtractFollowUp.objects.filter(saved_list=saved)
+            registered = 0
+            if saved.mode == 'carryover':
+                from .carryover import carryover_registration_status
+                registered = sum(1 for label in carryover_registration_status(saved).values() if label == 'ثبت‌نام قطعی شد')
+            data.append({
+                'id': saved.id, 'name': saved.name, 'mode': saved.mode, 'auto': saved.mode == 'carryover',
+                'registered_count': registered, 'term_title': saved.term.title,
+                'count': len(saved.rows or []), 'contacted_count': follow.filter(contacted=True).count(),
+                'assigned_count': follow.filter(assigned_to__isnull=False).count(),
+                'created_at': saved.created_at.isoformat(),
+                'created_by': (f'{saved.created_by.first_name} {saved.created_by.last_name}'.strip() or saved.created_by.username) if saved.created_by else '',
+            })
+        return Response({'lists': data})
+
+    def post(self, request):
+        if not can_edit_menu(request.user, 'class-management'):
+            return Response({'error': 'دسترسی ویرایش ندارید'}, status=status.HTTP_403_FORBIDDEN)
+        try:
+            term = Term.objects.get(pk=int(request.data.get('term_id')))
+        except (Term.DoesNotExist, TypeError, ValueError):
+            return Response({'error': 'ترم پیدا نشد'}, status=status.HTTP_400_BAD_REQUEST)
+        mode = request.data.get('mode') or 'pair'
+        rows = request.data.get('rows')
+        if not isinstance(rows, list) or not rows:
+            return Response({'error': 'لیست ریزشی خالی است'}, status=status.HTTP_400_BAD_REQUEST)
+        if len(rows) > 5000:
+            return Response({'error': 'حداکثر ۵۰۰۰ نفر در هر لیست قابل ذخیره است'}, status=status.HTTP_400_BAD_REQUEST)
+        clean_rows, seen = [], set()
+        for row in rows:
+            code = _valid_code(row.get('national_code')) if isinstance(row, dict) else ''
+            if not code or code in seen:
+                continue
+            seen.add(code)
+            item = {key: row.get(key) for key in _LIST_ROW_KEYS}
+            item['key'] = code
+            item['national_code'] = code
+            clean_rows.append(item)
+        if not clean_rows:
+            return Response({'error': 'هیچ فردی با کد ملی معتبر در لیست نیست'}, status=status.HTTP_400_BAD_REQUEST)
+        name = str(request.data.get('name') or '').strip()[:200] or f'لیست ریزشی {term.title}'
+        meta = request.data.get('meta') if isinstance(request.data.get('meta'), dict) else {}
+        with transaction.atomic():
+            saved = DropoutExtractList.objects.create(
+                name=name, term=term, mode=mode, meta=meta, rows=clean_rows, created_by=request.user,
+            )
+            # پیگیری‌هایی که پیش از ذخیره روی همین افراد ثبت شده بود، به لیست جدید منتقل می‌شود
+            DropoutExtractFollowUp.objects.filter(
+                term=term, mode=mode, saved_list__isnull=True, national_code__in=list(seen),
+            ).update(saved_list=saved)
+        return Response({'id': saved.id, 'name': saved.name, 'count': len(clean_rows)}, status=status.HTTP_201_CREATED)
+
+    def delete(self, request):
+        if not can_edit_menu(request.user, 'class-management'):
+            return Response({'error': 'دسترسی ویرایش ندارید'}, status=status.HTTP_403_FORBIDDEN)
+        try:
+            DropoutExtractList.objects.get(pk=int(request.query_params.get('id'))).delete()
+        except (DropoutExtractList.DoesNotExist, TypeError, ValueError):
+            return Response({'error': 'لیست پیدا نشد'}, status=status.HTTP_404_NOT_FOUND)
+        return Response(status=status.HTTP_204_NO_CONTENT)

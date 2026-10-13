@@ -6,6 +6,7 @@ from rest_framework.permissions import IsAuthenticated
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 from datetime import timedelta
+from django.db import transaction
 from django.db.models import Case, IntegerField, Q, Value, When
 from accounts.models import ClassRequest, User
 from notifications.utils import send_notification
@@ -473,6 +474,72 @@ class CancelClassView(APIView):
             notif_type='class_rejected'
         )
         return Response({'message': 'کلاس کنسل شد'})
+
+
+class RefundClassView(APIView):
+    """ثبتِ استرداد وجه کلاس خصوصی و انتقال آن به بایگانی کنسل‌شده‌ها."""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, pk):
+        if request.user.role not in ('admin', 'office'):
+            return Response({'error': 'فقط مدیر یا کارشناس اداری می‌تواند استرداد را ثبت کند'}, status=status.HTTP_403_FORBIDDEN)
+        reference = str(request.data.get('refund_reference') or '').strip()[:100]
+        note = str(request.data.get('refund_note') or '').strip()
+        now = timezone.now()
+        try:
+            with transaction.atomic():
+                anchor = ClassRequest.objects.select_for_update().get(pk=pk)
+                if anchor.class_type != ClassRequest.ClassType.PRIVATE:
+                    return Response({'error': 'ثبت استرداد از این دکمه فقط برای کلاس خصوصی امکان‌پذیر است'}, status=status.HTTP_400_BAD_REQUEST)
+                members_qs = ClassRequest.objects.select_for_update()
+                if anchor.group_key:
+                    members_qs = members_qs.filter(group_key=anchor.group_key)
+                else:
+                    members_qs = members_qs.filter(pk=anchor.pk)
+                members = list(members_qs.select_related('student', 'teacher'))
+                if any(m.status == ClassRequest.Status.COMPLETED or m.sessions.filter(held=True, is_cancelled=False).exists() for m in members):
+                    return Response({'error': 'کلاسی که جلسه‌ای از آن برگزار شده یا مختومه است از این مسیر قابل استرداد کامل نیست'}, status=status.HTTP_400_BAD_REQUEST)
+                refund_targets = [m for m in members if m.payment_status == ClassRequest.PaymentStatus.PAID and not m.is_refunded]
+                if not refund_targets:
+                    return Response({'error': 'در این کلاس عضوِ پرداخت‌شده‌ی قابل استردادی وجود ندارد'}, status=status.HTTP_400_BAD_REQUEST)
+                refund_total = sum(int(member.total_price or member.amount or 0) for member in refund_targets)
+                for member in members:
+                    member.status = ClassRequest.Status.CANCELLED
+                    update_fields = ['status', 'updated_at']
+                    if member in refund_targets:
+                        # هر رکورد گروهی سهم همان زبان‌آموز را بایگانی می‌کند.
+                        member.is_refunded = True
+                        member.refund_amount = int(member.total_price or member.amount or 0)
+                        member.refund_date = now
+                        member.refund_reference = reference
+                        member.refund_note = note
+                        member.refund_recorded_by = request.user
+                        update_fields.extend([
+                            'is_refunded', 'refund_amount', 'refund_date', 'refund_reference',
+                            'refund_note', 'refund_recorded_by',
+                        ])
+                    # update_fields مانع بازحسابِ قیمت قدیمی در model.save می‌شود.
+                    member.save(update_fields=update_fields)
+                recipients = []
+                for member in members:
+                    recipients.append(member.student)
+                    recipients.extend(member.assigned_teachers.all())
+                    if member.teacher:
+                        recipients.append(member.teacher)
+                recipients = list({person.pk: person for person in recipients if person}.values())
+        except ClassRequest.DoesNotExist:
+            return Response({'error': 'درخواست کلاس پیدا نشد'}, status=status.HTTP_404_NOT_FOUND)
+        send_notification(
+            sender=request.user, recipients=recipients,
+            title='کلاس کنسل و استرداد وجه ثبت شد',
+            body='در سامانه، کنسلی کلاس و ثبت استرداد وجه ثبت شده است. برای جزئیات با آموزشگاه هماهنگ کنید.',
+            notif_type='class_rejected',
+        )
+        return Response({
+            'message': 'کلاس کنسل شد و استرداد وجه در بایگانی ثبت شد',
+            'cancelled_count': len(members), 'refunded_count': len(refund_targets),
+            'refund_total': refund_total,
+        })
 
 
 class RejectClassView(APIView):

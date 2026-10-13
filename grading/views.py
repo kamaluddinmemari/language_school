@@ -349,10 +349,8 @@ class TeacherMyGradingClassesView(APIView):
         term_id = request.query_params.get('term')
         term = Term.objects.filter(pk=term_id).first() if term_id else None
         if not term:
-            today = timezone.now().date()
-            term = Term.objects.filter(start_date__lte=today, end_date__gte=today).order_by('-start_date').first()
-        if not term:
-            term = Term.objects.order_by('-year', '-term_number').first()
+            from leads.models import get_current_term
+            term = get_current_term()
         if not term:
             return Response({'term': None, 'terms': [], 'classes': []})
 

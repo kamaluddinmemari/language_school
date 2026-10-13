@@ -99,16 +99,19 @@ def auto_mark_unregistered_registered(student, term_id=None, slot_id=None):
 
 def get_current_term():
     """
-    ترمی که تاریخ امروز داخل بازه‌ی start_date/end_date آن است؛ اگر هیچ ترمی امروز را
-    پوشش نمی‌دهد (مثلاً بین دو ترم)، جدیدترین ترم (بر اساس سال و شماره‌ترم) برگردانده
-    می‌شود. اگر اصلاً ترمی تعریف نشده باشد، None.
+    ترمی با جدیدترین تاریخ شروع که تا امروز آغاز شده است؛ تاریخ پایان در انتخاب پیش‌فرض
+    اثر ندارد. ترم‌های آینده تا روز شروع‌شان انتخاب نمی‌شوند. اگر هنوز ترمی شروع نشده،
+    نزدیک‌ترین ترم آینده و در نبود ترم None برگردانده می‌شود.
     """
     from class_management.models import Term
     today = timezone.localdate()
-    current = Term.objects.filter(start_date__lte=today, end_date__gte=today).first()
+    # ترم‌های آینده تا روز شروع‌شان نباید پیش‌فرض شوند؛ پایان‌یافتن ترم مانع
+    # از انتخاب آن به‌عنوان آخرین ترم شروع‌شده نیست.
+    current = Term.objects.filter(start_date__lte=today).order_by('-start_date', '-id').first()
     if current:
         return current
-    return sorted(Term.objects.all(), key=lambda t: (t.year, t.term_number))[-1] if Term.objects.exists() else None
+    # اگر هنوز هیچ ترمی شروع نشده، نزدیک‌ترین ترم آینده را برگردان.
+    return Term.objects.order_by('start_date', 'id').first()
 
 
 class NewLead(models.Model):
@@ -507,7 +510,7 @@ class DropoutFollowup(models.Model):
 class ExcelDropout(models.Model):
     """ریزشیِ استخراج‌شده از مقایسه‌ی اکسلِ دو ترم متوالی (برای جفت‌ترم‌هایی که «ترم اخیر و ترم قبلش» نیستند) — در بخش ریزشی‌ها نمایش داده می‌شود."""
     student = models.ForeignKey(User, on_delete=models.CASCADE, related_name='excel_dropouts')
-    from_term = models.ForeignKey('class_management.Term', on_delete=models.CASCADE, related_name='+')
+    from_term = models.ForeignKey('class_management.Term', on_delete=models.CASCADE, related_name='+', null=True, blank=True)
     to_term = models.ForeignKey('class_management.Term', on_delete=models.CASCADE, related_name='+')
     level = models.CharField(max_length=50, blank=True)
     created_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='+')

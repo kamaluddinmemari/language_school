@@ -64,6 +64,14 @@ class ClassRequestAdminSerializer(serializers.ModelSerializer):
     completed_at_jalali = serializers.ReadOnlyField()
     class_date_jalali = serializers.ReadOnlyField()
     payment_confirmed_at_jalali = serializers.ReadOnlyField()
+    refund_date_jalali = serializers.ReadOnlyField()
+    refund_recorded_by_name = serializers.SerializerMethodField()
+    is_refunded = serializers.BooleanField(read_only=True)
+    refund_amount = serializers.IntegerField(read_only=True)
+    refund_date = serializers.DateTimeField(read_only=True)
+    refund_reference = serializers.CharField(read_only=True)
+    refund_note = serializers.CharField(read_only=True)
+    refund_recorded_by = serializers.PrimaryKeyRelatedField(read_only=True)
     sessions = ClassSessionSerializer(many=True, read_only=True)
     # خواسته: با کنسل‌شدنِ جلسات (۲ به بعد)، سهم واقعیِ استاد/مدرسه طبق جلساتِ باقی‌مانده
     # و اختلافش با مبلغِ کلاسِ «از ابتدا با همین تعداد جلسه ست‌شده» (بدون کنسلی) نمایش داده شود.
@@ -74,6 +82,17 @@ class ClassRequestAdminSerializer(serializers.ModelSerializer):
     effective_school_share = serializers.ReadOnlyField()
     teacher_share_difference_from_original = serializers.ReadOnlyField()
     total_price_difference_from_original = serializers.ReadOnlyField()
+
+    def to_internal_value(self, data):
+        # ورودی فرم هنگام انتقال paid → unpaid تاریخ پرداخت را به شکل رشته‌ی خالی می‌فرستاد؛
+        # DateTimeField رشته‌ی خالی را نمی‌پذیرد، پس آن را به null تبدیل می‌کنیم.
+        if data.get('payment_confirmed_at') == '':
+            data = data.copy()
+            data['payment_confirmed_at'] = None
+        return super().to_internal_value(data)
+
+    def get_refund_recorded_by_name(self, obj):
+        return obj.refund_recorded_by.get_full_name() if obj.refund_recorded_by else ''
 
     def validate(self, attrs):
         payment_status = attrs.get('payment_status', getattr(self.instance, 'payment_status', None))
@@ -110,6 +129,8 @@ class ClassRequestAdminSerializer(serializers.ModelSerializer):
             'teacher_payment_status', 'teacher_payment_date', 'teacher_payment_amount',
             'receipt', 'amount', 'payment_status',
             'payment_method', 'payment_reference', 'payment_confirmed_at', 'payment_confirmed_at_jalali',
+            'is_refunded', 'refund_amount', 'refund_date', 'refund_date_jalali', 'refund_reference', 'refund_note',
+            'refund_recorded_by', 'refund_recorded_by_name',
             'status', 'notes',
             'is_completed', 'completed_at', 'completed_at_jalali',
             'satisfaction', 'satisfaction_text', 'satisfaction_approved',
@@ -118,11 +139,21 @@ class ClassRequestAdminSerializer(serializers.ModelSerializer):
         ]
 
     def update(self, instance, validated_data):
-        # بعد از پرداخت، مورد باید از انتهای صف خارج و در گروه پرداخت‌شده‌ها
-        # طبق تاریخ ثبت قرار بگیرد؛ اولویت دستی قبلی نباید این رفتار را نقض کند.
-        if validated_data.get('payment_status') == ClassRequest.PaymentStatus.PAID:
-            validated_data['force_last'] = False
-            validated_data['manual_priority'] = None
+        # تغییر وضعیت پرداخت باید بلافاصله در صف/رنگ/فیلتر منعکس شود. هنگام برگشت
+        # از پرداخت‌شده به پرداخت‌نشده، اطلاعات پرداخت و اولویت دستی قبلی پاک می‌شوند
+        # تا کلاس طبق قواعد عادیِ کلاس‌های پرداخت‌نشده دوباره جای‌گذاری شود.
+        if 'payment_status' in validated_data:
+            next_payment_status = validated_data['payment_status']
+            if next_payment_status == ClassRequest.PaymentStatus.PAID:
+                validated_data['force_last'] = False
+                validated_data['manual_priority'] = None
+            else:
+                validated_data['payment_method'] = ''
+                validated_data['payment_reference'] = ''
+                validated_data['payment_confirmed_at'] = None
+                if instance.payment_status == ClassRequest.PaymentStatus.PAID:
+                    validated_data['force_last'] = False
+                    validated_data['manual_priority'] = None
         return super().update(instance, validated_data)
 
     read_only_fields = [

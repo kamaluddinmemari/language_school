@@ -138,9 +138,10 @@ class AvailableClassSlotsForLevelView(APIView):
     GENDER_MAP = {'female': 'girls', 'male': 'boys'}
 
     def get(self, request):
-        from class_management.models import ClassSlot, Term
+        from class_management.models import ClassSlot
+        from leads.models import get_current_term
         gender = (request.query_params.get('gender') or '').strip()
-        latest_term = Term.objects.order_by('-year', '-term_number').first()
+        latest_term = get_current_term()
         if not latest_term:
             return Response([])
         qs = ClassSlot.objects.filter(term=latest_term).exclude(assigned_level='')

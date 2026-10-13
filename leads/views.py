@@ -545,15 +545,18 @@ class DropoutStudentListView(APIView):
                 'needs_retest': days_missing > 60,
                 'followups': [{'id': f.id, 'date': f.followed_up_at_jalali, 'by': f.followed_up_by_name, 'note': f.note} for f in followups],
             })
-        if from_term and to_term:
+        if to_term:
             from .models import ExcelDropout
             have = {row['student_id'] for row in rows}
-            for extracted in ExcelDropout.objects.filter(from_term=from_term, to_term=to_term).select_related('student'):
+            extracted_qs = ExcelDropout.objects.filter(to_term=to_term)
+            if from_term:
+                extracted_qs = extracted_qs.filter(Q(from_term=from_term) | Q(from_term__isnull=True))
+            for extracted in extracted_qs.select_related('student'):
                 student = extracted.student
                 if student.id in have or ClassSlotEnrollment.objects.filter(class_slot__term=to_term, student=student).exists():
                     continue
-                days_missing = max(0, (today - from_term.end_date).days) if getattr(from_term, 'end_date', None) else 0
-                followups = DropoutFollowup.objects.filter(student=student, from_term=from_term, to_term=to_term).select_related('followed_up_by').order_by('-followed_up_at')
+                days_missing = max(0, (today - from_term.end_date).days) if from_term and getattr(from_term, 'end_date', None) else 0
+                followups = DropoutFollowup.objects.filter(student=student, from_term=extracted.from_term, to_term=to_term).select_related('followed_up_by').order_by('-followed_up_at')
                 rows.append({
                     'student_id': student.id, 'first_name': student.first_name, 'last_name': student.last_name,
                     'father_name': getattr(student, 'father_name', ''), 'national_code': getattr(student, 'national_code', ''),
@@ -726,6 +729,17 @@ def _slot_gender_ok(slot, gender):
     return (slot.gender == ClassSlot.Gender.GIRLS and gender == 'female') or (slot.gender == ClassSlot.Gender.BOYS and gender == 'male')
 
 
+def _gender_from_enrolled_slot(slot):
+    """روز فرد را آقا و روز زوج را خانم می‌گیرد؛ جنسیت صریحِ ناسازگارِ کلاس مقدم است."""
+    if not slot:
+        return ''
+    day_gender = {'even': 'female', 'odd': 'male'}.get(slot.day_type, '')
+    class_gender = {'girls': 'female', 'boys': 'male'}.get(slot.gender, '')
+    if class_gender and day_gender and class_gender != day_gender:
+        return class_gender
+    return day_gender or class_gender or ''
+
+
 def _standard_level(student):
     """سطح استاندارد (پیشنهادیِ سیستم) دانش‌آموز؛ اگر دانش‌آموز پرونده ندارد خالی."""
     if not student:
@@ -757,7 +771,9 @@ def _register_class_options(term_id, student, level_hint, gray_slot_ids, gender_
         level = (level_hint or '').strip()
     if not level and student:
         level = _compute_level_suggestion(student).get('level') or ''
-    gender = (getattr(student, 'gender', '') if student else '') or gender_hint or ''
+    # جنسیت ثبت‌نام‌شده از روی کلاس مبدأ تعیین می‌شود، نه از جنسیت پروفایل قدیمی فرد.
+    enrolled_slot = next((by_id.get(slot_id) for slot_id in gray_slot_ids if by_id.get(slot_id)), None)
+    gender = _gender_from_enrolled_slot(enrolled_slot) or (getattr(student, 'gender', '') if student else '') or gender_hint or ''
 
     def gender_ok(slot):
         if slot.gender == ClassSlot.Gender.MIXED or not gender:
@@ -1016,7 +1032,7 @@ class UnregisteredMoveOptionsView(APIView):
         from class_management.serializers import ClassSlotSerializer
         from class_management.views import _normalize_level, tuition_difference
         source = enrollment.class_slot
-        gender = enrollment.student.gender or item.gender or {'girls': 'female', 'boys': 'male'}.get(source.gender, '')
+        gender = _gender_from_enrolled_slot(source)
         level = (request.query_params.get('level') or '').strip() or source.assigned_level or ''
         pool = [
             c for c in ClassSlot.objects.filter(term_id=source.term_id).exclude(pk=source.pk).order_by('number', 'day_type', 'time_slot')
@@ -1092,7 +1108,7 @@ class UnregisteredMoveView(APIView):
             student = enrollment.student
             if target.pk == source.pk:
                 return Response({'error': 'کلاس مقصد نمی‌تواند همان کلاس فعلی باشد'}, status=status.HTTP_400_BAD_REQUEST)
-            if not _slot_gender_ok(target, student.gender or item.gender):
+            if not _slot_gender_ok(target, _gender_from_enrolled_slot(source)):
                 return Response({'error': 'جنسیت این فرد با کلاس مقصد (دخترانه/پسرانه) مغایرت دارد؛ جابجایی انجام نشد'}, status=status.HTTP_400_BAD_REQUEST)
             force = str(request.data.get('force_over_capacity', '')).lower() in ('1', 'true', 'yes')
             if target.real_seats_left <= 0 and not force:

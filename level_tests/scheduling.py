@@ -93,6 +93,7 @@ def teacher_busy_intervals(day):
     """[(شروع_دقیقه, پایان_دقیقه, دلیل)] — برنامه‌ی واقعی استاد ارزیاب در تاریخ میلادیِ day"""
     from class_management.attendance import _slot_weekdays
     from class_management.models import ClassSlot, Term, TeacherSessionEvent
+    from leads.models import get_current_term
     from accounts.models import ClassRequest
     from group_classes.models import GroupSession
 
@@ -100,7 +101,7 @@ def teacher_busy_intervals(day):
 
     # ۱) کلاس‌های ترمی — همیشه «آخرین ترمِ موجود» (بزرگ‌ترین سال، بعد بزرگ‌ترین شماره‌ی ترم)،
     # حتی اگر تاریخ انتخاب‌شده بیرون از بازه‌ی همان ترم باشد (الگوی هفتگی کلاس‌ها ملاک است)
-    latest_term = Term.objects.order_by('-year', '-term_number').first()
+    latest_term = get_current_term()
     slots = ClassSlot.objects.select_related('term').filter(term=latest_term).exclude(teacher_name='') if latest_term else []
     for slot in slots:
         if not is_evaluator_name(slot.teacher_name):
