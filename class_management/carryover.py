@@ -222,16 +222,33 @@ def sync_carryover_followup_list(target_slots, source_term, target_term, user=No
     )
 
 
-def carryover_registration_status(saved):
-    """وضعیت لحظه‌ایِ ثبت‌نام هر نفرِ فایل پیگیریِ انتقالی‌ها در ترم مقصد: {کلید ردیف: متن وضعیت}."""
+def list_registration_status(saved):
+    """
+    وضعیت لحظه‌ایِ ثبت‌نام هر نفرِ یک لیست پیگیری در ترم مقصد، صرف‌نظر از اینکه از کدام مسیر ثبت‌نام شده باشد
+    (اکسل کلاس، ثبت‌نام دستی، ثبت در کلاس از پیگیری‌ها، تسویه بدهکار، ثبت‌نام خودِ دانش‌آموز، …).
+    خروجی: {کلید ردیف: 'ثبت‌نام قطعی شد' | 'منتظر ثبت‌نام' | 'در انتظار تأیید پرداخت' | 'ثبت‌نام نشده'}
+    """
+    from accounts.models import User
     rows = saved.rows or []
-    ids = [row.get('student_id') for row in rows if row.get('student_id')]
+    digits = lambda v: ''.join(ch for ch in str(v or '') if ch.isdigit())
+    ids = {row.get('student_id') for row in rows if row.get('student_id')}
+    codes = {digits(row.get('national_code')) for row in rows if len(digits(row.get('national_code'))) == 10}
+    phones = {digits(row.get('phone')) for row in rows if digits(row.get('phone'))}
+    students = User.objects.filter(role='student').filter(Q(pk__in=ids) | Q(national_code__in=codes) | Q(phone__in=phones))
+    by_id, by_code, by_phone = {}, {}, {}
+    for u in students:
+        by_id[u.pk] = u
+        if u.national_code:
+            by_code[digits(u.national_code)] = u
+        if u.phone:
+            by_phone[digits(u.phone)] = u
     by_student = {}
-    for e in ClassSlotEnrollment.objects.filter(class_slot__term_id=saved.term_id, student_id__in=ids):
+    for e in ClassSlotEnrollment.objects.filter(class_slot__term_id=saved.term_id, student_id__in=list(by_id.keys())):
         by_student.setdefault(e.student_id, []).append(e)
     result = {}
     for row in rows:
-        items = by_student.get(row.get('student_id'), [])
+        user = by_id.get(row.get('student_id')) or by_code.get(digits(row.get('national_code'))) or by_phone.get(digits(row.get('phone')))
+        items = by_student.get(user.pk, []) if user else []
         if any(e.payment_verified and (not e.is_carryover or e.carryover_confirmed) for e in items):
             label = 'ثبت‌نام قطعی شد'
         elif any(e.is_carryover and not e.carryover_confirmed and e.payment_verified for e in items):
@@ -239,6 +256,9 @@ def carryover_registration_status(saved):
         elif items:
             label = 'در انتظار تأیید پرداخت'
         else:
-            label = 'از کلاس خارج شد / بدون ثبت‌نام'
+            label = 'ثبت‌نام نشده'
         result[row.get('key')] = label
     return result
+
+
+carryover_registration_status = list_registration_status  # نام قدیمی (سازگاری)

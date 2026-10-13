@@ -429,6 +429,7 @@ class DropoutExtractFollowUpView(APIView):
             'national_code': item.national_code,
             'assigned_to': item.assigned_to_id,
             'contacted': item.contacted,
+            'not_coming': item.not_coming,
             'contacted_at': item.contacted_at.isoformat() if item.contacted_at else '',
             'note': item.note,
         }
@@ -506,6 +507,8 @@ class DropoutExtractFollowUpView(APIView):
                     if not contacted:
                         item.contacted_at = None
                     item.contacted = contacted
+                if 'not_coming' in row:
+                    item.not_coming = bool(row.get('not_coming'))
                 if 'note' in row:
                     item.note = str(row.get('note') or '')[:2000]
                 item.updated_by = request.user
@@ -537,11 +540,10 @@ class DropoutExtractListView(APIView):
             except (DropoutExtractList.DoesNotExist, TypeError, ValueError):
                 return Response({'error': 'لیست پیدا نشد'}, status=status.HTTP_404_NOT_FOUND)
             rows = saved.rows or []
-            if saved.mode == 'carryover':
-                # وضعیت لحظه‌ای ثبت‌نام هر نفر در ترم مقصد (خاکستری / قطعی شده / خارج شده)
-                from .carryover import carryover_registration_status
-                statuses = carryover_registration_status(saved)
-                rows = [{**row, 'reg_status': statuses.get(row.get('key'), '')} for row in rows]
+            # وضعیت لحظه‌ای ثبت‌نام هر نفر در ترم مقصد؛ از هر مسیری که ثبت‌نام شده باشد (خاکستری و غیرفعال می‌شود)
+            from .carryover import list_registration_status
+            statuses = list_registration_status(saved)
+            rows = [{**row, 'reg_status': statuses.get(row.get('key'), '')} for row in rows]
             return Response({
                 'id': saved.id, 'name': saved.name, 'mode': saved.mode, 'term_id': saved.term_id,
                 'meta': saved.meta, 'rows': rows, 'created_at': saved.created_at.isoformat(),
@@ -549,12 +551,10 @@ class DropoutExtractListView(APIView):
         data = []
         for saved in DropoutExtractList.objects.select_related('term', 'created_by').all()[:200]:
             follow = DropoutExtractFollowUp.objects.filter(saved_list=saved)
-            registered = 0
-            if saved.mode == 'carryover':
-                from .carryover import carryover_registration_status
-                registered = sum(1 for label in carryover_registration_status(saved).values() if label == 'ثبت‌نام قطعی شد')
+            from .carryover import list_registration_status
+            registered = sum(1 for label in list_registration_status(saved).values() if label == 'ثبت‌نام قطعی شد')
             data.append({
-                'id': saved.id, 'name': saved.name, 'mode': saved.mode, 'auto': saved.mode == 'carryover',
+                'id': saved.id, 'name': saved.name, 'mode': saved.mode, 'auto': saved.mode == 'carryover', 'not_coming_count': follow.filter(not_coming=True).count(),
                 'registered_count': registered, 'term_title': saved.term.title,
                 'count': len(saved.rows or []), 'contacted_count': follow.filter(contacted=True).count(),
                 'assigned_count': follow.filter(assigned_to__isnull=False).count(),
@@ -608,3 +608,111 @@ class DropoutExtractListView(APIView):
         except (DropoutExtractList.DoesNotExist, TypeError, ValueError):
             return Response({'error': 'لیست پیدا نشد'}, status=status.HTTP_404_NOT_FOUND)
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+def _list_row_context(saved, key, create=False):
+    """(row, student, adapter) برای یک ردیف لیست ذخیره‌شده؛ adapter شبیه رکورد «ثبت‌نام‌نشده» است تا منطق ثبت در کلاس همان بماند."""
+    from types import SimpleNamespace
+    from accounts.models import User
+    from leads.views import _resolve_unregistered_student
+    row = next((r for r in (saved.rows or []) if str(r.get('key')) == str(key)), None)
+    if not row:
+        return None, None, None
+    adapter = SimpleNamespace(
+        first_name=row.get('first_name') or '', last_name=row.get('last_name') or '',
+        national_code=_valid_code(row.get('national_code')), phone=_digits(row.get('phone')),
+        class_level=row.get('level') or '', gender='',
+    )
+    student = None
+    if row.get('student_id'):
+        student = User.objects.filter(pk=row.get('student_id'), role='student').first()
+    if not student:
+        student = _resolve_unregistered_student(adapter, create=create)
+    return row, student, adapter
+
+
+class DropoutExtractRegisterOptionsView(APIView):
+    """GET ?list_id=&key= : کلاس‌های پیشنهادی برای «ثبت در کلاس» یک نفر از لیست پیگیری (همان منطق پیگیری ثبت‌نام‌نشده‌ها)."""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        if not can_edit_menu(request.user, 'class-management'):
+            return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
+        try:
+            saved = DropoutExtractList.objects.select_related('term').get(pk=int(request.query_params.get('list_id')))
+        except (DropoutExtractList.DoesNotExist, TypeError, ValueError):
+            return Response({'error': 'لیست پیدا نشد'}, status=status.HTTP_404_NOT_FOUND)
+        row, student, adapter = _list_row_context(saved, request.query_params.get('key'))
+        if not row:
+            return Response({'error': 'این فرد در لیست پیدا نشد'}, status=status.HTTP_404_NOT_FOUND)
+        from leads.views import _register_class_options
+        from .carryover import gray_enrollments
+        term_id = saved.term_id
+        gray_slot_ids = [e.class_slot_id for e in gray_enrollments(student, term_id)] if student else []
+        # ملاک این مسیر فقط ستون «سطح» همان ردیفِ لیست ذخیره‌شده است؛
+        # سطح پرونده یا آخرین ثبت‌نام نباید پیشنهادها را تغییر دهد.
+        current_level = adapter.class_level
+        level, classes = _register_class_options(term_id, student, current_level, gray_slot_ids, '', progressive_levels=True)
+        return Response({
+            'student_id': getattr(student, 'id', None), 'student_name': f"{adapter.first_name} {adapter.last_name}",
+            'level': level, 'term': term_id, 'term_title': saved.term.title, 'standard_level': current_level,
+            'has_gray_class': bool(gray_slot_ids), 'classes': classes,
+        })
+
+
+class DropoutExtractRegisterView(APIView):
+    """
+    POST {list_id, key, class_slot_id, payment_method, tuition_amount, pos_reference_code}
+    ثبت قطعیِ فرد در کلاس انتخاب‌شده (همان منطق «ثبت در کلاس» پیگیری ثبت‌نام‌نشده‌ها). بعد از آن اسم او در همه‌ی لیست‌ها
+    خاکستری و غیرفعال می‌شود و ردیف «ثبت‌نام‌نشده/ریزشی» هم‌ترمش (اگر باشد) «ثبت‌نام شد» می‌شود.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        if not can_edit_menu(request.user, 'class-management'):
+            return Response({'error': 'دسترسی ویرایش ندارید'}, status=status.HTTP_403_FORBIDDEN)
+        from .models import ClassSlot
+        from .carryover import register_student_in_slot
+        from leads.models import UnregisteredStudent
+        from leads.views import _slot_gender_ok
+        try:
+            saved = DropoutExtractList.objects.select_related('term').get(pk=int(request.data.get('list_id')))
+        except (DropoutExtractList.DoesNotExist, TypeError, ValueError):
+            return Response({'error': 'لیست پیدا نشد'}, status=status.HTTP_404_NOT_FOUND)
+        with transaction.atomic():
+            row, student, adapter = _list_row_context(saved, request.data.get('key'), create=True)
+            if not row:
+                return Response({'error': 'این فرد در لیست پیدا نشد'}, status=status.HTTP_404_NOT_FOUND)
+            if not student:
+                return Response({'error': 'ساخت/پیدا کردن پرونده‌ی دانش‌آموز ممکن نشد'}, status=status.HTTP_400_BAD_REQUEST)
+            try:
+                slot = ClassSlot.objects.select_for_update().get(pk=int(request.data.get('class_slot_id')))
+            except (ClassSlot.DoesNotExist, TypeError, ValueError):
+                return Response({'error': 'کلاس انتخاب‌شده پیدا نشد'}, status=status.HTTP_404_NOT_FOUND)
+            if not _slot_gender_ok(slot, student.gender):
+                return Response({'error': 'جنسیت این فرد با کلاس انتخاب‌شده (دخترانه/پسرانه) مغایرت دارد؛ ثبت‌نام انجام نشد'}, status=status.HTTP_400_BAD_REQUEST)
+            payment_method = str(request.data.get('payment_method') or ClassSlotEnrollment.PaymentMethod.CASH)
+            if payment_method not in {v for v, _l in ClassSlotEnrollment.PaymentMethod.choices}:
+                return Response({'error': 'روش پرداخت نامعتبر است'}, status=status.HTTP_400_BAD_REQUEST)
+            try:
+                tuition_amount = max(int(request.data.get('tuition_amount') or 0), 0)
+            except (TypeError, ValueError):
+                return Response({'error': 'مبلغ نامعتبر است'}, status=status.HTTP_400_BAD_REQUEST)
+            _enrollment, error = register_student_in_slot(
+                student, slot, payment_method=payment_method, tuition_amount=tuition_amount,
+                pos_reference_code=str(request.data.get('pos_reference_code') or '')[:50],
+            )
+            if error:
+                transaction.set_rollback(True)
+                return Response({'error': error}, status=status.HTTP_400_BAD_REQUEST)
+            # ردیف‌های «ثبت‌نام‌نشده/ریزشی» همین فرد در همین ترم: ثبت‌نام شد
+            conditions = Q()
+            if adapter.national_code:
+                conditions |= Q(national_code=adapter.national_code)
+            if adapter.phone:
+                conditions |= Q(phone=adapter.phone)
+            if conditions:
+                UnregisteredStudent.objects.filter(term=saved.term, status=UnregisteredStudent.Status.TRACKING).filter(conditions).update(
+                    status=UnregisteredStudent.Status.REGISTERED, registered_at=timezone.now(),
+                )
+        return Response({'registered_class_number': slot.number, 'student_id': student.id})

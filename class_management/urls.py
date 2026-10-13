@@ -1,5 +1,5 @@
 from django.urls import path
-from .dropout_extract import DropoutExtractParseView, DropoutExtractComputeView, DropoutExtractCommitView, DropoutExtractFollowUpView, DropoutExtractListView
+from .dropout_extract import DropoutExtractParseView, DropoutExtractComputeView, DropoutExtractCommitView, DropoutExtractFollowUpView, DropoutExtractListView, DropoutExtractRegisterOptionsView, DropoutExtractRegisterView
 from .views import (
     ClassSlotListView, ClassSlotDetailView, SwapClassLocationView, TransferClassLocationView, AllocateClassesView,
     ConfirmOverflowView, EnrollmentPulseView, StudentClassSearchView, TransferSurplusView, SpinOffSurplusView, ClassStatsView,
@@ -74,6 +74,8 @@ urlpatterns = [
     path('class-management/dropout-extract/compute/', DropoutExtractComputeView.as_view(), name='dropout_extract_compute'),
     path('class-management/dropout-extract/commit/', DropoutExtractCommitView.as_view(), name='dropout_extract_commit'),
     path('class-management/dropout-extract/lists/', DropoutExtractListView.as_view(), name='dropout_extract_lists'),
+    path('class-management/dropout-extract/register-options/', DropoutExtractRegisterOptionsView.as_view(), name='dropout_extract_register_options'),
+    path('class-management/dropout-extract/register/', DropoutExtractRegisterView.as_view(), name='dropout_extract_register'),
     path('class-management/dropout-extract/followups/', DropoutExtractFollowUpView.as_view(), name='dropout_extract_followups'),
     path('class-management/terms/', TermListView.as_view(), name='term_list'),
     path('class-management/terms/<int:pk>/', TermDetailView.as_view(), name='term_detail'),

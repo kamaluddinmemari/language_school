@@ -751,22 +751,31 @@ def _standard_level(student):
         return ''
 
 
-def _register_class_options(term_id, student, level_hint, gray_slot_ids, gender_hint=''):
+def _register_class_options(term_id, student, level_hint, gray_slot_ids, gender_hint='', progressive_levels=False):
     """
     کلاس‌های پیشنهادی برای ثبت در کلاس: اول کلاس خاکستری (پیشنهاد اصلی)، بعد هم‌سطح و هم‌جنسیت.
     اگر سطح نامشخص باشد همه‌ی کلاس‌های هم‌جنسیت ترم نشان داده می‌شود (هیچ‌وقت خطای نبودن سطح نمی‌دهد).
+    در حالت progressive_levels، از سطح فعلی به بعد و سپس همه‌ی سطح‌های گروه‌های سنی بعدی پیشنهاد می‌شوند.
     """
     from class_management.models import ClassSlot
     from class_management.serializers import ClassSlotSerializer
     from class_management.views import _compute_level_suggestion, _normalize_level
+    from level_tests.models import StandardLevel
+    from types import SimpleNamespace
 
     slots = list(ClassSlot.objects.filter(term_id=term_id).order_by('number', 'day_type', 'time_slot')) if term_id else []
     by_id = {slot.id: slot for slot in slots}
     level = ''
-    for slot_id in gray_slot_ids:
-        if by_id.get(slot_id) and by_id[slot_id].assigned_level:
-            level = by_id[slot_id].assigned_level
-            break
+    if progressive_levels:
+        # برای استخراج ریزشی، مبنا سطح استاندارد فعلی فرد است؛ نه سطح کلاس آخر یا کلاس خاکستری.
+        level = (level_hint or '').strip()
+        if not level and student:
+            level = _compute_level_suggestion(student).get('level') or ''
+    if not level:
+        for slot_id in gray_slot_ids:
+            if by_id.get(slot_id) and by_id[slot_id].assigned_level:
+                level = by_id[slot_id].assigned_level
+                break
     if not level:
         level = (level_hint or '').strip()
     if not level and student:
@@ -780,18 +789,67 @@ def _register_class_options(term_id, student, level_hint, gray_slot_ids, gender_
             return True
         return (slot.gender == ClassSlot.Gender.GIRLS and gender == 'female') or (slot.gender == ClassSlot.Gender.BOYS and gender == 'male')
 
+    def level_meta(code):
+        raw = str(code or '').strip()
+        if not raw:
+            return None
+        db_level = StandardLevel.objects.filter(code__iexact=raw).first()
+        if db_level:
+            return db_level
+        normalized = raw.lower().replace(' ', '')
+        fallback_sequences = (
+            ('kids', [f'{prefix}{n}' for prefix in ('e', 's', 'g', 'u', 'm', 'h', 'i') for n in range(1, 6)]),
+            ('teen', ['teenstarter'] + [f'teen{n}' for n in range(1, 16)]),
+            ('adult', [str(n) for block in range(1, 7) for n in range(block * 100 + 1, block * 100 + 7)]),
+        )
+        for age_group, sequence in fallback_sequences:
+            if normalized in sequence:
+                return SimpleNamespace(age_group=age_group, order=sequence.index(normalized))
+        return None
+
     target_level = _normalize_level(level)
-    suggested, same_level, others = [], [], []
+    current_standard = level_meta(level)
+    age_rank = {'kids': 0, 'teen': 1, 'adult': 2}
+    current_age_rank = age_rank.get(current_standard.age_group) if current_standard else None
+    allowed_age_groups = {
+        'kids': {'kids', 'teen'},
+        'teen': {'teen', 'adult'},
+        'adult': {'adult'},
+    }
+    slot_level_meta = {
+        str(slot.assigned_level or '').strip().lower(): level_meta(slot.assigned_level)
+        for slot in slots if slot.assigned_level
+    }
+
+    def progressive_ok(slot):
+        """سطح فعلی و همه‌ی سطح‌های بعدی؛ بعد از کودک، نوجوان و بعد از نوجوان، بزرگسال هم مجاز است."""
+        if not progressive_levels:
+            return True
+        slot_level = slot_level_meta.get(str(slot.assigned_level or '').strip().lower())
+        if not current_standard:
+            return bool(slot_level and _normalize_level(slot.assigned_level) == target_level)
+        if not slot_level:
+            return False
+        slot_age_rank = age_rank.get(slot_level.age_group)
+        if slot_age_rank is None or current_age_rank is None or slot_level.age_group not in allowed_age_groups.get(current_standard.age_group, set()):
+            return False
+        return slot_age_rank > current_age_rank or slot_level.order >= current_standard.order
+
+    suggested, same_level, progressive_others, others = [], [], [], []
     for slot in slots:
         if not gender_ok(slot):
+            continue
+        if not progressive_ok(slot):
             continue
         if slot.id in gray_slot_ids:
             suggested.append(slot)
         elif target_level and _normalize_level(slot.assigned_level) == target_level:
             same_level.append(slot)
+        elif progressive_levels and current_standard:
+            progressive_others.append(slot)
         else:
             others.append(slot)
-    rest = same_level if (target_level and (same_level or suggested)) else (same_level + others)
+    rest = (same_level + progressive_others) if progressive_levels and current_standard else (same_level if (target_level and (same_level or suggested)) else (same_level + others))
     from class_management.models import TuitionSetting, infer_age_group_from_level
     tuition_cache = {}
 
@@ -803,13 +861,28 @@ def _register_class_options(term_id, student, level_hint, gray_slot_ids, gender_
             tuition_cache[lvl] = st.amount if st else 0
         return tuition_cache[lvl]
 
+    ordered = [(sl, 'suggested') for sl in suggested] + [(sl, 'other') for sl in rest]
+    if progressive_levels and current_standard:
+        # سطح‌ها از کم به زیاد؛ کلاس خاکستری فقط در سطح خودش اولویت دارد، نه اینکه
+        # ترتیب سطح‌ها را به‌هم بزند. در یک سطح، شماره/ترتیب کلاس همان ترتیب قبلی است.
+        ordered.sort(key=lambda pair: (
+            age_rank.get(slot_level_meta.get(str(pair[0].assigned_level or '').strip().lower()).age_group, 99)
+            if slot_level_meta.get(str(pair[0].assigned_level or '').strip().lower()) else 99,
+            slot_level_meta.get(str(pair[0].assigned_level or '').strip().lower()).order
+            if slot_level_meta.get(str(pair[0].assigned_level or '').strip().lower()) else 999999,
+            0 if pair[1] == 'suggested' else 1,
+            pair[0].number,
+            pair[0].day_type,
+            pair[0].time_slot,
+        ))
+
     classes = []
-    for slot, tag in [(sl, 'suggested') for sl in suggested] + [(sl, 'other') for sl in rest]:
+    for slot, tag in ordered:
         item = ClassSlotSerializer(slot).data
         item['suggested'] = tag == 'suggested'
         item['tuition_amount'] = slot_tuition(slot)
         item['suggestion_reason'] = 'اسم فرد در این کلاس به‌صورت «منتظر ثبت‌نام» (خاکستری) آمده است' if tag == 'suggested' else (
-            'هم‌سطح و هم‌جنسیت' if target_level and _normalize_level(slot.assigned_level) == target_level else 'سطح فرد مشخص نیست / کلاس هم‌جنسیت'
+            'هم‌سطح و هم‌جنسیت' if target_level and _normalize_level(slot.assigned_level) == target_level else ('از این سطح به بعد و گروه سنی بعدی' if progressive_levels and current_standard else 'سطح فرد مشخص نیست / کلاس هم‌جنسیت')
         )
         classes.append(item)
     return level, classes

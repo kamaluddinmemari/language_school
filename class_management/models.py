@@ -937,6 +937,7 @@ class DropoutExtractFollowUp(models.Model):
         settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name='+',
     )
     contacted = models.BooleanField(default=False)
+    not_coming = models.BooleanField(default=False)  # «فرد کلا نمی‌آید» — ردیف قرمز و خارج از پیگیری
     contacted_at = models.DateTimeField(null=True, blank=True)
     note = models.TextField(blank=True)
     updated_by = models.ForeignKey(
