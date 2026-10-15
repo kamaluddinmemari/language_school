@@ -422,6 +422,7 @@ class UnregisteredStudentRegisterView(APIView):
                 return Response({'error': 'مورد پیدا نشد'}, status=status.HTTP_404_NOT_FOUND)
             slot_id = request.data.get('class_slot_id')
             registered_class = None
+            tuition_amount = 0
             if slot_id:
                 from class_management.models import ClassSlot, ClassSlotEnrollment
                 from class_management.carryover import register_student_in_slot
@@ -453,10 +454,24 @@ class UnregisteredStudentRegisterView(APIView):
                 registered_class = slot.number
             student.status = UnregisteredStudent.Status.REGISTERED
             student.registered_at = timezone.now()
+            if slot_id and tuition_amount:
+                student.tuition_price = tuition_amount  # شهریه‌ی محقق‌شده = مبلغ واقعاً دریافتی
             student.save()
         data = UnregisteredStudentSerializer(student).data
         data['registered_class_number'] = registered_class
         return Response(data)
+
+
+def _term_scoped_stats_qs(qs, term_id, resolved_status):
+    """آمار هم‌دامنه با لیست: ترم انتخاب‌شده + موارد حل‌نشده‌ی ترم‌های قبل (مثل UnregisteredStudentListView/DebtorListView)."""
+    if not term_id:
+        return qs
+    from class_management.models import Term
+    term = Term.objects.filter(pk=term_id).first()
+    if not term:
+        return qs.none()
+    earlier = Term.objects.filter(Q(year__lt=term.year) | Q(year=term.year, term_number__lt=term.term_number))
+    return qs.filter(Q(term_id=term.pk) | (Q(term__in=earlier) & ~Q(status=resolved_status)))
 
 
 class UnregisteredStudentStatsView(APIView):
@@ -465,16 +480,26 @@ class UnregisteredStudentStatsView(APIView):
     def get(self, request):
         if not can_edit_menu(request.user, "followups"):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
-        qs = UnregisteredStudent.objects.all()
+        qs = _term_scoped_stats_qs(UnregisteredStudent.objects.all(), request.query_params.get('term_id'), UnregisteredStudent.Status.REGISTERED)
         tracking = qs.filter(status=UnregisteredStudent.Status.TRACKING)
         registered = qs.filter(status=UnregisteredStudent.Status.REGISTERED)
         now_local = timezone.localtime(timezone.now())
         import jdatetime
+        from class_management.carryover import _tuition_for_level
+
+        def potential_price(s):
+            # اگر شهریه‌ی پیشنهادی ثبت نشده باشد، شهریه‌ی تعریف‌شده‌ی همان سطح محاسبه می‌شود
+            if s.tuition_price:
+                return s.tuition_price
+            try:
+                return int(_tuition_for_level(s.latest_level or s.class_level) or 0)
+            except Exception:
+                return 0
         return Response({
             'total': qs.count(),
             'tracking_count': tracking.count(),
             'registered_count': registered.count(),
-            'total_tuition_potential': sum(s.tuition_price or 0 for s in tracking),
+            'total_tuition_potential': sum(potential_price(s) for s in tracking),
             'total_tuition_registered': sum(s.tuition_price or 0 for s in registered),
             'generated_at_jalali': jdatetime.datetime.fromgregorian(datetime=now_local).strftime('%Y/%m/%d - %H:%M:%S'),
         })
@@ -634,7 +659,17 @@ class DebtorListView(generics.ListCreateAPIView):
             data['class_level'] = source_slot.assigned_level or data.get('class_level') or ''
             if not data.get('term') and source_slot.term_id:
                 data['term'] = source_slot.term_id
-        if not str(data.get('debt_amount') or '').strip() or str(data.get('debt_amount')).strip() == '0':
+        # مبلغ خالی فقط برای بدهیِ «شهریه» خودکار از روی سطح پر می‌شود؛ بدهی کتاب/سایر موارد هرگز شهریه نمی‌گیرد.
+        auto_flag = str(data.pop('auto_tuition', '')).strip().lower()
+        desc_text = str(data.get('description') or '')
+        non_tuition_words = ('کتاب', 'جزوه', 'جریمه', 'غیبت', 'ثبت‌نام‌نشده')
+        if auto_flag in ('1', 'true', 'yes'):
+            auto_tuition = True
+        elif auto_flag in ('0', 'false', 'no'):
+            auto_tuition = False
+        else:
+            auto_tuition = not any(w in desc_text for w in non_tuition_words)
+        if auto_tuition and (not str(data.get('debt_amount') or '').strip() or str(data.get('debt_amount')).strip() == '0'):
             from class_management.carryover import _tuition_for_level
             data['debt_amount'] = _tuition_for_level(data.get('class_level'))
         data['phone'] = str(data.get('phone') or '').strip()
@@ -1000,7 +1035,7 @@ class DebtorStatsView(APIView):
     def get(self, request):
         if not can_edit_menu(request.user, "followups"):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
-        qs = Debtor.objects.all()
+        qs = _term_scoped_stats_qs(Debtor.objects.all(), request.query_params.get('term_id'), Debtor.Status.SETTLED)
         pending = qs.filter(status=Debtor.Status.PENDING)
         settled = qs.filter(status=Debtor.Status.SETTLED)
         now_local = timezone.localtime(timezone.now())
@@ -1220,6 +1255,22 @@ class PersonFinanceStatusView(APIView):
     """
     permission_classes = [IsAuthenticated]
 
+    @staticmethod
+    def _unreg_row(u):
+        from .serializers import _slot_desc, reported_candidates
+        slot, cands, exact = reported_candidates(u)
+        level = u.latest_level or u.class_level
+        if slot:
+            text = _slot_desc(slot)
+        elif level and cands:
+            text = f'سطح {level} — کلاس‌های محتمل: ' + ' | '.join(_slot_desc(c) for c in cands)
+        else:
+            text = f'سطح {level}' if level else ''
+        return {
+            'id': u.id, 'tuition_price': u.tuition_price, 'term_title': u.term_title,
+            'app_class_text': text, 'app_class_exact': bool(slot or cands),
+        }
+
     def get(self, request):
         from accounts.models import User
         from accounts.menu_permissions import can_view_menu
@@ -1248,6 +1299,6 @@ class PersonFinanceStatusView(APIView):
                 unreg = unreg.filter(Q(term_id=term.pk) | Q(term__in=earlier))
                 debt = debt.filter(Q(term_id=term.pk) | Q(term__in=earlier))
         return Response({
-            'unregistered': [{'id': u.id, 'tuition_price': u.tuition_price, 'term_title': u.term_title} for u in unreg[:5]],
+            'unregistered': [self._unreg_row(u) for u in unreg.select_related('reported_slot', 'submitted_by')[:5]],
             'debtors': [{'id': d.id, 'debt_amount': d.debt_amount, 'term_title': d.term_title} for d in debt[:5]],
         })

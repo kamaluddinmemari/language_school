@@ -904,6 +904,36 @@ class StudentQuickSearchView(APIView):
         students = User.objects.filter(role='student').filter(
             Q(national_code__icontains=q) | Q(phone__icontains=q) | name_query
         ).order_by('last_name', 'first_name', 'id')[:10]
+        status_map = {}
+        term_id = request.query_params.get('term_id')
+        if request.query_params.get('with_status') == '1' and term_id:
+            # سبز = ثبت‌نام‌شده در ترم، زرد = سر کلاس ولی شهریه/بدهی معوق، قرمز = ثبت‌نام فعالی ندارد
+            from class_management.models import ClassSlotEnrollment, Term
+            from leads.models import UnregisteredStudent, Debtor
+            term = Term.objects.filter(pk=term_id).first()
+            ids = [s.id for s in students]
+            enrolled = set(ClassSlotEnrollment.objects.filter(class_slot__term_id=term_id, student_id__in=ids).values_list('student_id', flat=True))
+            unreg = UnregisteredStudent.objects.exclude(status='registered')
+            debt = Debtor.objects.exclude(status='settled')
+            if term:
+                earlier = Term.objects.filter(Q(year__lt=term.year) | Q(year=term.year, term_number__lt=term.term_number))
+                unreg = unreg.filter(Q(term_id=term.pk) | Q(term__in=earlier))
+                debt = debt.filter(Q(term_id=term.pk) | Q(term__in=earlier))
+            for s in students:
+                person = Q(first_name=s.first_name, last_name=s.last_name)
+                if s.national_code:
+                    person |= Q(national_code=s.national_code)
+                if s.phone:
+                    person |= Q(phone=s.phone)
+                dperson = Q(first_name=s.first_name, last_name=s.last_name) | Q(student_id=s.id)
+                if s.phone:
+                    dperson |= Q(phone=s.phone)
+                if unreg.filter(person).exists() or debt.filter(dperson).exists():
+                    status_map[s.id] = 'owing'
+                elif s.id in enrolled:
+                    status_map[s.id] = 'enrolled'
+                else:
+                    status_map[s.id] = 'none'
         return Response([{
             'id': s.id,
             'first_name': s.first_name,
@@ -913,6 +943,7 @@ class StudentQuickSearchView(APIView):
             'phone': s.phone or '',
             'gender': s.gender or '',
             'language_level': s.language_level or '',
+            'enroll_status': status_map.get(s.id, ''),
         } for s in students])
 
 

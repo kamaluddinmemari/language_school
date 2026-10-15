@@ -171,24 +171,58 @@ def _norm_level(v):
 def _class_status_text(slot, misplaced):
     """متن دقیق: «به درستی / به اشتباه در کلاس فلان، استاد فلان، ساعت فلان»."""
     if not slot:
-        return 'در هیچ کلاسی ثبت‌نام نشده'
+        return 'هنوز شهریه ترم را نداده و در سیستم در هیچ کلاسی ثبت نشده'
     return ('به اشتباه' if misplaced else 'به درستی') + ' در ' + _slot_desc(slot)
 
 
-def _classify_class(system_slot, reported_slot, reported_level, flagged=False):
+def _fa_key(v):
+    return ''.join(str(v or '').replace('ي', 'ی').replace('ك', 'ک').split()).casefold()
+
+
+def reported_candidates(u):
+    """
+    کلاس‌هایی که اپ/استاد برای این فرد ثبت کرده:
+    - اگر کلاس دقیق ذخیره شده → همان.
+    - رکوردهای قدیمی (بدون کلاس ذخیره‌شده): از روی استادِ ثبت‌کننده + سطح + جنسیت + ترم حدس زده می‌شود.
+    خروجی: (slot_or_None, candidates_list, exact)
+    """
+    if u.reported_slot_id:
+        return u.reported_slot, [u.reported_slot], True
+    if not (u.submitted_by_id and u.term_id and u.class_level):
+        return None, [], False
+    from class_management.models import ClassSlot
+    sub = u.submitted_by
+    names = {_fa_key(f'{sub.first_name} {sub.last_name}'), _fa_key(f'{sub.last_name} {sub.first_name}')}
+    names.discard('')
+    if not names:
+        return None, [], False
+    slots = ClassSlot.objects.filter(term_id=u.term_id, assigned_level=u.class_level)
+    cands = [s for s in slots if _fa_key(s.teacher_name) in names]
+    if u.gender:
+        want = {'female': 'girls', 'male': 'boys'}.get(u.gender)
+        cands = [s for s in cands if s.gender in (want, 'mixed')] or cands
+    cands.sort(key=lambda s: (s.number or 0))
+    if len(cands) == 1:
+        return cands[0], cands, False
+    return None, cands[:4], False
+
+
+def _classify_class(system_slot, reported_slot, reported_level, flagged=False, candidates=None, exact=True):
     """
     منبع «درست» = اطلاعاتی که استاد/اپ ثبت کرده (کلاس یا سطح گزارش‌شده)، نه لیست ثبت‌نام سیستم.
     اگر ثبت‌نام سیستم با آن فرق کند، ثبت‌نام سیستم «اشتباه» است.
     خروجی: (status, system_text, true_text)
     """
     if reported_slot:
-        true_text = 'کلاس و سطح اصلی و درست (طبق ثبت اپ/استاد): ' + _slot_desc(reported_slot)
+        true_text = 'کلاس و سطح اصلی و درست (طبق ثبت اپ/استاد): ' + _slot_desc(reported_slot) + ('' if exact else ' (تشخیص از روی استاد ثبت‌کننده و سطح)')
+    elif reported_level and candidates:
+        true_text = f'سطح اصلی و درست (طبق ثبت اپ/استاد): {reported_level} — کلاس‌های محتمل: ' + ' | '.join(_slot_desc(c) for c in candidates)
     elif reported_level:
         true_text = f'سطح اصلی و درست (طبق ثبت اپ/استاد): {reported_level}'
     else:
         true_text = ''
     if not system_slot:
-        return 'none', 'در سیستم در هیچ کلاسی ثبت‌نام نشده', true_text
+        return 'none', 'هنوز شهریه ترم را نداده و در سیستم در هیچ کلاسی ثبت نشده', true_text
     mismatch = bool(flagged)
     if reported_slot and reported_slot.pk != system_slot.pk:
         mismatch = True
@@ -250,13 +284,13 @@ class UnregisteredStudentSerializer(serializers.ModelSerializer):
         cache = self.__dict__.setdefault('_cstate_cache', {})
         if obj.pk not in cache:
             # برای «جابجا شود»: سیستم همان کلاس لیست است (اشتباه)؛ سطح درست = سطح گزارش‌شده فقط وقتی ثبت اپ جداست
-            reported_slot = obj.reported_slot if obj.reported_slot_id else None
+            reported_slot, cands, exact = reported_candidates(obj)
             level = obj.latest_level or obj.class_level
             if obj.is_misplaced and not reported_slot:
                 level = ''  # سطح ثبت‌شده در این حالت همان سطح کلاس اشتباه است، منبع درست نیست
             system_slot = self._system_slot(obj)
             still_flagged = bool(obj.is_misplaced and obj.misplaced_from_slot_id and system_slot and system_slot.pk == obj.misplaced_from_slot_id)
-            state = _classify_class(system_slot, reported_slot, level, flagged=still_flagged)
+            state = _classify_class(system_slot, reported_slot, level, flagged=still_flagged, candidates=cands, exact=exact)
             if still_flagged:
                 state = ('misplaced', 'در این کلاس یا این سطح نیست و باید اصلاح شود — الان در ' + _slot_desc(system_slot) + ' ثبت شده (به اشتباه)', state[2])
             cache[obj.pk] = state
@@ -462,15 +496,15 @@ class DebtorSerializer(serializers.ModelSerializer):
             uq |= Q(national_code=code)
         if obj.phone:
             uq |= Q(phone=obj.phone)
-        urow = UnregisteredStudent.objects.filter(uq).exclude(status='registered').select_related('reported_slot').order_by('-created_at', '-id')
+        urow = UnregisteredStudent.objects.filter(uq).exclude(status='registered').select_related('reported_slot', 'submitted_by').order_by('-created_at', '-id')
         if obj.term_id:
             urow = urow.filter(term_id=obj.term_id)
         u = urow.first()
-        reported_slot = u.reported_slot if u and u.reported_slot_id else None
+        reported_slot, cands, exact = reported_candidates(u) if u else (None, [], False)
         level = ''
         if u and not (u.is_misplaced and not reported_slot):
             level = u.class_level
-        cache[obj.pk] = (slot, _classify_class(slot, reported_slot, level, flagged=bool(u and u.is_misplaced)))
+        cache[obj.pk] = (slot, _classify_class(slot, reported_slot, level, flagged=bool(u and u.is_misplaced), candidates=cands, exact=exact))
         return cache[obj.pk]
 
     def get_class_slot_number(self, obj):
