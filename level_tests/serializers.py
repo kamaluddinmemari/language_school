@@ -45,6 +45,7 @@ class LevelTestIntakeSerializer(serializers.ModelSerializer):
 
     # فقط برای عبور از بررسی تداخلِ تایم — با تأیید صریح کاربر در هشدارِ «این تایم آزاد نیست»؛ در دیتابیس ذخیره نمی‌شود
     force_time_override = serializers.BooleanField(write_only=True, required=False, default=False)
+    national_code = serializers.RegexField(r'^\d{10}$', required=False, allow_blank=True, max_length=10, error_messages={'invalid': 'کد ملی باید دقیقاً ۱۰ رقم انگلیسی باشد'})
     # «فرد دانش‌آموز جدید نیست»: نام پدر و شماره همراه لازم نیست (در دیتابیس ذخیره نمی‌شود)
     not_new_student = serializers.BooleanField(write_only=True, required=False, default=False)
 
@@ -54,7 +55,7 @@ class LevelTestIntakeSerializer(serializers.ModelSerializer):
 
     def validate(self, attrs):
         not_new_student = attrs.pop('not_new_student', False)
-        required_fields = ['first_name', 'last_name', 'birth_date', 'national_code', 'gender'] if not_new_student else ['first_name', 'last_name', 'father_name', 'birth_date', 'national_code', 'phone', 'gender']
+        required_fields = ['first_name', 'last_name', 'birth_date', 'gender'] if not_new_student else ['first_name', 'last_name', 'father_name', 'birth_date', 'phone', 'gender']
         for field in required_fields:
             if not attrs.get(field) and not (self.instance and getattr(self.instance, field, None)):
                 raise serializers.ValidationError({field: 'این فیلد لازم است'})

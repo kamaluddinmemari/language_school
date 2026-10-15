@@ -1,5 +1,6 @@
 from django.urls import path
 from .views import (
+    PersonFinanceStatusView,
     NewLeadListView, NewLeadDetailView, NewLeadActionView,
     UnregisteredStudentListView, UnregisteredStudentDetailView,
     UnregisteredStudentFollowupView, UnregisteredStudentRegisterView, UnregisteredStudentRegisterOptionsView, UnregisteredStudentStatsView,
@@ -25,6 +26,7 @@ urlpatterns = [
     path('leads/dropout-students/', DropoutStudentListView.as_view(), name='dropout_student_list'),
     path('leads/dropout-students/<int:student_id>/followup/', DropoutStudentFollowupView.as_view(), name='dropout_student_followup'),
 
+    path('leads/person-finance-status/', PersonFinanceStatusView.as_view(), name='person_finance_status'),
     path('leads/debtors/', DebtorListView.as_view(), name='debtor_list'),
     path('leads/debtors/<int:pk>/', DebtorDetailView.as_view(), name='debtor_detail'),
     path('leads/debtors/<int:pk>/followup/', DebtorFollowupView.as_view(), name='debtor_followup'),

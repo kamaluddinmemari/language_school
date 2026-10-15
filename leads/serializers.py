@@ -149,6 +149,56 @@ class _CrossListIndex:
 
 
 
+def _slot_day_text(slot):
+    days = slot.schedule_days if isinstance(slot.schedule_days, list) and slot.schedule_days else None
+    return '، '.join(str(d) for d in days) if days else slot.get_day_type_display()
+
+
+def _slot_desc(slot):
+    parts = [f'کلاس {slot.number}']
+    if slot.assigned_level:
+        parts.append(f'سطح {slot.assigned_level}')
+    parts.append(f'استاد {slot.teacher_name or "نامشخص"}')
+    when = ' '.join(x for x in (_slot_day_text(slot), slot.time_slot) if x)
+    parts.append(f'ساعت {when}' if when else 'ساعت نامشخص')
+    return '، '.join(parts)
+
+
+def _norm_level(v):
+    return ' '.join(str(v or '').split()).casefold()
+
+
+def _class_status_text(slot, misplaced):
+    """متن دقیق: «به درستی / به اشتباه در کلاس فلان، استاد فلان، ساعت فلان»."""
+    if not slot:
+        return 'در هیچ کلاسی ثبت‌نام نشده'
+    return ('به اشتباه' if misplaced else 'به درستی') + ' در ' + _slot_desc(slot)
+
+
+def _classify_class(system_slot, reported_slot, reported_level, flagged=False):
+    """
+    منبع «درست» = اطلاعاتی که استاد/اپ ثبت کرده (کلاس یا سطح گزارش‌شده)، نه لیست ثبت‌نام سیستم.
+    اگر ثبت‌نام سیستم با آن فرق کند، ثبت‌نام سیستم «اشتباه» است.
+    خروجی: (status, system_text, true_text)
+    """
+    if reported_slot:
+        true_text = 'کلاس و سطح اصلی و درست (طبق ثبت اپ/استاد): ' + _slot_desc(reported_slot)
+    elif reported_level:
+        true_text = f'سطح اصلی و درست (طبق ثبت اپ/استاد): {reported_level}'
+    else:
+        true_text = ''
+    if not system_slot:
+        return 'none', 'در سیستم در هیچ کلاسی ثبت‌نام نشده', true_text
+    mismatch = bool(flagged)
+    if reported_slot and reported_slot.pk != system_slot.pk:
+        mismatch = True
+    elif not reported_slot and reported_level and _norm_level(reported_level) != _norm_level(system_slot.assigned_level):
+        mismatch = True
+    if mismatch:
+        return 'misplaced', 'در سیستم به اشتباه در ' + _slot_desc(system_slot) + ' ثبت شده — باید اصلاح شود', true_text
+    return 'correct', 'در سیستم به درستی در ' + _slot_desc(system_slot) + ' ثبت شده', true_text
+
+
 class UnregisteredStudentSerializer(serializers.ModelSerializer):
     has_current_class = serializers.SerializerMethodField()
 
@@ -165,6 +215,118 @@ class UnregisteredStudentSerializer(serializers.ModelSerializer):
         if obj.phone:
             q |= Q(student__phone=obj.phone)
         return ClassSlotEnrollment.objects.filter(q, class_slot__term_id=obj.term_id).exclude(is_carryover=True, carryover_confirmed=False).exists()
+    # خواسته: برای هر فرد ثبت‌نام‌نشده، مشخصات کلاس فعلی‌اش (شماره، سطح، روز/ساعت، استاد) هم نمایش داده شود.
+    class_slot = serializers.SerializerMethodField()
+    class_slot_number = serializers.SerializerMethodField()
+    class_slot_level = serializers.SerializerMethodField()
+    class_slot_day = serializers.SerializerMethodField()
+    class_slot_time = serializers.SerializerMethodField()
+    class_slot_teacher = serializers.SerializerMethodField()
+    class_status = serializers.SerializerMethodField()
+    class_status_text = serializers.SerializerMethodField()
+    class_true_text = serializers.SerializerMethodField()
+
+    def _system_slot(self, obj):
+        from django.db.models import Q
+        from class_management.models import ClassSlotEnrollment
+        q = Q(student__first_name=obj.first_name, student__last_name=obj.last_name)
+        if obj.national_code:
+            q |= Q(student__national_code=obj.national_code)
+        if obj.phone:
+            q |= Q(student__phone=obj.phone)
+        if obj.misplaced_from_slot_id:
+            # تیک «به اشتباه ثبت شده»: اگر اسمش هنوز در همان کلاس است، همان کلاس اشتباه است
+            if ClassSlotEnrollment.objects.filter(q, class_slot_id=obj.misplaced_from_slot_id).exists():
+                return obj.misplaced_from_slot
+            # از آن کلاس خارج شده (اصلاح شده)؛ ثبت‌نام فعلی‌اش در همان ترم ملاک است
+            pass
+        if not obj.term_id:
+            return None
+        found = ClassSlotEnrollment.objects.filter(q, class_slot__term_id=obj.term_id).exclude(
+            is_carryover=True, carryover_confirmed=False).select_related('class_slot').order_by('-created_at', '-id').first()
+        return found.class_slot if found else None
+
+    def _class_state(self, obj):
+        cache = self.__dict__.setdefault('_cstate_cache', {})
+        if obj.pk not in cache:
+            # برای «جابجا شود»: سیستم همان کلاس لیست است (اشتباه)؛ سطح درست = سطح گزارش‌شده فقط وقتی ثبت اپ جداست
+            reported_slot = obj.reported_slot if obj.reported_slot_id else None
+            level = obj.latest_level or obj.class_level
+            if obj.is_misplaced and not reported_slot:
+                level = ''  # سطح ثبت‌شده در این حالت همان سطح کلاس اشتباه است، منبع درست نیست
+            system_slot = self._system_slot(obj)
+            still_flagged = bool(obj.is_misplaced and obj.misplaced_from_slot_id and system_slot and system_slot.pk == obj.misplaced_from_slot_id)
+            state = _classify_class(system_slot, reported_slot, level, flagged=still_flagged)
+            if still_flagged:
+                state = ('misplaced', 'در این کلاس یا این سطح نیست و باید اصلاح شود — الان در ' + _slot_desc(system_slot) + ' ثبت شده (به اشتباه)', state[2])
+            cache[obj.pk] = state
+        return cache[obj.pk]
+
+    def get_class_status(self, obj):
+        return self._class_state(obj)[0]
+
+    def get_class_status_text(self, obj):
+        return self._class_state(obj)[1]
+
+    def get_class_true_text(self, obj):
+        return self._class_state(obj)[2]
+
+    def _current_slot(self, obj):
+        cache = self.__dict__.setdefault('_slot_cache', {})
+        if obj.pk in cache:
+            return cache[obj.pk]
+        slot = None
+        if obj.misplaced_from_slot_id:
+            slot = obj.misplaced_from_slot
+        else:
+            from django.db.models import Q
+            from class_management.models import ClassSlotEnrollment
+            q = Q(student__first_name=obj.first_name, student__last_name=obj.last_name)
+            if obj.national_code:
+                q |= Q(student__national_code=obj.national_code)
+            if obj.phone:
+                q |= Q(student__phone=obj.phone)
+            base = ClassSlotEnrollment.objects.filter(q).select_related('class_slot').order_by('-created_at', '-id')
+            # اول کلاس همین ترم (غیر از انتقالیِ تأییدنشده)، بعد ترم مبدأ ریزشی، و در نهایت آخرین کلاسی که داشته است
+            for qs in (
+                base.filter(class_slot__term_id=obj.term_id).exclude(is_carryover=True, carryover_confirmed=False) if obj.term_id else base.none(),
+                base.filter(class_slot__term_id=obj.dropout_from_term_id) if obj.dropout_from_term_id else base.none(),
+                base,
+            ):
+                found = qs.first()
+                if found:
+                    slot = found.class_slot
+                    break
+        cache[obj.pk] = slot
+        return slot
+
+    def get_class_slot(self, obj):
+        slot = self._current_slot(obj)
+        return slot.pk if slot else None
+
+    def get_class_slot_number(self, obj):
+        slot = self._current_slot(obj)
+        return slot.number if slot else None
+
+    def get_class_slot_level(self, obj):
+        slot = self._current_slot(obj)
+        return (slot.assigned_level or '') if slot else ''
+
+    def get_class_slot_day(self, obj):
+        slot = self._current_slot(obj)
+        if not slot:
+            return ''
+        days = slot.schedule_days if isinstance(slot.schedule_days, list) and slot.schedule_days else None
+        return '، '.join(str(d) for d in days) if days else slot.get_day_type_display()
+
+    def get_class_slot_time(self, obj):
+        slot = self._current_slot(obj)
+        return (slot.time_slot or '') if slot else ''
+
+    def get_class_slot_teacher(self, obj):
+        slot = self._current_slot(obj)
+        return (slot.teacher_name or '') if slot else ''
+
     status_display = serializers.CharField(source='get_status_display', read_only=True)
     created_at_jalali = serializers.ReadOnlyField()
     registered_at_jalali = serializers.ReadOnlyField()
@@ -210,6 +372,7 @@ class UnregisteredStudentSerializer(serializers.ModelSerializer):
             'is_dropout', 'dropout_from_term', 'dropout_from_term_title',
             'is_misplaced', 'misplaced_from_slot', 'misplaced_class_number',
             'also_debtor', 'also_debtor_amount', 'assigned_to', 'assigned_to_name', 'gender', 'has_current_class',
+            'class_slot', 'class_slot_number', 'class_slot_level', 'class_slot_day', 'class_slot_time', 'class_slot_teacher', 'class_status', 'class_status_text', 'class_true_text',
             'created_at', 'created_at_jalali', 'updated_at',
         ]
         read_only_fields = ['status', 'registered_at', 'created_at', 'updated_at', 'is_dropout', 'dropout_from_term', 'is_misplaced', 'misplaced_from_slot']
@@ -244,6 +407,14 @@ class DebtorSerializer(serializers.ModelSerializer):
     term_title = serializers.ReadOnlyField()
     carried_from_term_title = serializers.SerializerMethodField()
     source_slot_number = serializers.SerializerMethodField()
+    class_slot_number = serializers.SerializerMethodField()
+    class_slot_level = serializers.SerializerMethodField()
+    class_slot_day = serializers.SerializerMethodField()
+    class_slot_time = serializers.SerializerMethodField()
+    class_slot_teacher = serializers.SerializerMethodField()
+    class_status = serializers.SerializerMethodField()
+    class_status_text = serializers.SerializerMethodField()
+    class_true_text = serializers.SerializerMethodField()
     also_unregistered = serializers.SerializerMethodField()
     assigned_to_name = serializers.SerializerMethodField()
 
@@ -263,6 +434,74 @@ class DebtorSerializer(serializers.ModelSerializer):
     def get_source_slot_number(self, obj):
         return obj.source_slot.number if obj.source_slot_id else None
 
+    def _debtor_info(self, obj):
+        cache = self.__dict__.setdefault('_dslot_cache', {})
+        if obj.pk in cache:
+            return cache[obj.pk]
+        from django.db.models import Q
+        from class_management.models import ClassSlotEnrollment
+        slot = obj.source_slot if obj.source_slot_id else None
+        code = getattr(obj.student, 'national_code', '') if obj.student_id else ''
+        if not slot:
+            q = Q(student__first_name=obj.first_name, student__last_name=obj.last_name)
+            if obj.student_id:
+                q |= Q(student_id=obj.student_id)
+            if code:
+                q |= Q(student__national_code=code)
+            if obj.phone:
+                q |= Q(student__phone=obj.phone)
+            base = ClassSlotEnrollment.objects.filter(q).select_related('class_slot').order_by('-created_at', '-id')
+            found = None
+            if obj.term_id:
+                found = base.filter(class_slot__term_id=obj.term_id).exclude(is_carryover=True, carryover_confirmed=False).first()
+            found = found or base.first()
+            slot = found.class_slot if found else None
+        # منبع درست = ثبت اپ/استاد در لیست ثبت‌نام‌نشده‌ها (اگر برای این فرد وجود دارد)
+        uq = Q(first_name=obj.first_name, last_name=obj.last_name)
+        if code:
+            uq |= Q(national_code=code)
+        if obj.phone:
+            uq |= Q(phone=obj.phone)
+        urow = UnregisteredStudent.objects.filter(uq).exclude(status='registered').select_related('reported_slot').order_by('-created_at', '-id')
+        if obj.term_id:
+            urow = urow.filter(term_id=obj.term_id)
+        u = urow.first()
+        reported_slot = u.reported_slot if u and u.reported_slot_id else None
+        level = ''
+        if u and not (u.is_misplaced and not reported_slot):
+            level = u.class_level
+        cache[obj.pk] = (slot, _classify_class(slot, reported_slot, level, flagged=bool(u and u.is_misplaced)))
+        return cache[obj.pk]
+
+    def get_class_slot_number(self, obj):
+        slot = self._debtor_info(obj)[0]
+        return slot.number if slot else None
+
+    def get_class_slot_level(self, obj):
+        slot = self._debtor_info(obj)[0]
+        return (slot.assigned_level or '') if slot else ''
+
+    def get_class_slot_day(self, obj):
+        slot = self._debtor_info(obj)[0]
+        return _slot_day_text(slot) if slot else ''
+
+    def get_class_slot_time(self, obj):
+        slot = self._debtor_info(obj)[0]
+        return (slot.time_slot or '') if slot else ''
+
+    def get_class_slot_teacher(self, obj):
+        slot = self._debtor_info(obj)[0]
+        return (slot.teacher_name or '') if slot else ''
+
+    def get_class_status(self, obj):
+        return self._debtor_info(obj)[1][0]
+
+    def get_class_status_text(self, obj):
+        return self._debtor_info(obj)[1][1]
+
+    def get_class_true_text(self, obj):
+        return self._debtor_info(obj)[1][2]
+
     class Meta:
         model = Debtor
         fields = [
@@ -271,7 +510,7 @@ class DebtorSerializer(serializers.ModelSerializer):
             'followup_count', 'last_followup_at_jalali', 'followups',
             'term', 'term_title', 'claims_settled', 'claim_reviewed', 'created_at', 'created_at_jalali', 'updated_at',
             'student', 'awaiting_registration', 'carried_from_term', 'carried_from_term_title',
-            'source_slot', 'source_slot_number', 'also_unregistered', 'assigned_to', 'assigned_to_name',
+            'source_slot', 'source_slot_number', 'class_slot_number', 'class_slot_level', 'class_slot_day', 'class_slot_time', 'class_slot_teacher', 'class_status', 'class_status_text', 'class_true_text', 'also_unregistered', 'assigned_to', 'assigned_to_name',
         ]
         read_only_fields = ['status', 'settled_at', 'created_at', 'updated_at', 'student', 'awaiting_registration', 'carried_from_term', 'source_slot']
         extra_kwargs = {'phone': {'required': False, 'allow_blank': True}, 'debt_amount': {'required': False}}

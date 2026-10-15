@@ -305,7 +305,7 @@ class UnregisteredStudentListView(generics.ListCreateAPIView):
             return Response(warning, status=status.HTTP_409_CONFLICT)
         serializer = self.get_serializer(data=data)
         serializer.is_valid(raise_exception=True)
-        lead = serializer.save(submitted_by=request.user, term=term)
+        lead = serializer.save(submitted_by=request.user, term=term, **({'reported_slot': picked_slot} if class_slot_id not in (None, '') else {}))
         synced = sync_student_from_lead(
             first_name=lead.first_name, last_name=lead.last_name,
             phone=lead.phone, national_code=lead.national_code,
@@ -1210,4 +1210,44 @@ class UnregisteredMoveView(APIView):
         return Response({
             'message': f'{item.first_name} {item.last_name} به کلاس {target.number} منتقل شد',
             'target_number': target.number, 'tuition_difference': tuition_note,
+        })
+
+
+class PersonFinanceStatusView(APIView):
+    """
+    برای پنجره‌ی «جستجو در میان کلیه دانش‌آموزان»: آیا فرد در ثبت‌نام‌نشده‌ها و/یا بدهکاران (همان ترم یا ترم‌های قبل‌تر که هنوز حل نشده) هست؟
+    GET ?student_id=<id>&term_id=<id>
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        from accounts.models import User
+        from accounts.menu_permissions import can_view_menu
+        if not (can_edit_menu(request.user, 'followups') or can_view_menu(request.user, 'followups')
+                or can_edit_menu(request.user, 'class-management') or can_view_menu(request.user, 'class-management')):
+            return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
+        student = User.objects.filter(pk=request.query_params.get('student_id'), role='student').first()
+        if not student:
+            return Response({'unregistered': [], 'debtors': []})
+        term_id = request.query_params.get('term_id')
+        person = Q(first_name=student.first_name, last_name=student.last_name)
+        if student.national_code:
+            person |= Q(national_code=student.national_code)
+        if student.phone:
+            person |= Q(phone=student.phone)
+        dperson = Q(first_name=student.first_name, last_name=student.last_name) | Q(student_id=student.pk)
+        if student.phone:
+            dperson |= Q(phone=student.phone)
+        unreg = UnregisteredStudent.objects.filter(person).exclude(status=UnregisteredStudent.Status.REGISTERED)
+        debt = Debtor.objects.filter(dperson).exclude(status=Debtor.Status.SETTLED)
+        if term_id:
+            from class_management.models import Term
+            term = Term.objects.filter(pk=term_id).first()
+            if term:
+                earlier = Term.objects.filter(Q(year__lt=term.year) | Q(year=term.year, term_number__lt=term.term_number))
+                unreg = unreg.filter(Q(term_id=term.pk) | Q(term__in=earlier))
+                debt = debt.filter(Q(term_id=term.pk) | Q(term__in=earlier))
+        return Response({
+            'unregistered': [{'id': u.id, 'tuition_price': u.tuition_price, 'term_title': u.term_title} for u in unreg[:5]],
+            'debtors': [{'id': d.id, 'debt_amount': d.debt_amount, 'term_title': d.term_title} for d in debt[:5]],
         })

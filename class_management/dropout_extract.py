@@ -716,3 +716,80 @@ class DropoutExtractRegisterView(APIView):
                     status=UnregisteredStudent.Status.REGISTERED, registered_at=timezone.now(),
                 )
         return Response({'registered_class_number': slot.number, 'student_id': student.id})
+
+
+class DropoutStatsView(APIView):
+    """آمار مقایسه‌ای ریزش بین ترم انتخابی و ترم بلافاصله قبل، با تفکیک سطح و استاد."""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        if not can_edit_menu(request.user, 'class-management'):
+            return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
+        term2, error, _ = _single_term(request.query_params.get('term_id'))
+        if error:
+            return Response({'error': error}, status=status.HTTP_400_BAD_REQUEST)
+        terms = _ordered_terms()
+        index = next(i for i, item in enumerate(terms) if item.id == term2.id)
+        if index == 0:
+            return Response({'error': 'برای این ترم، ترم قبلی در سامانه وجود ندارد'}, status=status.HTTP_400_BAD_REQUEST)
+        term1 = terms[index - 1]
+        eligible = ClassSlotEnrollment.objects.filter(
+            student__role='student', payment_verified=True,
+        ).exclude(is_carryover=True, carryover_confirmed=False)
+        previous = list(eligible.filter(class_slot__term=term1).select_related('student', 'class_slot'))
+        current_ids = set(eligible.filter(class_slot__term=term2).values_list('student_id', flat=True).distinct())
+        by_level, by_teacher, people = {}, {}, {}
+        for enrollment in previous:
+            student = enrollment.student
+            level = enrollment.class_slot.assigned_level.strip() or 'نامشخص'
+            teacher = enrollment.class_slot.teacher_name.strip() or 'نامشخص'
+            key = (level, teacher)
+            group = by_level.setdefault(key, {'previous': set(), 'dropouts': set()})
+            group['previous'].add(student.id)
+            teacher_group = by_teacher.setdefault(teacher, {'previous': set(), 'dropouts': set(), 'levels': {}})
+            teacher_group['previous'].add(student.id)
+            level_group = teacher_group['levels'].setdefault(level, {'previous': set(), 'dropouts': set()})
+            level_group['previous'].add(student.id)
+            if student.id not in current_ids:
+                group['dropouts'].add(student.id)
+                teacher_group['dropouts'].add(student.id)
+                level_group['dropouts'].add(student.id)
+                people[student.id] = {
+                    'student_id': student.id,
+                    'name': (student.get_full_name() or student.username),
+                    'national_code': student.national_code or '',
+                    'level': level, 'teacher': teacher,
+                    'class_number': enrollment.class_slot.number,
+                }
+        def pack(group):
+            total, count = len(group['previous']), len(group['dropouts'])
+            return {'previous_enrollment_count': total, 'dropout_count': count,
+                    'retained_count': total - count,
+                    'dropout_rate': round(count * 100 / total, 2) if total else 0}
+        level_rows = [
+            {'level': level, 'teacher': teacher, **pack(group)}
+            for (level, teacher), group in by_level.items()
+        ]
+        level_rows.sort(key=lambda row: (-row['dropout_count'], row['level'], row['teacher']))
+        teachers = []
+        for teacher, group in by_teacher.items():
+            teachers.append({
+                'teacher': teacher, **pack(group),
+                'levels': [{'level': level, **pack(level_data)}
+                           for level, level_data in sorted(group['levels'].items())],
+            })
+        teachers.sort(key=lambda row: (-row['dropout_count'], -row['dropout_rate'], row['teacher']))
+        return Response({
+            'term': {'id': term2.id, 'title': term2.title},
+            'previous_term': {'id': term1.id, 'title': term1.title},
+            'totals': {
+                'previous_enrollment_count': len({item.student_id for item in previous}),
+                'current_enrollment_count': len(current_ids),
+                'dropout_count': len(people),
+                'dropout_rate': round(len(people) * 100 / len({item.student_id for item in previous}), 2)
+                    if previous else 0,
+            },
+            'by_level_and_teacher': level_rows,
+            'teachers_ranked': teachers,
+            'dropouts': sorted(people.values(), key=lambda row: (row['teacher'], row['level'], row['name'])),
+        })

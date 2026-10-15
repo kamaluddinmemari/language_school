@@ -13,6 +13,13 @@ def normalize_identity(value):
     return value.translate(str.maketrans('۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩', '01234567890123456789')).replace(' ', '').replace('\u200c', '')
 
 
+def _urgent_allowed(class_type, payment_status):
+    """«فوری / عجله دارد» فقط برای خصوصیِ پرداخت‌شده و جبرانی (با هر وضعیت پرداخت)."""
+    if class_type == ClassRequest.ClassType.MAKEUP:
+        return True
+    return class_type == ClassRequest.ClassType.PRIVATE and payment_status == ClassRequest.PaymentStatus.PAID
+
+
 def validate_active_identity(attrs, *, student=None):
     """برای یک هویت و نوع کلاس، تا وقتی کلاس مختومه/رد/کنسل نشده است، ثبت تکراری ممنوع است."""
     first_name = normalize_identity(attrs.get('first_name') or getattr(student, 'first_name', ''))
@@ -120,6 +127,7 @@ class ClassRequestAdminSerializer(serializers.ModelSerializer):
             'student_time_confirmed', 'student_time_rejected',
             'stage1_notes', 'stage2_notes', 'stage3_notes', 'stage4_notes',
             'manual_priority', 'force_last', 'contact_no_answer',
+            'is_urgent',
             'suggested_teacher_name', 'group_key', 'group_size',
             'session_duration', 'session_count', 'sessions',
             'cancelled_session_count', 'active_session_count',
@@ -142,8 +150,13 @@ class ClassRequestAdminSerializer(serializers.ModelSerializer):
         # تغییر وضعیت پرداخت باید بلافاصله در صف/رنگ/فیلتر منعکس شود. هنگام برگشت
         # از پرداخت‌شده به پرداخت‌نشده، اطلاعات پرداخت و اولویت دستی قبلی پاک می‌شوند
         # تا کلاس طبق قواعد عادیِ کلاس‌های پرداخت‌نشده دوباره جای‌گذاری شود.
+        next_status = validated_data.get('payment_status', instance.payment_status)
+        if validated_data.get('is_urgent') and not _urgent_allowed(instance.class_type, next_status):
+            raise serializers.ValidationError({'is_urgent': 'وضعیت «فوری» فقط برای کلاس خصوصیِ پرداخت‌شده یا کلاس جبرانی قابل ثبت است.'})
         if 'payment_status' in validated_data:
             next_payment_status = validated_data['payment_status']
+            if not _urgent_allowed(instance.class_type, next_payment_status):
+                validated_data['is_urgent'] = False
             if next_payment_status == ClassRequest.PaymentStatus.PAID:
                 validated_data['force_last'] = False
                 validated_data['manual_priority'] = None
@@ -195,6 +208,7 @@ class ClassRequestAdminCreateSerializer(serializers.Serializer):
         choices=ClassRequest.PaymentStatus.choices,
         default=ClassRequest.PaymentStatus.UNPAID
     )
+    is_urgent = serializers.BooleanField(required=False, default=False)
     payment_method = serializers.ChoiceField(choices=ClassRequest.PaymentMethod.choices, required=False, allow_blank=True)
     payment_reference = serializers.CharField(max_length=100, required=False, allow_blank=True)
     payment_confirmed_at = serializers.DateTimeField(required=False, allow_null=True)
@@ -212,32 +226,68 @@ class ClassRequestAdminCreateSerializer(serializers.Serializer):
                 raise serializers.ValidationError({'payment_reference': 'برای پرداخت کارت‌به‌کارت، شناسه پرداخت الزامی است.'})
         return attrs
 
+
+    @staticmethod
+    def _resolve_student(phone, first_name, last_name, national_code, username, password):
+        """
+        پیدا کردن یا ساختن دانش‌آموز بدون خطای ۵۰۰:
+        - شماره موبایل یکتا نیست (خواهر/برادر با شماره‌ی والدین)، پس get_or_create(phone=...)
+          با دو رکورد MultipleObjectsReturned می‌داد و پاسخ HTML برمی‌گشت.
+        - کد ملی یکتاست؛ اگر قبلاً برای کسی ثبت شده باشد همان فرد استفاده می‌شود.
+        - نام کاربری پیش‌فرض (همان موبایل) ممکن است قبلاً گرفته شده باشد؛ پسوند عددی می‌گیرد.
+        """
+        from django.db import IntegrityError, transaction
+
+        if national_code:
+            existing = User.objects.filter(national_code=national_code).first()
+            if existing:
+                if existing.role != User.Role.STUDENT:
+                    raise serializers.ValidationError({'error': 'این کد ملی برای یک کاربر غیر دانش‌آموز ثبت شده است.'})
+                return existing
+
+        wanted_name = normalize_identity(f'{first_name}{last_name}')
+        for candidate in User.objects.filter(phone=phone, role=User.Role.STUDENT):
+            if normalize_identity(f'{candidate.first_name}{candidate.last_name}') == wanted_name:
+                if national_code and not candidate.national_code:
+                    candidate.national_code = national_code
+                    candidate.save(update_fields=['national_code'])
+                return candidate
+
+        base_username = username
+        candidate_username = base_username
+        suffix = 1
+        while User.objects.filter(username=candidate_username).exists():
+            suffix += 1
+            candidate_username = f'{base_username}_{suffix}'[:150]
+
+        try:
+            with transaction.atomic():
+                student = User(
+                    username=candidate_username, first_name=first_name, last_name=last_name,
+                    phone=phone, national_code=national_code, role=User.Role.STUDENT, needs_editing=True,
+                )
+                if password:
+                    student.set_password(password)
+                else:
+                    student.set_unusable_password()
+                student.save()
+        except IntegrityError:
+            raise serializers.ValidationError({'error': 'ثبت دانش‌آموز جدید ممکن است با اطلاعات تکراری (کد ملی یا نام کاربری) در تعارض باشد؛ اطلاعات را بررسی کنید.'})
+        return student
+
     def create(self, validated_data):
         phone = validated_data.pop('phone')
         first_name = validated_data.pop('first_name')
         last_name = validated_data.pop('last_name')
-        national_code = validated_data.pop('national_code', None)
+        national_code = validated_data.pop('national_code', None) or None
         username = validated_data.pop('username', '') or phone
         password = validated_data.pop('password', '')
 
-        student, created = User.objects.get_or_create(
-            phone=phone,
-            defaults={
-                'username': username,
-                'first_name': first_name,
-                'last_name': last_name,
-                'national_code': national_code,
-                'role': User.Role.STUDENT,
-                'needs_editing': True,
-            }
-        )
-        if created:
-            if password:
-                student.set_password(password)
-            else:
-                student.set_unusable_password()
-            student.save()
+        # «فوری» برای کلاس خصوصیِ پرداخت‌شده و هر کلاس جبرانی معنا دارد.
+        if not _urgent_allowed(validated_data.get('class_type'), validated_data.get('payment_status')):
+            validated_data['is_urgent'] = False
 
+        student = self._resolve_student(phone, first_name, last_name, national_code, username, password)
         return ClassRequest.objects.create(student=student, **validated_data)
 
     def to_representation(self, instance):

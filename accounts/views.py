@@ -847,7 +847,7 @@ class PeopleSearchView(APIView):
         results = []
         seen = set()
 
-        def add(first_name, last_name, father_name, national_code, phone, phone2, source, birth_date=None, gender=''):
+        def add(first_name, last_name, father_name, national_code, phone, phone2, source, birth_date=None, gender='', student_id=None):
             key = (national_code or '', phone or '', first_name, last_name)
             if key in seen:
                 return
@@ -856,14 +856,14 @@ class PeopleSearchView(APIView):
                 'first_name': first_name, 'last_name': last_name, 'father_name': father_name or '',
                 'national_code': national_code or '', 'phone': phone or '', 'phone2': phone2 or '',
                 'birth_date': birth_date.isoformat() if birth_date else '', 'gender': gender or '',
-                'source': source,
+                'source': source, 'student_id': student_id,
             })
 
         students = User.objects.filter(role='student').filter(
             Q(national_code__icontains=q) | Q(last_name__icontains=q) | Q(first_name__icontains=q)
         )[:8]
         for s in students:
-            add(s.first_name, s.last_name, s.father_name, s.national_code, s.phone, s.phone2, 'دانش‌آموز', s.birth_date, s.gender)
+            add(s.first_name, s.last_name, s.father_name, s.national_code, s.phone, s.phone2, 'دانش‌آموز', s.birth_date, s.gender, s.id)
 
         try:
             from leads.models import NewLead, UnregisteredStudent, Debtor, DiscountedPerson
@@ -902,7 +902,7 @@ class StudentQuickSearchView(APIView):
         if len(name_parts) > 1:
             name_query |= Q(first_name__icontains=name_parts[0], last_name__icontains=' '.join(name_parts[1:]))
         students = User.objects.filter(role='student').filter(
-            Q(national_code__icontains=q) | name_query
+            Q(national_code__icontains=q) | Q(phone__icontains=q) | name_query
         ).order_by('last_name', 'first_name', 'id')[:10]
         return Response([{
             'id': s.id,

@@ -278,6 +278,11 @@ class UnregisteredStudent(models.Model):
         'class_management.ClassSlot', on_delete=models.SET_NULL, null=True, blank=True, related_name='+',
     )
 
+    # کلاسی که استاد/اپ فرد را در آن ثبت کرده (منبع «درست»؛ برخلاف لیست ثبت‌نام سیستم که ممکن است اشتباه باشد)
+    reported_slot = models.ForeignKey(
+        'class_management.ClassSlot', on_delete=models.SET_NULL, null=True, blank=True, related_name='+',
+    )
+
     submitted_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='submitted_unregistered_students')
     assigned_to = models.ForeignKey(
         User, on_delete=models.SET_NULL, null=True, blank=True, related_name='assigned_unregistered_students',

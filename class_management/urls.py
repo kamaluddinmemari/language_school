@@ -1,5 +1,5 @@
 from django.urls import path
-from .dropout_extract import DropoutExtractParseView, DropoutExtractComputeView, DropoutExtractCommitView, DropoutExtractFollowUpView, DropoutExtractListView, DropoutExtractRegisterOptionsView, DropoutExtractRegisterView
+from .dropout_extract import DropoutExtractParseView, DropoutExtractComputeView, DropoutExtractCommitView, DropoutExtractFollowUpView, DropoutExtractListView, DropoutExtractRegisterOptionsView, DropoutExtractRegisterView, DropoutStatsView
 from .views import (
     ClassSlotListView, ClassSlotDetailView, SwapClassLocationView, TransferClassLocationView, AllocateClassesView,
     ConfirmOverflowView, EnrollmentPulseView, StudentClassSearchView, TransferSurplusView, SpinOffSurplusView, ClassStatsView,
@@ -77,6 +77,7 @@ urlpatterns = [
     path('class-management/dropout-extract/register-options/', DropoutExtractRegisterOptionsView.as_view(), name='dropout_extract_register_options'),
     path('class-management/dropout-extract/register/', DropoutExtractRegisterView.as_view(), name='dropout_extract_register'),
     path('class-management/dropout-extract/followups/', DropoutExtractFollowUpView.as_view(), name='dropout_extract_followups'),
+    path('class-management/dropout-extract/stats/', DropoutStatsView.as_view(), name='dropout_extract_stats'),
     path('class-management/terms/', TermListView.as_view(), name='term_list'),
     path('class-management/terms/<int:pk>/', TermDetailView.as_view(), name='term_detail'),
     path('class-management/terms/<int:term_id>/holidays/', TermHolidayListView.as_view(), name='term_holiday_list'),

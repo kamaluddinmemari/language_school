@@ -263,6 +263,8 @@ class ClassRequest(models.Model):
     force_last = models.BooleanField(default=False)
     # خواسته: دکمه‌ای که وقتی با فرد تماس گرفته شد ولی پاسخگو نبود، زده می‌شود — برچسب زرد.
     contact_no_answer = models.BooleanField(default=False)
+    # درخواست خصوصی/جبرانیِ فوری — برای اولویت صف و نمایش متمایز.
+    is_urgent = models.BooleanField(default=False, db_index=True)
     session_duration = models.CharField(max_length=5, choices=SessionDuration.choices, default=SessionDuration.ONE_HALF)
     session_count = models.PositiveIntegerField(default=1)
     total_price = models.PositiveIntegerField(default=0)

@@ -230,6 +230,7 @@ class StudentSerializer(serializers.ModelSerializer):
     """
     username = serializers.CharField(required=False, allow_blank=True, validators=[username_validator])
     password = serializers.CharField(write_only=True, required=False, allow_blank=True, validators=[password_validator])
+    national_code = serializers.CharField(required=False, allow_blank=True, allow_null=True, max_length=10)
     has_app_account = serializers.SerializerMethodField()
 
     class Meta:
@@ -243,6 +244,8 @@ class StudentSerializer(serializers.ModelSerializer):
 
     def get_has_app_account(self, obj):
         return obj.has_usable_password()
+    def validate_national_code(self, value):
+        return value or None
 
     def validate_username(self, value):
         if not value:
@@ -256,6 +259,7 @@ class StudentSerializer(serializers.ModelSerializer):
 
     def create(self, validated_data):
         password = validated_data.pop('password', '')
+        validated_data['national_code'] = validated_data.get('national_code') or None
         username = validated_data.pop('username', '') or validated_data.get('national_code') or validated_data.get('phone')
         validated_data['role'] = User.Role.STUDENT
         # چون موبایل دیگر یکتا نیست (چند خواهر/برادر می‌توانند شماره‌ی مشترک داشته باشند)،

@@ -23,9 +23,16 @@ from accounts.menu_permissions import can_view_menu
 
 
 def _private_class_queue_ordering(queryset):
-    """صف پنل: پرداخت‌شده‌ها/جبرانی‌ها ابتدا، خصوصیِ پرداخت‌نشده بعد؛ قدیمی به جدید."""
+    """صف پنل: «فوری»ها (خصوصیِ پرداخت‌شده/جبرانی) اول، بعد پرداخت‌شده‌ها/جبرانی‌ها، خصوصیِ پرداخت‌نشده بعد؛ قدیمی به جدید."""
     queue_group = Case(
         When(force_last=True, then=Value(3)),
+        When(
+            Q(is_urgent=True) & (
+                Q(class_type=ClassRequest.ClassType.MAKEUP)
+                | Q(class_type=ClassRequest.ClassType.PRIVATE, payment_status=ClassRequest.PaymentStatus.PAID)
+            ),
+            then=Value(-1),
+        ),
         When(
             Q(class_type=ClassRequest.ClassType.MAKEUP)
             | Q(payment_status=ClassRequest.PaymentStatus.PAID),

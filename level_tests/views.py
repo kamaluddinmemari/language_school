@@ -194,6 +194,30 @@ class LevelTestListCreateView(APIView):
             data['price'] = setting.price if setting else 0
         serializer = LevelTestIntakeSerializer(data=data)
         serializer.is_valid(raise_exception=True)
+        from .scheduling import normalize_name
+        first_name = normalize_name(serializer.validated_data.get('first_name'))
+        last_name = normalize_name(serializer.validated_data.get('last_name'))
+        national_code = str(serializer.validated_data.get('national_code') or '').strip()
+        student_id = serializer.validated_data.get('student').id if serializer.validated_data.get('student') else None
+        pending_tests = LevelTest.objects.filter(status=LevelTest.Status.PENDING).only(
+            'id', 'first_name', 'last_name', 'national_code', 'student_id', 'test_date'
+        )
+        duplicate = None
+        for existing in pending_tests:
+            same_student = bool(student_id and existing.student_id == student_id)
+            same_code = bool(national_code and existing.national_code and existing.national_code.strip() == national_code)
+            same_name = (
+                normalize_name(existing.first_name) == first_name
+                and normalize_name(existing.last_name) == last_name
+            )
+            if same_student or same_code or same_name:
+                duplicate = existing
+                break
+        if duplicate:
+            return Response({
+                'error': f"⚠️ این فرد از قبل در فهرست تعیین‌سطح‌های در انتظار ثبت شده است: {duplicate.first_name} {duplicate.last_name} (شمارهٔ پیگیری: {duplicate.id}). برای جلوگیری از ثبت تکراری، ابتدا همان مورد را بررسی کنید.",
+                'duplicate_id': duplicate.id,
+            }, status=status.HTTP_409_CONFLICT)
         obj = serializer.save(created_by=request.user, status=LevelTest.Status.PENDING)
         return Response(LevelTestSerializer(obj).data, status=status.HTTP_201_CREATED)
 
@@ -397,14 +421,19 @@ class LevelTestDetailView(APIView):
             existing = None
             if updated.national_code:
                 existing = User.objects.filter(role='student', national_code=updated.national_code).first()
+            elif updated.phone:
+                existing = User.objects.filter(
+                    role='student', phone=updated.phone,
+                    first_name=updated.first_name, last_name=updated.last_name,
+                ).first()
             if existing:
                 updated.student = existing
                 updated.save(update_fields=['student'])
-            elif updated.first_name and updated.last_name and updated.national_code and updated.gender:
+            elif updated.first_name and updated.last_name and updated.phone and updated.gender:
                 student_serializer = StudentSerializer(data={
                     'first_name': updated.first_name, 'last_name': updated.last_name,
                     'father_name': updated.father_name, 'phone': updated.phone,
-                    'national_code': updated.national_code,
+                    'national_code': updated.national_code or None,
                     'birth_date': updated.birth_date.isoformat() if updated.birth_date else None,
                     'gender': updated.gender,
                 })
