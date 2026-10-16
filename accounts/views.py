@@ -2,6 +2,7 @@ from rest_framework import generics, status
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import AllowAny, IsAuthenticated
+from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from django.utils import timezone
 from django.core.exceptions import MultipleObjectsReturned
 from django.db import transaction
@@ -1068,3 +1069,184 @@ class StaffCredentialsDetailView(APIView):
             user.username = new_username
             user.save()
         return Response(_staff_credentials_payload(user))
+
+
+FORM_ARCHIVE_ROLES = {'admin', 'office', 'employee', 'evaluator'}
+FORM_ARCHIVE_TYPES = {'disciplinary', 'refund'}
+
+
+def _form_archive_payload(request, archive):
+    return {
+        'id': archive.id,
+        'document_type': archive.document_type,
+        'number': archive.number,
+        'data': archive.data or {},
+        'signed_image_url': request.build_absolute_uri(f'/api/form-archives/{archive.id}/image/') if archive.signed_image else '',
+        'created_at': archive.created_at.isoformat(),
+    }
+
+
+def _form_archive_image(request):
+    if request.user.role not in FORM_ARCHIVE_ROLES:
+        return None, Response({'error': 'فقط مدیر، کارکنان اداری یا مدیر آموزش می‌توانند تصویر فرم را بارگذاری کنند'}, status=status.HTTP_403_FORBIDDEN)
+    image = request.FILES.get('image')
+    if not image:
+        return None, Response({'error': 'تصویر فرم را انتخاب یا با دوربین ثبت کنید'}, status=status.HTTP_400_BAD_REQUEST)
+    if image.size > 15 * 1024 * 1024:
+        return None, Response({'error': 'حجم تصویر نباید بیشتر از ۱۵ مگابایت باشد'}, status=status.HTTP_400_BAD_REQUEST)
+    extension = image.name.rsplit('.', 1)[-1].lower() if '.' in image.name else ''
+    if extension not in {'jpg', 'jpeg', 'png', 'webp'}:
+        return None, Response({'error': 'فرمت مجاز تصویر JPG، PNG یا WebP است'}, status=status.HTTP_400_BAD_REQUEST)
+    try:
+        from django.core.files.images import get_image_dimensions
+        dimensions = get_image_dimensions(image)
+        image.seek(0)
+        if not dimensions or not dimensions[0] or not dimensions[1]:
+            raise ValueError('invalid image')
+    except Exception:
+        return None, Response({'error': 'فایل انتخاب‌شده تصویر معتبر نیست'}, status=status.HTTP_400_BAD_REQUEST)
+    return image, None
+
+
+class FormArchiveListCreateView(APIView):
+    """بایگانی مشترک فرم‌های تعهد/استرداد برای پنل وب و اپ اداری."""
+    permission_classes = [IsAuthenticated]
+    parser_classes = [JSONParser, MultiPartParser, FormParser]
+
+    def get(self, request):
+        if request.user.role not in FORM_ARCHIVE_ROLES:
+            return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
+        from .models import FormArchive
+        document_type = request.query_params.get('type')
+        rows = FormArchive.objects.all()
+        if document_type:
+            if document_type not in FORM_ARCHIVE_TYPES:
+                return Response({'error': 'نوع فرم نامعتبر است'}, status=status.HTTP_400_BAD_REQUEST)
+            rows = rows.filter(document_type=document_type)
+        return Response([_form_archive_payload(request, row) for row in rows])
+
+    def post(self, request):
+        if request.user.role not in FORM_ARCHIVE_ROLES:
+            return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
+        from .models import FormArchive
+        document_type = str(request.data.get('document_type') or '').strip()
+        number = str(request.data.get('number') or '').strip()[:32]
+        data = request.data.get('data') or {}
+        if document_type not in FORM_ARCHIVE_TYPES:
+            return Response({'error': 'نوع فرم نامعتبر است'}, status=status.HTTP_400_BAD_REQUEST)
+        if not number:
+            return Response({'error': 'شماره مدرک الزامی است'}, status=status.HTTP_400_BAD_REQUEST)
+        if not isinstance(data, dict):
+            return Response({'error': 'اطلاعات فرم نامعتبر است'}, status=status.HTTP_400_BAD_REQUEST)
+        archive, created = FormArchive.objects.get_or_create(
+            document_type=document_type,
+            number=number,
+            defaults={'data': data, 'created_by': request.user},
+        )
+        return Response(_form_archive_payload(request, archive), status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
+
+
+class FormArchiveDetailView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def delete(self, request, pk):
+        if request.user.role not in FORM_ARCHIVE_ROLES:
+            return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
+        from .models import FormArchive
+        try:
+            archive = FormArchive.objects.get(pk=pk)
+        except FormArchive.DoesNotExist:
+            return Response({'error': 'رکورد بایگانی پیدا نشد'}, status=status.HTTP_404_NOT_FOUND)
+        if archive.document_type == 'disciplinary':
+            selected_data = archive.data or {}
+            national_code = str(selected_data.get('national_code') or '').strip()
+            full_name = ' '.join(f"{selected_data.get('first_name') or ''} {selected_data.get('last_name') or ''}".replace('ي', 'ی').replace('ك', 'ک').split())
+            related_rows = []
+            if national_code or full_name:
+                for candidate in FormArchive.objects.filter(document_type='disciplinary').iterator():
+                    candidate_data = candidate.data or {}
+                    candidate_code = str(candidate_data.get('national_code') or '').strip()
+                    candidate_name = ' '.join(f"{candidate_data.get('first_name') or ''} {candidate_data.get('last_name') or ''}".replace('ي', 'ی').replace('ك', 'ک').split())
+                    same_student = bool(national_code and candidate_code == national_code)
+                    if national_code and not candidate_code and full_name and candidate_name == full_name:
+                        same_student = True
+                    if not national_code and full_name and candidate_name == full_name:
+                        same_student = True
+                    if same_student:
+                        related_rows.append(candidate)
+            if archive not in related_rows:
+                related_rows.append(archive)
+            deleted_ids = [candidate.id for candidate in related_rows]
+            for candidate in related_rows:
+                candidate.delete()
+            return Response({'deleted_count': len(deleted_ids), 'deleted_ids': deleted_ids})
+        archive.delete()
+        return Response({'deleted_count': 1, 'deleted_ids': [archive.id]})
+
+
+class FormArchiveImageView(APIView):
+    permission_classes = [IsAuthenticated]
+    parser_classes = [MultiPartParser, FormParser]
+
+    def get(self, request, pk):
+        if request.user.role not in FORM_ARCHIVE_ROLES:
+            return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
+        from .models import FormArchive
+        try:
+            archive = FormArchive.objects.get(pk=pk)
+        except FormArchive.DoesNotExist:
+            return Response({'error': 'رکورد بایگانی پیدا نشد'}, status=status.HTTP_404_NOT_FOUND)
+        if not archive.signed_image:
+            return Response({'error': 'برای این رکورد تصویری ثبت نشده است'}, status=status.HTTP_404_NOT_FOUND)
+        from django.http import FileResponse
+        import mimetypes
+        content_type = mimetypes.guess_type(archive.signed_image.name)[0] or 'application/octet-stream'
+        return FileResponse(archive.signed_image.open('rb'), content_type=content_type, as_attachment=False, filename=archive.signed_image.name.rsplit('/', 1)[-1])
+
+    def post(self, request, pk):
+        if request.user.role not in FORM_ARCHIVE_ROLES:
+            return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
+        from .models import FormArchive
+        try:
+            archive = FormArchive.objects.get(pk=pk)
+        except FormArchive.DoesNotExist:
+            return Response({'error': 'رکورد بایگانی پیدا نشد'}, status=status.HTTP_404_NOT_FOUND)
+        image, error = _form_archive_image(request)
+        if error:
+            return error
+        old_name = archive.signed_image.name if archive.signed_image else ''
+        archive.signed_image = image
+        archive.save(update_fields=['signed_image'])
+        if old_name:
+            from django.core.files.storage import default_storage
+            default_storage.delete(old_name)
+        return Response(_form_archive_payload(request, archive))
+
+
+class FormArchiveUploadByNumberView(APIView):
+    """بارگذاری موبایلی تصویر دوربین برای رکورد دقیق با نوع و شماره مدرک."""
+    permission_classes = [IsAuthenticated]
+    parser_classes = [MultiPartParser, FormParser]
+
+    def post(self, request):
+        if request.user.role not in FORM_ARCHIVE_ROLES:
+            return Response({'error': 'فقط مدیر، کارکنان اداری یا مدیر آموزش می‌توانند تصویر فرم را بارگذاری کنند'}, status=status.HTTP_403_FORBIDDEN)
+        document_type = str(request.data.get('document_type') or '').strip()
+        number = str(request.data.get('number') or '').strip()
+        if document_type not in FORM_ARCHIVE_TYPES or not number:
+            return Response({'error': 'نوع و شماره مدرک را وارد کنید'}, status=status.HTTP_400_BAD_REQUEST)
+        from .models import FormArchive
+        try:
+            archive = FormArchive.objects.get(document_type=document_type, number=number)
+        except FormArchive.DoesNotExist:
+            return Response({'error': 'رکوردی با این نوع و شماره در بایگانی پیدا نشد؛ ابتدا فرم را در پنل ثبت کنید'}, status=status.HTTP_404_NOT_FOUND)
+        image, error = _form_archive_image(request)
+        if error:
+            return error
+        old_name = archive.signed_image.name if archive.signed_image else ''
+        archive.signed_image = image
+        archive.save(update_fields=['signed_image'])
+        if old_name:
+            from django.core.files.storage import default_storage
+            default_storage.delete(old_name)
+        return Response(_form_archive_payload(request, archive))

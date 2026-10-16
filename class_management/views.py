@@ -857,6 +857,8 @@ class StudentClassSearchView(APIView):
             rows.append({
                 'student_id': student.id,
                 'student_name': f'{student.first_name or ""} {student.last_name or ""}'.strip() or student.username,
+                'first_name': student.first_name or '',
+                'last_name': student.last_name or '',
                 'national_code': student.national_code or '',
                 'phone': student.phone or '',
                 'level': slot.assigned_level or '',
@@ -1845,8 +1847,13 @@ class StudentEducationHistoryView(APIView):
             'retest_reason': info['retest_reason'],
             'term_enrollments': [{
                 'id': e.id,
+                'term_id': e.class_slot.term_id,
+                'term_title': e.class_slot.term.title if e.class_slot.term_id else '',
                 'level': e.class_slot.assigned_level,
                 'class_number': e.class_slot.number,
+                'class_day': e.class_slot.schedule_days_display or e.class_slot.day_type_display or e.class_slot.day_type,
+                'class_time': e.class_slot.time_slot,
+                'teacher_name': e.class_slot.teacher_name,
                 'method': 'خودِ دانش‌آموز از اپ' if e.self_enrolled else 'ثبت‌نام توسط مدیریت',
                 'payment_method_display': e.get_payment_method_display(),
                 'payment_verified': e.payment_verified,

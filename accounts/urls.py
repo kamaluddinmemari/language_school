@@ -25,6 +25,10 @@ from .views import (
     MyMenuPermissionsView,
     StaffCredentialsListView,
     StaffCredentialsDetailView,
+    FormArchiveListCreateView,
+    FormArchiveDetailView,
+    FormArchiveImageView,
+    FormArchiveUploadByNumberView,
 )
 
 urlpatterns = [
@@ -53,4 +57,8 @@ urlpatterns = [
     path('my-menu-permissions/', MyMenuPermissionsView.as_view(), name='my_menu_permissions'),
     path('staff-credentials/', StaffCredentialsListView.as_view(), name='staff_credentials_list'),
     path('staff-credentials/<int:pk>/', StaffCredentialsDetailView.as_view(), name='staff_credentials_detail'),
+    path('form-archives/', FormArchiveListCreateView.as_view(), name='form_archive_list_create'),
+    path('form-archives/upload-by-number/', FormArchiveUploadByNumberView.as_view(), name='form_archive_upload_by_number'),
+    path('form-archives/<int:pk>/', FormArchiveDetailView.as_view(), name='form_archive_detail'),
+    path('form-archives/<int:pk>/image/', FormArchiveImageView.as_view(), name='form_archive_image'),
 ]

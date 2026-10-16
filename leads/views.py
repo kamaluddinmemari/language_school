@@ -499,7 +499,8 @@ class UnregisteredStudentStatsView(APIView):
             'total': qs.count(),
             'tracking_count': tracking.count(),
             'registered_count': registered.count(),
-            'total_tuition_potential': sum(potential_price(s) for s in tracking),
+            'total_tuition_potential': sum(potential_price(s) for s in tracking) + sum(
+                d.debt_amount for d in _term_scoped_stats_qs(Debtor.objects.all(), request.query_params.get('term_id'), Debtor.Status.SETTLED).filter(status=Debtor.Status.PENDING, awaiting_registration=True)),
             'total_tuition_registered': sum(s.tuition_price or 0 for s in registered),
             'generated_at_jalali': jdatetime.datetime.fromgregorian(datetime=now_local).strftime('%Y/%m/%d - %H:%M:%S'),
         })
@@ -1036,7 +1037,8 @@ class DebtorStatsView(APIView):
         if not can_edit_menu(request.user, "followups"):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         qs = _term_scoped_stats_qs(Debtor.objects.all(), request.query_params.get('term_id'), Debtor.Status.SETTLED)
-        pending = qs.filter(status=Debtor.Status.PENDING)
+        # «منتظر ثبت‌نام»های انتقالی در واقع ثبت‌نام‌نشده‌اند و در جمع بدهی‌ها نمی‌آیند
+        pending = qs.filter(status=Debtor.Status.PENDING, awaiting_registration=False)
         settled = qs.filter(status=Debtor.Status.SETTLED)
         now_local = timezone.localtime(timezone.now())
         import jdatetime
@@ -1300,5 +1302,5 @@ class PersonFinanceStatusView(APIView):
                 debt = debt.filter(Q(term_id=term.pk) | Q(term__in=earlier))
         return Response({
             'unregistered': [self._unreg_row(u) for u in unreg.select_related('reported_slot', 'submitted_by')[:5]],
-            'debtors': [{'id': d.id, 'debt_amount': d.debt_amount, 'term_title': d.term_title} for d in debt[:5]],
+            'debtors': [{'id': d.id, 'debt_amount': d.debt_amount, 'term_title': d.term_title, 'awaiting_registration': d.awaiting_registration} for d in debt[:5]],
         })

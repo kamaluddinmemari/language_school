@@ -501,3 +501,32 @@ class DailyActivity(models.Model):
 
     def __str__(self):
         return f"{self.user} — {self.date} — {self.total_seconds}s"
+
+
+class FormArchive(models.Model):
+    """بایگانی مشترک فرم‌های تعهد و استرداد، همراه با تصویر فرم امضاشده."""
+
+    class DocumentType(models.TextChoices):
+        DISCIPLINARY = 'disciplinary', 'تعهد انضباطی'
+        REFUND = 'refund', 'استرداد'
+
+    document_type = models.CharField(max_length=20, choices=DocumentType.choices)
+    number = models.CharField(max_length=32)
+    data = models.JSONField(default=dict, blank=True)
+    signed_image = models.ImageField(upload_to='form_archives/%Y/%m/', null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    created_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='form_archives')
+
+    class Meta:
+        ordering = ['-created_at', '-id']
+        constraints = [
+            models.UniqueConstraint(fields=['document_type', 'number'], name='uniq_form_archive_type_number'),
+        ]
+
+    def __str__(self):
+        return f'{self.get_document_type_display()} شماره {self.number}'
+
+    def delete(self, *args, **kwargs):
+        if self.signed_image:
+            self.signed_image.delete(save=False)
+        return super().delete(*args, **kwargs)
