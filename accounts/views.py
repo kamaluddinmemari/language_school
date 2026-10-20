@@ -5,7 +5,7 @@ from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from django.utils import timezone
 from django.core.exceptions import MultipleObjectsReturned
-from django.db import transaction
+from django.db import IntegrityError, transaction
 from datetime import timedelta, datetime, date
 import random
 import re
@@ -1086,6 +1086,57 @@ def _form_archive_payload(request, archive):
     }
 
 
+def _form_archive_digits(value):
+    digits = str(value or '').translate(str.maketrans('۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩', '01234567890123456789'))
+    return re.sub(r'\D', '', digits)
+
+
+def _form_archive_phone(value):
+    phone = _form_archive_digits(value)
+    if phone.startswith('0098'):
+        return '0' + phone[4:]
+    if phone.startswith('98') and len(phone) == 12:
+        return '0' + phone[2:]
+    return phone
+
+
+def _form_archive_same_person(left, right):
+    left = left if isinstance(left, dict) else {}
+    right = right if isinstance(right, dict) else {}
+    left_code = _form_archive_digits(left.get('national_code'))
+    right_code = _form_archive_digits(right.get('national_code'))
+    if left_code and right_code:
+        return left_code == right_code
+    left_phone = _form_archive_phone(left.get('phone'))
+    right_phone = _form_archive_phone(right.get('phone'))
+    if left_phone and right_phone:
+        return left_phone == right_phone
+
+    def full_name(data):
+        name = f"{data.get('first_name') or ''} {data.get('last_name') or ''}"
+        name = name.replace('ي', 'ی').replace('ك', 'ک').casefold()
+        return re.sub(r'\s+', ' ', name).strip()
+
+    left_name = full_name(left)
+    return bool(left_name and left_name == full_name(right))
+
+
+def _form_archive_label(value):
+    label = str(value or '').translate(str.maketrans('۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩', '01234567890123456789'))
+    label = label.replace('ي', 'ی').replace('ك', 'ک').casefold()
+    return re.sub(r'\s+', ' ', label).strip()
+
+
+def _form_archive_same_refund_period(left, right):
+    left = left if isinstance(left, dict) else {}
+    right = right if isinstance(right, dict) else {}
+    return (
+        _form_archive_same_person(left, right)
+        and _form_archive_label(left.get('level')) == _form_archive_label(right.get('level'))
+        and _form_archive_label(left.get('term')) == _form_archive_label(right.get('term'))
+    )
+
+
 def _form_archive_image(request):
     if request.user.role not in FORM_ARCHIVE_ROLES:
         return None, Response({'error': 'فقط مدیر، کارکنان اداری یا مدیر آموزش می‌توانند تصویر فرم را بارگذاری کنند'}, status=status.HTTP_403_FORBIDDEN)
@@ -1138,12 +1189,41 @@ class FormArchiveListCreateView(APIView):
             return Response({'error': 'شماره مدرک الزامی است'}, status=status.HTTP_400_BAD_REQUEST)
         if not isinstance(data, dict):
             return Response({'error': 'اطلاعات فرم نامعتبر است'}, status=status.HTTP_400_BAD_REQUEST)
-        archive, created = FormArchive.objects.get_or_create(
-            document_type=document_type,
-            number=number,
-            defaults={'data': data, 'created_by': request.user},
-        )
-        return Response(_form_archive_payload(request, archive), status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
+        try:
+            with transaction.atomic():
+                existing_rows = list(FormArchive.objects.select_for_update().filter(document_type=document_type))
+                same_number = next((row for row in existing_rows if row.number == number), None)
+                if same_number:
+                    if not _form_archive_same_person(same_number.data, data):
+                        return Response({'error': f'شمارهٔ {number} قبلاً برای فرد دیگری ثبت شده است.'}, status=status.HTTP_409_CONFLICT)
+                    return Response(_form_archive_payload(request, same_number), status=status.HTTP_200_OK)
+
+                duplicate_refund = next((
+                    row for row in existing_rows
+                    if document_type == 'refund' and _form_archive_same_refund_period(row.data, data)
+                ), None)
+                if duplicate_refund:
+                    return Response({
+                        'error': f"این فرد در همین سطح و ترم قبلاً فرم استرداد را با شمارهٔ {duplicate_refund.number} ثبت کرده است؛ ثبت مجدد مجاز نیست.",
+                        'existing_number': duplicate_refund.number,
+                        'existing_id': duplicate_refund.id,
+                    }, status=status.HTTP_409_CONFLICT)
+
+                archive = FormArchive.objects.create(
+                    document_type=document_type,
+                    number=number,
+                    data=data,
+                    created_by=request.user,
+                )
+        except IntegrityError:
+            # قید یکتای (نوع فرم، شماره) آخرین سد در برابر درخواست‌های هم‌زمان است.
+            archive = FormArchive.objects.filter(document_type=document_type, number=number).first()
+            if archive and _form_archive_same_person(archive.data, data):
+                return Response(_form_archive_payload(request, archive), status=status.HTTP_200_OK)
+            if archive:
+                return Response({'error': f'شمارهٔ {number} قبلاً برای فرد دیگری ثبت شده است.'}, status=status.HTTP_409_CONFLICT)
+            raise
+        return Response(_form_archive_payload(request, archive), status=status.HTTP_201_CREATED)
 
 
 class FormArchiveDetailView(APIView):
@@ -1202,6 +1282,20 @@ class FormArchiveImageView(APIView):
         import mimetypes
         content_type = mimetypes.guess_type(archive.signed_image.name)[0] or 'application/octet-stream'
         return FileResponse(archive.signed_image.open('rb'), content_type=content_type, as_attachment=False, filename=archive.signed_image.name.rsplit('/', 1)[-1])
+
+    def delete(self, request, pk):
+        if request.user.role not in FORM_ARCHIVE_ROLES:
+            return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
+        from .models import FormArchive
+        try:
+            archive = FormArchive.objects.get(pk=pk)
+        except FormArchive.DoesNotExist:
+            return Response({'error': 'رکورد بایگانی پیدا نشد'}, status=status.HTTP_404_NOT_FOUND)
+        if archive.signed_image:
+            archive.signed_image.delete(save=False)
+            archive.signed_image = None
+            archive.save(update_fields=['signed_image'])
+        return Response(_form_archive_payload(request, archive))
 
     def post(self, request, pk):
         if request.user.role not in FORM_ARCHIVE_ROLES:

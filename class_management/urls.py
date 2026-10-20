@@ -1,5 +1,5 @@
 from django.urls import path
-from .dropout_extract import DropoutExtractParseView, DropoutExtractComputeView, DropoutExtractCommitView, DropoutExtractFollowUpView, DropoutExtractListView, DropoutExtractRegisterOptionsView, DropoutExtractRegisterView, DropoutStatsView
+from .dropout_extract import DropoutExtractParseView, DropoutExtractComputeView, DropoutExtractCommitView, DropoutExtractFollowUpView, DropoutExtractListView, DropoutExtractListRefreshPreviewView, DropoutExtractListRefreshConfirmView, DropoutExtractRegisterOptionsView, DropoutExtractRegisterView, DropoutStatsView
 from .views import (
     ClassSlotListView, ClassSlotDetailView, SwapClassLocationView, TransferClassLocationView, AllocateClassesView,
     ConfirmOverflowView, EnrollmentPulseView, StudentClassSearchView, TransferSurplusView, SpinOffSurplusView, ClassStatsView,
@@ -7,11 +7,11 @@ from .views import (
     TuitionSuggestionView, TuitionSettingListView, TuitionSettingDetailView, DiscountedPersonListView, DiscountedPersonDetailView,
     TermOverviewView, AttendanceStatusView, RefundEnrollmentView, TransferEnrollmentOptionsView, TransferEnrollmentView, CreditToWalletView,
     ConfirmCarryoverEnrollmentView, MarkCarryoverEnrollmentView,
-    StudentFinancialHistoryView, EnrollmentReportView, SplitClassView, DirectEnrollSuggestionsView,
+    StudentFinancialHistoryView, EnrollmentReportView, EnrollmentTermChartView, SplitClassView, DirectEnrollSuggestionsView,
     MyDirectEnrollSuggestionsView, SelfEnrollView, VerifyEnrollmentPaymentView, MyEnrollmentsView,
     LevelRenewalApprovalListView, LevelRenewalApprovalDecideView,
     PendingSelfEnrollmentsView, RejectPendingEnrollmentView, StudentEducationHistoryView,
-    TermListView, TermDetailView, TermHolidayListView, TermHolidayDetailView, CarryClassesToNextTermView, TeacherEducationHistoryView, TeacherTermClassesView,
+    TermListView, TermDetailView, TermHolidayListView, TermHolidayDetailView, CarryClassesToNextTermView, UpdateCarryoverStudentsView, TeacherEducationHistoryView, TeacherTermClassesView,
     OnlineCourseListView, OnlineCourseDetailView, OnlineCourseCatalogView, OnlineCourseEnrollView,
     OnlineCourseSelfEnrollView, PendingOnlineCourseEnrollmentsView, VerifyOnlineCourseEnrollmentPaymentView,
     RejectPendingOnlineCourseEnrollmentView, RefundOnlineCourseEnrollmentView, CreditOnlineCourseToWalletView,
@@ -23,7 +23,7 @@ from .views import (
     TeacherTermReportView, TeacherSessionEventListCreateView, TeacherSessionEventDetailView,
     RoomQrManageView, TeacherQrAttendanceView, TeacherSessionAttendanceListView, TeacherCompensationSettingsView,
     TeacherCompensationReportView,
-    TermRetentionFollowUpView,
+    TermRetentionFollowUpView, LevelProgressionSkipReportView,
 )
 
 urlpatterns = [
@@ -69,11 +69,15 @@ urlpatterns = [
     path('class-management/pending-self-enrollments/', PendingSelfEnrollmentsView.as_view(), name='pending_self_enrollments'),
     path('class-management/students/<int:student_id>/education-history/', StudentEducationHistoryView.as_view(), name='student_education_history'),
     path('class-management/enrollment-report/', EnrollmentReportView.as_view(), name='enrollment_report'),
+    path('class-management/enrollment-term-chart/', EnrollmentTermChartView.as_view(), name='enrollment_term_chart'),
     path('class-management/term-retention/', TermRetentionFollowUpView.as_view(), name='term_retention_followup'),
+    path('class-management/level-progression-skips/', LevelProgressionSkipReportView.as_view(), name='level_progression_skips'),
     path('class-management/dropout-extract/parse/', DropoutExtractParseView.as_view(), name='dropout_extract_parse'),
     path('class-management/dropout-extract/compute/', DropoutExtractComputeView.as_view(), name='dropout_extract_compute'),
     path('class-management/dropout-extract/commit/', DropoutExtractCommitView.as_view(), name='dropout_extract_commit'),
     path('class-management/dropout-extract/lists/', DropoutExtractListView.as_view(), name='dropout_extract_lists'),
+    path('class-management/dropout-extract/lists/refresh-preview/', DropoutExtractListRefreshPreviewView.as_view(), name='dropout_extract_list_refresh_preview'),
+    path('class-management/dropout-extract/lists/refresh-confirm/', DropoutExtractListRefreshConfirmView.as_view(), name='dropout_extract_list_refresh_confirm'),
     path('class-management/dropout-extract/register-options/', DropoutExtractRegisterOptionsView.as_view(), name='dropout_extract_register_options'),
     path('class-management/dropout-extract/register/', DropoutExtractRegisterView.as_view(), name='dropout_extract_register'),
     path('class-management/dropout-extract/followups/', DropoutExtractFollowUpView.as_view(), name='dropout_extract_followups'),
@@ -83,6 +87,7 @@ urlpatterns = [
     path('class-management/terms/<int:term_id>/holidays/', TermHolidayListView.as_view(), name='term_holiday_list'),
     path('class-management/term-holidays/<int:pk>/', TermHolidayDetailView.as_view(), name='term_holiday_detail'),
     path('class-management/terms/carry-classes/', CarryClassesToNextTermView.as_view(), name='carry_classes_to_next_term'),
+    path('class-management/terms/update-carryover-students/', UpdateCarryoverStudentsView.as_view(), name='update_carryover_students'),
     path('class-management/teachers/<int:teacher_id>/education-history/', TeacherEducationHistoryView.as_view(), name='teacher_education_history'),
     path('class-management/my-term-classes/', TeacherTermClassesView.as_view(), name='my_term_classes'),
     path('class-management/teacher-term-report/', TeacherTermReportView.as_view(), name='teacher_term_report'),

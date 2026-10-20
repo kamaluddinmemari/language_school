@@ -5,7 +5,7 @@ from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.parsers import MultiPartParser, FormParser
 from django.utils import timezone
-from django.db.models import Q
+from django.db.models import Count, Q
 from django.db.models.functions import Coalesce
 from .models import LevelTest, LevelTestPriceSetting, StandardLevel
 from .serializers import LevelTestIntakeSerializer, LevelTestSerializer, LevelTestPriceSettingSerializer
@@ -144,18 +144,24 @@ class AvailableClassSlotsForLevelView(APIView):
         latest_term = get_current_term()
         if not latest_term:
             return Response([])
-        qs = ClassSlot.objects.filter(term=latest_term).exclude(assigned_level='')
+        qs = ClassSlot.objects.filter(term=latest_term).exclude(assigned_level='').annotate(
+            _confirmed_enrollment_count=Count('enrollments', filter=Q(enrollments__payment_verified=True), distinct=True),
+        )
         mapped_gender = self.GENDER_MAP.get(gender)
         if mapped_gender:
             qs = qs.filter(gender__in=[mapped_gender, ClassSlot.Gender.MIXED])
         results = [{
             'id': c.id,
+            'number': c.number,
             'level': c.assigned_level,
             'day_display': c.get_day_type_display(),
             'time_slot': c.time_slot,
             'teacher_name': c.teacher_name or 'تعیین نشده',
             'gender_display': c.get_gender_display(),
             'seats_left': c.seats_left,
+            'capacity': c.capacity,
+            'real_enrolled_count': c._confirmed_enrollment_count,
+            'real_seats_left': c.capacity - c._confirmed_enrollment_count,
         } for c in qs.order_by('assigned_level', 'day_type', 'time_slot')]
         return Response(results)
 
@@ -204,6 +210,9 @@ class LevelTestListCreateView(APIView):
         )
         duplicate = None
         for existing in pending_tests:
+            # وقت گذشته و انجام‌نشده فقط سابقه‌ی هشدار است؛ نباید مانع رزرو وقت جدید شود.
+            if existing.test_date and existing.test_date < timezone.now():
+                continue
             same_student = bool(student_id and existing.student_id == student_id)
             same_code = bool(national_code and existing.national_code and existing.national_code.strip() == national_code)
             same_name = (

@@ -62,23 +62,21 @@ def build_identity_key(national_code, phone, first_name, last_name, level=''):
 
 def auto_mark_unregistered_registered(student, term_id=None, slot_id=None):
     """
-    اگر دانش‌آموز (به هر روش) در کلاسی ثبت‌نام شد، ردیف «ثبت‌نام‌نشده»ِ در حال پیگیریِ او
-    (هم‌ترم؛ مطابقت با کد ملی، موبایل یا نام و نام‌خانوادگی) خودکار «ثبت‌نام شد» می‌شود
-    تا از لیست ثبت‌نام‌نشده‌ها خارج شود.
+    اگر دانش‌آموز در کلاسی ثبت‌نام شد، فقط ردیف همان هویت در همان ترم «ثبت‌نام شد» می‌شود.
+    کد ملی معیار قطعی است؛ در نبود آن، موبایل همراه با نام کامل جایگزین می‌شود.
     """
     from django.db.models import Q
-    q = Q()
     national = (getattr(student, 'national_code', '') or '').strip()
     phone = (getattr(student, 'phone', '') or '').strip()
     first = (getattr(student, 'first_name', '') or '').strip()
     last = (getattr(student, 'last_name', '') or '').strip()
     if national:
-        q |= Q(national_code=national)
-    if phone:
-        q |= Q(phone=phone)
-    if first and last:
-        q |= Q(first_name=first, last_name=last)
-    if not q:
+        q = Q(national_code=national)
+    elif phone and first and last:
+        q = Q(phone=phone, first_name=first, last_name=last)
+    elif first and last:
+        q = Q(first_name=first, last_name=last)
+    else:
         return 0
     rows = UnregisteredStudent.objects.filter(q, status=UnregisteredStudent.Status.TRACKING)
     if slot_id:
@@ -101,17 +99,14 @@ def get_current_term():
     """
     ترمی با جدیدترین تاریخ شروع که تا امروز آغاز شده است؛ تاریخ پایان در انتخاب پیش‌فرض
     اثر ندارد. ترم‌های آینده تا روز شروع‌شان انتخاب نمی‌شوند. اگر هنوز ترمی شروع نشده،
-    نزدیک‌ترین ترم آینده و در نبود ترم None برگردانده می‌شود.
+    ترم جاری وجود ندارد و None برگردانده می‌شود.
     """
     from class_management.models import Term
     today = timezone.localdate()
     # ترم‌های آینده تا روز شروع‌شان نباید پیش‌فرض شوند؛ پایان‌یافتن ترم مانع
     # از انتخاب آن به‌عنوان آخرین ترم شروع‌شده نیست.
     current = Term.objects.filter(start_date__lte=today).order_by('-start_date', '-id').first()
-    if current:
-        return current
-    # اگر هنوز هیچ ترمی شروع نشده، نزدیک‌ترین ترم آینده را برگردان.
-    return Term.objects.order_by('start_date', 'id').first()
+    return current
 
 
 class NewLead(models.Model):
@@ -246,6 +241,7 @@ class UnregisteredStudent(models.Model):
     class_level = models.CharField(max_length=50)
     national_code = models.CharField(max_length=20, blank=True)
     phone = models.CharField(max_length=20, blank=True)
+    row_description = models.TextField(blank=True, default='', help_text='توضیح قابل ویرایش برای نمایش در ردیف پیگیری')
     identity_key = models.CharField(max_length=255, blank=True, default='', editable=False)
     tuition_price = models.PositiveIntegerField(null=True, blank=True, help_text='قیمت شهریه‌ی پیشنهادی')
     gender = models.CharField(
@@ -365,6 +361,7 @@ class Debtor(models.Model):
     class_level = models.CharField(max_length=50, blank=True)
     debt_amount = models.PositiveIntegerField(default=0)
     description = models.TextField(blank=True)
+    row_description = models.TextField(blank=True, default='', help_text='توضیح قابل ویرایش برای نمایش در ردیف پیگیری')
 
     status = models.CharField(max_length=10, choices=Status.choices, default=Status.PENDING)
     settled_at = models.DateTimeField(null=True, blank=True)

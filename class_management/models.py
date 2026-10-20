@@ -182,6 +182,8 @@ class ClassSlot(models.Model):
     capacity = models.PositiveIntegerField(default=10)
     teacher_name = models.CharField(max_length=150, blank=True)
     previous_teacher_name = models.CharField(max_length=150, blank=True, help_text='نام استاد کلاس متناظر در ترم قبل برای نمایش راهنما')
+    carried_from_slot = models.ForeignKey('self', on_delete=models.SET_NULL, null=True, blank=True, related_name='next_term_copies', help_text='کلاس مبدأ هنگام انتقال به ترم بعد')
+    carry_students_from_source = models.BooleanField(default=True, help_text='آیا زبان‌آموزان کلاس مبدأ به این کلاس منتقل شوند')
 
     assigned_level = models.CharField(max_length=50, blank=True)
     current_count = models.PositiveIntegerField(default=0)

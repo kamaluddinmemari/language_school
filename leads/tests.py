@@ -5,8 +5,10 @@ from django.test import TestCase
 from rest_framework.test import APIRequestFactory, force_authenticate
 
 from class_management.models import ClassSlot, ClassSlotEnrollment, Term
-from .models import Debtor, UnregisteredStudent
-from .views import DebtorSettleView, UnregisteredStudentClassEnrollView
+from accounts.services import sync_student_from_lead
+from .models import Debtor, UnregisteredStudent, auto_mark_unregistered_registered
+from .serializers import DebtorSerializer, UnregisteredStudentSerializer
+from .views import DebtorSettleView, UnregisteredStudentClassEnrollView, _resolve_unregistered_student
 
 
 class DebtorEnrollmentTests(TestCase):
@@ -112,3 +114,118 @@ class DebtorEnrollmentTests(TestCase):
         enrollment = ClassSlotEnrollment.objects.get(class_slot=self.gray_class, student=student)
         self.assertEqual(enrollment.tuition_amount, 90000)
         self.assertTrue(enrollment.payment_verified)
+
+
+class NationalCodeIdentityTests(TestCase):
+    def setUp(self):
+        User = get_user_model()
+        self.term = Term.objects.create(
+            year=1405, term_number=1, start_date=date(2026, 3, 21), end_date=date(2026, 6, 20),
+        )
+        self.slot = ClassSlot.objects.create(
+            number=9, term=self.term, day_type='even', time_slot='09:45-11:15',
+            gender='girls', assigned_level='104', capacity=20,
+        )
+        self.registered = User.objects.create_user(
+            username='raha-registered', password='test-password', role='student',
+            first_name='رها', last_name='مقدسی', phone='09120000077',
+            national_code='1111111111', gender='female',
+        )
+        ClassSlotEnrollment.objects.create(
+            class_slot=self.slot, student=self.registered, payment_method='cash',
+            tuition_amount=100000, payment_verified=True,
+        )
+
+    def test_same_name_and_shared_phone_do_not_assign_other_students_class(self):
+        record = UnregisteredStudent.objects.create(
+            first_name='رها', last_name='مقدسی', phone='09120000077',
+            national_code='2222222222', class_level='104', term=self.term,
+            is_misplaced=True, misplaced_from_slot=self.slot,
+        )
+
+        data = UnregisteredStudentSerializer(record).data
+
+        self.assertFalse(data['has_current_class'])
+        self.assertFalse(data['is_misplaced'])
+        self.assertIsNone(data['class_slot'])
+        self.assertIsNone(data['misplaced_class_number'])
+        self.assertEqual(data['class_status'], 'none')
+
+    def test_registering_one_person_does_not_auto_mark_same_name_other_code(self):
+        registered_row = UnregisteredStudent.objects.create(
+            first_name='رها', last_name='مقدسی', phone='09120000077',
+            national_code='1111111111', class_level='A1', term=self.term,
+        )
+        other_row = UnregisteredStudent.objects.create(
+            first_name='رها', last_name='مقدسی', phone='09120000077',
+            national_code='2222222222', class_level='A2', term=self.term,
+        )
+
+        auto_mark_unregistered_registered(self.registered, term_id=self.term.pk, slot_id=self.slot.pk)
+
+        registered_row.refresh_from_db()
+        other_row.refresh_from_db()
+        self.assertEqual(registered_row.status, UnregisteredStudent.Status.REGISTERED)
+        self.assertEqual(other_row.status, UnregisteredStudent.Status.TRACKING)
+
+    def test_resolve_and_sync_do_not_fallback_to_shared_phone_when_code_is_given(self):
+        record = UnregisteredStudent(
+            first_name='رها', last_name='مقدسی', phone='09120000077',
+            national_code='2222222222', class_level='A2', term=self.term,
+        )
+
+        self.assertIsNone(_resolve_unregistered_student(record, create=False))
+        student, created = sync_student_from_lead(
+            first_name=record.first_name, last_name=record.last_name,
+            phone=record.phone, national_code=record.national_code, language_level=record.class_level,
+        )
+
+        self.assertTrue(created)
+        self.assertNotEqual(student.pk, self.registered.pk)
+        self.assertEqual(student.national_code, '2222222222')
+
+
+class DebtorDropoutLabelTests(TestCase):
+    def setUp(self):
+        User = get_user_model()
+        self.student = User.objects.create_user(
+            username='dropout-debtor', password='test-password', role='student',
+            first_name='زبان‌آموز', last_name='ریزش', phone='09120000088',
+        )
+        self.previous_term = Term.objects.create(
+            year=1405, term_number=1, start_date=date(2026, 3, 21), end_date=date(2026, 6, 20),
+        )
+        self.current_term = Term.objects.create(
+            year=1405, term_number=2, start_date=date(2026, 6, 21), end_date=date(2026, 9, 21),
+        )
+        self.old_slot = ClassSlot.objects.create(
+            number=88, term=self.previous_term, day_type='even', time_slot='09:45-11:15',
+            gender='girls', assigned_level='A1', capacity=20,
+        )
+        ClassSlotEnrollment.objects.create(
+            class_slot=self.old_slot, student=self.student, payment_method='cash',
+            tuition_amount=100000, payment_verified=True,
+        )
+        self.debtor = Debtor.objects.create(
+            first_name=self.student.first_name, last_name=self.student.last_name,
+            phone=self.student.phone, student=self.student, class_level='A1',
+            debt_amount=100000, term=self.current_term,
+        )
+
+    def test_debtor_without_current_class_or_unregistered_row_is_labeled_dropout(self):
+        data = DebtorSerializer(self.debtor).data
+
+        self.assertEqual(data['class_status'], 'dropout')
+        self.assertEqual(data['class_status_text'], 'فرد ریزشی می‌باشد و در این ترم سر هیچ کلاسی نیست')
+        self.assertIsNone(data['class_slot_number'])
+
+    def test_unregistered_counterpart_keeps_existing_class_status_behavior(self):
+        UnregisteredStudent.objects.create(
+            first_name=self.student.first_name, last_name=self.student.last_name,
+            phone=self.student.phone, class_level='A1', term=self.current_term,
+        )
+
+        data = DebtorSerializer(self.debtor).data
+
+        self.assertTrue(data['also_unregistered'])
+        self.assertNotEqual(data['class_status'], 'dropout')

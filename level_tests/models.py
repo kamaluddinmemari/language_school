@@ -103,6 +103,9 @@ class LevelTest(models.Model):
     age_group = models.CharField(max_length=10, choices=AgeGroup.choices, blank=True)
     level = models.CharField(max_length=20, choices=get_all_level_choices, blank=True)
     test_date = models.DateTimeField(null=True, blank=True)
+    # این علامت برای افرادی است که به‌دلیل عدم رعایت توالی ترم، تعیین‌سطحشان الزامی است.
+    # چنین افرادی حتی بعد از گذشت زمان رزرو، در صف «تایم از دست‌رفته» قرار نمی‌گیرند.
+    sequence_warning = models.BooleanField(default=False, help_text='تعیین سطح برای این فرد به‌دلیل عدم توالی ترم الزامی است')
     evaluator = models.ForeignKey(
         User, on_delete=models.SET_NULL, null=True, blank=True,
         related_name='level_tests_conducted', limit_choices_to={'role': 'evaluator'}

@@ -549,15 +549,29 @@ class DropoutExtractListView(APIView):
                 'meta': saved.meta, 'rows': rows, 'created_at': saved.created_at.isoformat(),
             })
         data = []
-        for saved in DropoutExtractList.objects.select_related('term', 'created_by').all()[:200]:
-            follow = DropoutExtractFollowUp.objects.filter(saved_list=saved)
+        for saved in DropoutExtractList.objects.select_related('term', 'source_term', 'created_by').all()[:200]:
+            follow = DropoutExtractFollowUp.objects.filter(saved_list=saved).select_related('assigned_to')
             from .carryover import list_registration_status
-            registered = sum(1 for label in list_registration_status(saved).values() if label == 'ثبت‌نام قطعی شد')
+            registration_statuses = list_registration_status(saved)
+            registered = sum(1 for label in registration_statuses.values() if label == 'ثبت‌نام قطعی شد')
+            employee_stats = {}
+            for item in follow:
+                employee = item.assigned_to
+                employee_id = employee.id if employee else 0
+                employee_name = (f'{employee.first_name} {employee.last_name}'.strip() or employee.username) if employee else 'بدون ارجاع'
+                stats = employee_stats.setdefault(employee_id, {'id': employee_id, 'name': employee_name, 'assigned_count': 0, 'contacted_count': 0})
+                stats['assigned_count'] += 1
+                if item.contacted:
+                    stats['contacted_count'] += 1
+            meta = saved.meta if isinstance(saved.meta, dict) else {}
             data.append({
                 'id': saved.id, 'name': saved.name, 'mode': saved.mode, 'auto': saved.mode == 'carryover', 'not_coming_count': follow.filter(not_coming=True).count(),
                 'registered_count': registered, 'term_title': saved.term.title,
+                'a_source': 'db' if saved.mode == 'carryover' else (meta.get('a_source') or (meta.get('a') or {}).get('source') or 'db'),
+                'b_source': 'db' if saved.mode == 'carryover' else (meta.get('b_source') or (meta.get('b') or {}).get('source') or 'db'),
                 'count': len(saved.rows or []), 'contacted_count': follow.filter(contacted=True).count(),
                 'assigned_count': follow.filter(assigned_to__isnull=False).count(),
+                'employee_stats': sorted(employee_stats.values(), key=lambda row: (row['id'] == 0, row['name'])),
                 'created_at': saved.created_at.isoformat(),
                 'created_by': (f'{saved.created_by.first_name} {saved.created_by.last_name}'.strip() or saved.created_by.username) if saved.created_by else '',
             })
@@ -608,6 +622,245 @@ class DropoutExtractListView(APIView):
         except (DropoutExtractList.DoesNotExist, TypeError, ValueError):
             return Response({'error': 'لیست پیدا نشد'}, status=status.HTTP_404_NOT_FOUND)
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+def _saved_list_refresh_candidates(saved, a_source_override=None, a_rows_override=None,
+                                   b_source_override=None, b_rows_override=None):
+    """بازسازی افراد جدید از منبع/مقصد سامانه یا فایل‌های Excel تازه‌واردشده."""
+    meta = saved.meta if isinstance(saved.meta, dict) else {}
+    destination = saved.term
+    mode = saved.mode or 'pair'
+    stored_a_source = meta.get('a_source') or (meta.get('a') or {}).get('source') or 'db'
+    stored_b_source = meta.get('b_source') or (meta.get('b') or {}).get('source') or 'db'
+    a_source = a_source_override or ('db' if mode == 'carryover' else stored_a_source)
+    b_source = b_source_override or ('db' if mode == 'carryover' else stored_b_source)
+    if a_source not in ('db', 'excel', 'all_students', 'saved_list') or b_source not in ('db', 'excel'):
+        return None, 'منبع مقایسه معتبر نیست.'
+    if a_source in ('all_students', 'saved_list') and mode == 'carryover':
+        return None, 'برای لیست انتقالی، منبع باید ترم مبدأ یا Excel باشد.'
+
+    if mode == 'carryover':
+        source_id = saved.source_term_id or meta.get('term1_id') or (meta.get('term1') or {}).get('id')
+        try:
+            source = Term.objects.get(pk=int(source_id))
+        except (Term.DoesNotExist, TypeError, ValueError):
+            return None, 'ترم مبدأ این لیست مشخص نیست.'
+        info_term_ids = [source.id]
+        source_title = source.title
+    elif mode == 'all_vs_term':
+        try:
+            destination_id = int(meta.get('term2_id') or (meta.get('term2') or {}).get('id') or destination.id)
+            selected_destination = Term.objects.get(pk=destination_id)
+        except (Term.DoesNotExist, TypeError, ValueError):
+            return None, 'ترم مقصد این لیست پیدا نشد.'
+        if selected_destination.id != destination.id:
+            return None, 'ترم مقصد متادیتای لیست با ترم مقصد ذخیره‌شده هم‌خوان نیست.'
+        terms = _ordered_terms()
+        positions = {term.id: index for index, term in enumerate(terms)}
+        info_term_ids = [term.id for term in terms if positions[term.id] < positions[destination.id]]
+        source = None
+        source_title = ('اطلاعات فعلی همین لیست ذخیره‌شده' if a_source == 'saved_list' else
+                        'همهٔ زبان‌آموزان فعلی سامانه' if a_source == 'all_students' else
+                        ((meta.get('a') or {}).get('label') or 'کل زبان‌آموزان ثبت‌شده'))
+    elif mode == 'pair':
+        first_id = meta.get('term1_id') or (meta.get('term1') or {}).get('id')
+        second_id = meta.get('term2_id') or (meta.get('term2') or {}).get('id') or destination.id
+        try:
+            selected_destination = Term.objects.get(pk=int(second_id))
+        except (Term.DoesNotExist, TypeError, ValueError):
+            return None, 'ترم مقصد این لیست پیدا نشد.'
+        if selected_destination.id != destination.id:
+            return None, 'ترم مقصد متادیتای لیست با ترم مقصد ذخیره‌شده هم‌خوان نیست.'
+        source = None
+        info_term_ids = []
+        if a_source == 'db':
+            source, selected_destination, error, _ = _term_pair(first_id, second_id)
+            if error:
+                return None, error
+            if selected_destination.id != destination.id:
+                return None, 'ترم مقصد متادیتای لیست با ترم مقصد ذخیره‌شده هم‌خوان نیست.'
+            info_term_ids = [source.id]
+        elif a_source == 'excel' and first_id:
+            source = Term.objects.filter(pk=first_id).first()
+            if source:
+                info_term_ids = [source.id]
+        if a_source in ('excel', 'all_students', 'saved_list') and not info_term_ids:
+            terms = _ordered_terms()
+            positions = {term.id: index for index, term in enumerate(terms)}
+            info_term_ids = [term.id for term in terms if positions[term.id] < positions[destination.id]]
+        source_title = ('اطلاعات فعلی همین لیست ذخیره‌شده' if a_source == 'saved_list' else
+                        'همهٔ زبان‌آموزان فعلی سامانه' if a_source == 'all_students' else
+                        (source.title if source else ((meta.get('a') or {}).get('label') or 'Excel مبدأ')))
+    else:
+        return None, 'نوع این لیست برای به‌روزرسانی پشتیبانی نمی‌شود.'
+
+    if a_source == 'excel':
+        if not isinstance(a_rows_override, list) or not a_rows_override or not all(isinstance(row, dict) for row in a_rows_override):
+            return None, 'برای به‌روزرسانی، فایل Excel مبدأ را دوباره وارد کنید.'
+        if len(a_rows_override) > 5000:
+            return None, 'فایل Excel مبدأ بیش از ۵۰۰۰ ردیف دارد؛ لطفاً آن را کوچک‌تر کنید.'
+        a_rows = a_rows_override
+    elif a_source == 'saved_list':
+        a_rows = [row for row in (saved.rows or []) if isinstance(row, dict)]
+        if not a_rows:
+            return None, 'در لیست ذخیره‌شده ردیفی برای مقایسه وجود ندارد.'
+    elif mode == 'all_vs_term' or a_source == 'all_students':
+        a_rows = _all_student_rows()
+        if not a_rows:
+            return None, 'در بخش اطلاعات دانش‌آموزان، فردی برای مقایسه پیدا نشد.'
+    else:
+        a_rows = _db_rows([source.id])
+
+    if b_source == 'excel':
+        if not isinstance(b_rows_override, list) or not b_rows_override or not all(isinstance(row, dict) for row in b_rows_override):
+            return None, 'برای مقایسه، فایل Excel مقصد را وارد کنید.'
+        if len(b_rows_override) > 5000:
+            return None, 'فایل Excel مقصد بیش از ۵۰۰۰ ردیف دارد؛ لطفاً آن را کوچک‌تر کنید.'
+        b_rows = b_rows_override
+    else:
+        b_rows = _db_rows([destination.id])
+
+    fresh_rows, skipped = _difference(a_rows, b_rows, info_term_ids)
+    comparison_rows = fresh_rows if a_source == 'saved_list' else []
+    existing_rows = list(saved.rows or [])
+    existing_keys = {str(row.get('key') or '') for row in existing_rows if isinstance(row, dict)}
+    existing_codes = {
+        code for row in existing_rows if isinstance(row, dict)
+        for code in [_valid_code(row.get('national_code') or row.get('key'))] if code
+    }
+    additions = [
+        row for row in fresh_rows
+        if row.get('key') not in existing_keys and _valid_code(row.get('national_code')) not in existing_codes
+    ]
+    # ردیف‌های قبلی حذف نمی‌شوند؛ وضعیت ثبت‌نام آن‌ها از ثبت‌نام واقعی ترم مقصد
+    # خوانده می‌شود و در رابط به‌صورت خاکستری و قفل‌شده نمایش داده خواهد شد.
+    from .carryover import list_registration_status
+    registration_statuses = list_registration_status(saved)
+    registered_count = sum(1 for value in registration_statuses.values() if value == 'ثبت‌نام قطعی شد')
+    if len(additions) > 5000:
+        return None, 'بیش از ۵۰۰۰ فرد جدید پیدا شد؛ لیست را به چند بخش تقسیم کنید.'
+    return {
+        'source_term': {'id': source.id if source else None, 'title': source_title},
+        'target_term': {'id': destination.id, 'title': destination.title},
+        'source_count': len(a_rows), 'target_count': len(b_rows),
+        'existing_count': len(existing_rows), 'additions': additions,
+        'registration_statuses': registration_statuses, 'registered_count': registered_count,
+        'comparison_rows': comparison_rows,
+        'skipped_no_national_code': skipped,
+    }, ''
+
+
+class DropoutExtractListRefreshPreviewView(APIView):
+    """پیش‌نمایش افراد جدیدِ پیدا‌شده در بازخوانی ترم مبدأ/مقصد؛ بدون تغییر لیست ذخیره‌شده."""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        if not can_edit_menu(request.user, 'class-management'):
+            return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
+        try:
+            saved = DropoutExtractList.objects.select_related('term', 'source_term').get(pk=int(request.data.get('list_id')))
+        except (DropoutExtractList.DoesNotExist, TypeError, ValueError):
+            return Response({'error': 'لیست ذخیره‌شده پیدا نشد'}, status=status.HTTP_400_BAD_REQUEST)
+        preview, error = _saved_list_refresh_candidates(
+            saved, request.data.get('a_source'), request.data.get('a_rows'),
+            request.data.get('b_source'), request.data.get('b_rows'),
+        )
+        if error:
+            return Response({'error': error}, status=status.HTTP_400_BAD_REQUEST)
+        return Response({
+            'list_id': saved.id, 'list_name': saved.name,
+            'source_term': preview['source_term'], 'target_term': preview['target_term'],
+            'source_count': preview['source_count'], 'target_count': preview['target_count'],
+            'existing_count': preview['existing_count'], 'addition_count': len(preview['additions']),
+            'registered_count': preview['registered_count'], 'registration_statuses': preview['registration_statuses'],
+            'comparison_count': len(preview['comparison_rows']),
+            'a_source': request.data.get('a_source') or 'db',
+            'b_source': request.data.get('b_source') or 'db',
+            'skipped_no_national_code': preview['skipped_no_national_code'],
+            'additions': preview['additions'],
+            'comparison_rows': preview['comparison_rows'],
+        })
+
+
+class DropoutExtractListRefreshConfirmView(APIView):
+    """پس از مرور کاربر، افراد انتخاب‌شده را با حفظ جزئیات به ابتدای لیست و پیگیری‌ها اضافه می‌کند."""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        if not can_edit_menu(request.user, 'class-management'):
+            return Response({'error': 'دسترسی ویرایش ندارید'}, status=status.HTTP_403_FORBIDDEN)
+        requested = request.data.get('items')
+        if not isinstance(requested, list):
+            return Response({'error': 'فهرست افراد انتخاب‌شده معتبر نیست.'}, status=status.HTTP_400_BAD_REQUEST)
+        if len(requested) > 5000:
+            return Response({'error': 'در هر نوبت حداکثر ۵۰۰۰ فرد قابل افزودن است.'}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            list_id = int(request.data.get('list_id'))
+        except (TypeError, ValueError):
+            return Response({'error': 'شناسهٔ لیست معتبر نیست.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        selected = {}
+        for item in requested:
+            if not isinstance(item, dict):
+                continue
+            code = _valid_code(item.get('national_code') or item.get('key'))
+            if code:
+                selected[code] = item.get('assigned_to')
+        from accounts.models import User
+        with transaction.atomic():
+            try:
+                saved = DropoutExtractList.objects.select_for_update().select_related('term', 'source_term').get(pk=list_id)
+            except DropoutExtractList.DoesNotExist:
+                return Response({'error': 'لیست ذخیره‌شده پیدا نشد.'}, status=status.HTTP_404_NOT_FOUND)
+            preview, error = _saved_list_refresh_candidates(
+                saved, request.data.get('a_source'), request.data.get('a_rows'),
+                request.data.get('b_source'), request.data.get('b_rows'),
+            )
+            if error:
+                return Response({'error': error}, status=status.HTTP_400_BAD_REQUEST)
+            current_additions = {row['key']: row for row in preview['additions']}
+            available_codes = set(current_additions)
+            chosen_codes = [code for code in selected if code in available_codes]
+            assignments = {}
+            for code in chosen_codes:
+                raw_staff_id = selected[code]
+                if raw_staff_id in (None, ''):
+                    assignments[code] = None
+                    continue
+                try:
+                    assignments[code] = int(raw_staff_id)
+                except (TypeError, ValueError):
+                    return Response({'error': 'کارمند انتخاب‌شده معتبر نیست.'}, status=status.HTTP_400_BAD_REQUEST)
+            staff_ids = {value for value in assignments.values() if value is not None}
+            valid_staff_ids = set(User.objects.filter(
+                pk__in=staff_ids, role__in=('admin', 'office', 'employee'), is_active=True,
+            ).values_list('pk', flat=True))
+            if staff_ids - valid_staff_ids:
+                return Response({'error': 'یکی از کارمندان انتخاب‌شده معتبر یا فعال نیست.'}, status=status.HTTP_400_BAD_REQUEST)
+
+            rows = list(saved.rows or [])
+            added_rows = []
+            for code in chosen_codes:
+                row = current_additions[code]
+                followup, _ = DropoutExtractFollowUp.objects.get_or_create(
+                    national_code=code, term=saved.term, mode=saved.mode, saved_list=saved,
+                )
+                if assignments[code] is not None:
+                    followup.assigned_to_id = assignments[code]
+                followup.updated_by = request.user
+                followup.save()
+                added_rows.append(row)
+            saved.rows = added_rows + rows
+            meta = dict(saved.meta or {})
+            meta['last_refreshed_at'] = timezone.now().isoformat()
+            meta['last_refresh_added_count'] = len(added_rows)
+            saved.meta = meta
+            saved.save(update_fields=['rows', 'meta'])
+
+        return Response({
+            'added_count': len(added_rows), 'registered_count': preview['registered_count'], 'list_id': saved.id,
+            'list_name': saved.name, 'total_count': len(saved.rows or []),
+        })
 
 
 def _list_row_context(saved, key, create=False):
@@ -779,12 +1032,31 @@ class DropoutStatsView(APIView):
                            for level, level_data in sorted(group['levels'].items())],
             })
         teachers.sort(key=lambda row: (-row['dropout_count'], -row['dropout_rate'], row['teacher']))
+        # وضعیت «نمی‌آید» و ارجاع/تماس از لیست‌های پیگیری همین ترم خوانده می‌شود؛ شمارش فقط
+        # روی افراد ریزشی همین مقایسه انجام می‌شود تا لیست‌های دیگر باعث دوباره‌شماری نشوند.
+        dropout_codes = {
+            _valid_code(person.get('national_code'))
+            for person in people.values()
+            if _valid_code(person.get('national_code'))
+        }
+        followup_rows = DropoutExtractFollowUp.objects.filter(
+            term=term2, national_code__in=dropout_codes,
+        ).values('national_code', 'not_coming', 'assigned_to_id', 'contacted') if dropout_codes else []
+        not_coming_codes, active_followup_codes = set(), set()
+        for followup in followup_rows:
+            if followup['not_coming']:
+                not_coming_codes.add(followup['national_code'])
+            elif followup['assigned_to_id'] or followup['contacted']:
+                active_followup_codes.add(followup['national_code'])
+        active_followup_codes -= not_coming_codes
         return Response({
             'term': {'id': term2.id, 'title': term2.title},
             'previous_term': {'id': term1.id, 'title': term1.title},
             'totals': {
                 'previous_enrollment_count': len({item.student_id for item in previous}),
                 'current_enrollment_count': len(current_ids),
+                'not_coming_count': len(not_coming_codes),
+                'under_followup_count': len(active_followup_codes),
                 'dropout_count': len(people),
                 'dropout_rate': round(len(people) * 100 / len({item.student_id for item in previous}), 2)
                     if previous else 0,

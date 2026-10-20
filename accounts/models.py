@@ -296,6 +296,10 @@ class ClassRequest(models.Model):
         'level_tests.LevelTest', on_delete=models.SET_NULL, null=True, blank=True,
         related_name='auto_created_class_requests',
     )
+    # هشدار دائمیِ کلاس خصوصیِ ساخته‌شده از گزارش رعایت‌نشدن توالی سطوح؛
+    # جزئیات به‌صورت JSON ذخیره می‌شود تا پس از پرداخت/تغییر وضعیت هم کامل بماند.
+    sequence_warning = models.BooleanField(default=False, db_index=True)
+    sequence_warning_details = models.JSONField(default=dict, blank=True)
     is_completed = models.BooleanField(default=False)
     completed_at = models.DateTimeField(null=True, blank=True)
     satisfaction = models.IntegerField(null=True, blank=True, validators=[MinValueValidator(1), MaxValueValidator(5)])

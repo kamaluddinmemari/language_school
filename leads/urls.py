@@ -5,7 +5,7 @@ from .views import (
     UnregisteredStudentListView, UnregisteredStudentDetailView,
     UnregisteredStudentFollowupView, UnregisteredStudentRegisterView, UnregisteredStudentRegisterOptionsView, UnregisteredStudentStatsView,
     DropoutStudentListView, DropoutStudentFollowupView,
-    DebtorListView, DebtorDetailView, DebtorFollowupView, DebtorSettleView, DebtorRegisterOptionsView, DebtorStatsView,
+    DebtorListView, DebtorDetailView, DebtorFollowupView, DebtorSettleView, DebtorRegisterView, DebtorRegisterOptionsView, DebtorStatsView,
     DiscountedPersonListView, DiscountedPersonDetailView, FollowupStaffListView,
     UnregisteredMoveOptionsView, UnregisteredMoveView,
 )
@@ -31,6 +31,7 @@ urlpatterns = [
     path('leads/debtors/<int:pk>/', DebtorDetailView.as_view(), name='debtor_detail'),
     path('leads/debtors/<int:pk>/followup/', DebtorFollowupView.as_view(), name='debtor_followup'),
     path('leads/debtors/<int:pk>/settle/', DebtorSettleView.as_view(), name='debtor_settle'),
+    path('leads/debtors/<int:pk>/register/', DebtorRegisterView.as_view(), name='debtor_register'),
     path('leads/debtors/<int:pk>/register-options/', DebtorRegisterOptionsView.as_view(), name='debtor_register_options'),
     path('leads/debtors/stats/', DebtorStatsView.as_view(), name='debtor_stats'),
 

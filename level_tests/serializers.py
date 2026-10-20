@@ -51,7 +51,7 @@ class LevelTestIntakeSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = LevelTest
-        fields = ['id', 'first_name', 'last_name', 'father_name', 'birth_date', 'national_code', 'phone', 'gender', 'student', 'price', 'payment_status', 'test_date', 'force_time_override', 'not_new_student']
+        fields = ['id', 'first_name', 'last_name', 'father_name', 'birth_date', 'national_code', 'phone', 'gender', 'student', 'price', 'payment_status', 'test_date', 'sequence_warning', 'force_time_override', 'not_new_student']
 
     def validate(self, attrs):
         not_new_student = attrs.pop('not_new_student', False)
@@ -99,7 +99,7 @@ class LevelTestSerializer(serializers.ModelSerializer):
             'national_code', 'phone', 'gender', 'student', 'status', 'status_display', 'price', 'payment_status',
             'payment_status_display', 'mode', 'mode_display', 'meeting_link', 'self_requested',
             'payment_method', 'payment_method_display', 'receipt_image',
-            'age_group', 'level', 'test_date', 'test_date_jalali',
+            'age_group', 'level', 'test_date', 'test_date_jalali', 'sequence_warning',
             'assigned_class_slot', 'assigned_class_day', 'assigned_class_time',
             'assigned_class_teacher_name', 'assigned_class_display',
             'needs_private_class', 'private_sessions_needed',

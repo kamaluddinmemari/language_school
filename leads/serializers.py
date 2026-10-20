@@ -143,7 +143,14 @@ class _CrossListIndex:
         name = _norm_name(first, last)
         found = []
         for c, p, n, amount in self.items:
-            if (code and c and code == c) or (phone and p and phone == p) or (name and n == name):
+            # اگر کد ملی موجود است، تلفن مشترک یا نام یکسان نباید هویت دیگری را یکی کند.
+            if code:
+                matched = bool(c and code == c)
+            elif phone:
+                matched = bool(not c and p and phone == p and name and n == name)
+            else:
+                matched = bool(not c and not p and name and n == name)
+            if matched:
                 found.append(amount)
         return found
 
@@ -166,6 +173,38 @@ def _slot_desc(slot):
 
 def _norm_level(v):
     return ' '.join(str(v or '').split()).casefold()
+
+
+def _unregistered_enrollment_q(obj):
+    """برای یک ردیف ثبت‌نام‌نشده، شناسهٔ دانش‌آموز متناظر را بدون ادغام هم‌نام‌ها برمی‌گرداند."""
+    from django.db.models import Q
+    from accounts.models import User
+
+    national_code = (obj.national_code or '').strip()
+    if national_code:
+        # کد ملی موجود، معیار قطعی است؛ هرگز با نام یا موبایل به شخص دیگری fallback نکن.
+        return Q(student__role='student', student__national_code=national_code)
+
+    students = User.objects.filter(role='student')
+    phone = (obj.phone or '').strip()
+    if phone:
+        students = students.filter(phone=phone, first_name=obj.first_name, last_name=obj.last_name)
+    else:
+        students = students.filter(first_name=obj.first_name, last_name=obj.last_name)
+    student_ids = list(students.values_list('id', flat=True)[:2])
+    if len(student_ids) == 1:
+        return Q(student_id=student_ids[0])
+    # اگر بدون کد ملی تطبیق مبهم است، کلاسی به این ردیف نسبت نده.
+    return Q(student_id__in=[])
+
+
+def _has_current_misplaced_enrollment(obj):
+    if not obj.is_misplaced or not obj.misplaced_from_slot_id:
+        return False
+    from class_management.models import ClassSlotEnrollment
+    return ClassSlotEnrollment.objects.filter(
+        _unregistered_enrollment_q(obj), class_slot_id=obj.misplaced_from_slot_id,
+    ).exists()
 
 
 def _class_status_text(slot, misplaced):
@@ -235,20 +274,18 @@ def _classify_class(system_slot, reported_slot, reported_level, flagged=False, c
 
 class UnregisteredStudentSerializer(serializers.ModelSerializer):
     has_current_class = serializers.SerializerMethodField()
+    is_misplaced = serializers.SerializerMethodField()
+
+    def get_is_misplaced(self, obj):
+        return _has_current_misplaced_enrollment(obj)
 
     def get_has_current_class(self, obj):
         if obj.status == 'registered':
             return False
-        if obj.is_misplaced:
-            return True
-        from django.db.models import Q
         from class_management.models import ClassSlotEnrollment
-        q = Q(student__first_name=obj.first_name, student__last_name=obj.last_name)
-        if obj.national_code:
-            q |= Q(student__national_code=obj.national_code)
-        if obj.phone:
-            q |= Q(student__phone=obj.phone)
-        return ClassSlotEnrollment.objects.filter(q, class_slot__term_id=obj.term_id).exclude(is_carryover=True, carryover_confirmed=False).exists()
+        return ClassSlotEnrollment.objects.filter(
+            _unregistered_enrollment_q(obj), class_slot__term_id=obj.term_id,
+        ).exclude(is_carryover=True, carryover_confirmed=False).exists()
     # خواسته: برای هر فرد ثبت‌نام‌نشده، مشخصات کلاس فعلی‌اش (شماره، سطح، روز/ساعت، استاد) هم نمایش داده شود.
     class_slot = serializers.SerializerMethodField()
     class_slot_number = serializers.SerializerMethodField()
@@ -261,13 +298,8 @@ class UnregisteredStudentSerializer(serializers.ModelSerializer):
     class_true_text = serializers.SerializerMethodField()
 
     def _system_slot(self, obj):
-        from django.db.models import Q
         from class_management.models import ClassSlotEnrollment
-        q = Q(student__first_name=obj.first_name, student__last_name=obj.last_name)
-        if obj.national_code:
-            q |= Q(student__national_code=obj.national_code)
-        if obj.phone:
-            q |= Q(student__phone=obj.phone)
+        q = _unregistered_enrollment_q(obj)
         if obj.misplaced_from_slot_id:
             # تیک «به اشتباه ثبت شده»: اگر اسمش هنوز در همان کلاس است، همان کلاس اشتباه است
             if ClassSlotEnrollment.objects.filter(q, class_slot_id=obj.misplaced_from_slot_id).exists():
@@ -310,16 +342,11 @@ class UnregisteredStudentSerializer(serializers.ModelSerializer):
         if obj.pk in cache:
             return cache[obj.pk]
         slot = None
-        if obj.misplaced_from_slot_id:
+        if _has_current_misplaced_enrollment(obj):
             slot = obj.misplaced_from_slot
         else:
-            from django.db.models import Q
             from class_management.models import ClassSlotEnrollment
-            q = Q(student__first_name=obj.first_name, student__last_name=obj.last_name)
-            if obj.national_code:
-                q |= Q(student__national_code=obj.national_code)
-            if obj.phone:
-                q |= Q(student__phone=obj.phone)
+            q = _unregistered_enrollment_q(obj)
             base = ClassSlotEnrollment.objects.filter(q).select_related('class_slot').order_by('-created_at', '-id')
             # اول کلاس همین ترم (غیر از انتقالیِ تأییدنشده)، بعد ترم مبدأ ریزشی، و در نهایت آخرین کلاسی که داشته است
             for qs in (
@@ -391,7 +418,7 @@ class UnregisteredStudentSerializer(serializers.ModelSerializer):
         return sum(self._debtor_matches(obj))
 
     def get_misplaced_class_number(self, obj):
-        return obj.misplaced_from_slot.number if obj.misplaced_from_slot_id else None
+        return obj.misplaced_from_slot.number if _has_current_misplaced_enrollment(obj) else None
 
     def get_dropout_from_term_title(self, obj):
         return obj.dropout_from_term.title if obj.dropout_from_term_id else None
@@ -399,7 +426,7 @@ class UnregisteredStudentSerializer(serializers.ModelSerializer):
     class Meta:
         model = UnregisteredStudent
         fields = [
-            'id', 'first_name', 'last_name', 'class_level', 'national_code', 'phone', 'tuition_price',
+            'id', 'first_name', 'last_name', 'class_level', 'national_code', 'phone', 'tuition_price', 'row_description',
             'status', 'status_display', 'registered_at', 'registered_at_jalali',
             'followup_count', 'last_followup_at_jalali', 'latest_level', 'followups',
             'submitted_by_name', 'term', 'term_title', 'claims_registered', 'claim_reviewed',
@@ -450,17 +477,73 @@ class DebtorSerializer(serializers.ModelSerializer):
     class_status_text = serializers.SerializerMethodField()
     class_true_text = serializers.SerializerMethodField()
     also_unregistered = serializers.SerializerMethodField()
+    unregistered_student_id = serializers.SerializerMethodField()
     assigned_to_name = serializers.SerializerMethodField()
+    national_code = serializers.SerializerMethodField()
+
+    def get_national_code(self, obj):
+        if obj.student_id and obj.student and obj.student.national_code:
+            return obj.student.national_code
+        from accounts.models import User
+        people = User.objects.filter(role='student', first_name=obj.first_name, last_name=obj.last_name)
+        if obj.phone:
+            people = people.filter(phone=obj.phone)
+        person = people.order_by('id').first()
+        return person.national_code if person else ''
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        # پس از تغییر سطح از بخش مدیریت کلاس‌ها، سطح پروفایل دانش‌آموز مرجع نهایی است.
+        if instance.student_id and instance.student and instance.student.language_level:
+            data['class_level'] = instance.student.language_level
+        return data
 
     def get_assigned_to_name(self, obj):
         u = obj.assigned_to
         return (f'{u.first_name} {u.last_name}'.strip() or u.username) if u else None
 
-    def get_also_unregistered(self, obj):
-        if not hasattr(self, '_unreg_index'):
-            self._unreg_index = _CrossListIndex('unregistered')
+    def _unregistered_counterpart(self, obj):
+        cache = self.__dict__.setdefault('_unregistered_counterparts', {})
+        if obj.pk in cache:
+            return cache[obj.pk]
+        from .models import UnregisteredStudent
         code = getattr(obj.student, 'national_code', '') if obj.student_id else ''
-        return bool(self._unreg_index.match(code, obj.phone, obj.first_name, obj.last_name))
+        if not code and obj.phone:
+            from accounts.models import User
+            users = list(User.objects.filter(
+                role='student', phone=obj.phone, first_name=obj.first_name, last_name=obj.last_name,
+            ).order_by('id')[:2])
+            if len(users) == 1:
+                code = users[0].national_code or ''
+
+        candidates = UnregisteredStudent.objects.filter(status=UnregisteredStudent.Status.TRACKING)
+        if code:
+            candidates = candidates.filter(national_code=code)
+        elif obj.phone:
+            candidates = candidates.filter(phone=obj.phone, first_name=obj.first_name, last_name=obj.last_name)
+        else:
+            candidates = candidates.filter(phone='', national_code='', first_name=obj.first_name, last_name=obj.last_name)
+
+        if obj.term_id:
+            same_term = list(candidates.filter(term_id=obj.term_id).order_by('-created_at', '-id')[:2])
+            if len(same_term) == 1:
+                cache[obj.pk] = same_term[0]
+                return same_term[0]
+            if len(same_term) > 1 and not code:
+                cache[obj.pk] = None
+                return None
+        rows = list(candidates.order_by('-created_at', '-id')[:2])
+        # بدون کد ملی، فقط از یک تطبیق یکتا استفاده می‌کنیم تا دو هم‌نام ادغام نشوند.
+        match = rows[0] if len(rows) == 1 or (code and rows) else None
+        cache[obj.pk] = match
+        return match
+
+    def get_also_unregistered(self, obj):
+        return self._unregistered_counterpart(obj) is not None
+
+    def get_unregistered_student_id(self, obj):
+        match = self._unregistered_counterpart(obj)
+        return match.pk if match else None
 
     def get_carried_from_term_title(self, obj):
         return obj.carried_from_term.title if obj.carried_from_term_id else None
@@ -474,6 +557,38 @@ class DebtorSerializer(serializers.ModelSerializer):
             return cache[obj.pk]
         from django.db.models import Q
         from class_management.models import ClassSlotEnrollment
+        counterpart = self._unregistered_counterpart(obj)
+        if not counterpart:
+            # بدهکارِ تنها: فقط ثبت‌نام تأییدشده در ترم رکورد (یا ترم جاری) کلاس فعال است.
+            # عضویت ترم‌های قبل یا صندلی خاکستری به‌تنهایی به معنی حضور در کلاس این ترم نیست.
+            from accounts.models import User
+            from .models import get_current_term
+            term = obj.term or get_current_term()
+            student_id = obj.student_id
+            if not student_id:
+                people = User.objects.filter(role='student', first_name=obj.first_name, last_name=obj.last_name)
+                if obj.phone:
+                    people = people.filter(phone=obj.phone)
+                matches = list(people.order_by('id')[:2])
+                if len(matches) == 1:
+                    student_id = matches[0].pk
+            current_enrollment = None
+            if student_id and term:
+                current_enrollment = ClassSlotEnrollment.objects.filter(
+                    student_id=student_id,
+                    class_slot__term_id=term.pk,
+                    payment_verified=True,
+                ).exclude(is_carryover=True, carryover_confirmed=False).select_related('class_slot').order_by('-created_at', '-id').first()
+            if not current_enrollment:
+                cache[obj.pk] = (
+                    None,
+                    ('dropout', 'فرد ریزشی می‌باشد و در این ترم سر هیچ کلاسی نیست', ''),
+                )
+                return cache[obj.pk]
+            slot = current_enrollment.class_slot
+            cache[obj.pk] = (slot, _classify_class(slot, None, '', flagged=False))
+            return cache[obj.pk]
+
         slot = obj.source_slot if obj.source_slot_id else None
         code = getattr(obj.student, 'national_code', '') if obj.student_id else ''
         if not slot:
@@ -539,12 +654,12 @@ class DebtorSerializer(serializers.ModelSerializer):
     class Meta:
         model = Debtor
         fields = [
-            'id', 'first_name', 'last_name', 'phone', 'class_level', 'debt_amount', 'description',
+            'id', 'first_name', 'last_name', 'national_code', 'phone', 'class_level', 'debt_amount', 'description', 'row_description',
             'status', 'status_display', 'settled_at', 'settled_at_jalali',
             'followup_count', 'last_followup_at_jalali', 'followups',
             'term', 'term_title', 'claims_settled', 'claim_reviewed', 'created_at', 'created_at_jalali', 'updated_at',
             'student', 'awaiting_registration', 'carried_from_term', 'carried_from_term_title',
-            'source_slot', 'source_slot_number', 'class_slot_number', 'class_slot_level', 'class_slot_day', 'class_slot_time', 'class_slot_teacher', 'class_status', 'class_status_text', 'class_true_text', 'also_unregistered', 'assigned_to', 'assigned_to_name',
+            'source_slot', 'source_slot_number', 'class_slot_number', 'class_slot_level', 'class_slot_day', 'class_slot_time', 'class_slot_teacher', 'class_status', 'class_status_text', 'class_true_text', 'also_unregistered', 'unregistered_student_id', 'assigned_to', 'assigned_to_name',
         ]
         read_only_fields = ['status', 'settled_at', 'created_at', 'updated_at', 'student', 'awaiting_registration', 'carried_from_term', 'source_slot']
         extra_kwargs = {'phone': {'required': False, 'allow_blank': True}, 'debt_amount': {'required': False}}

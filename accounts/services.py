@@ -3,12 +3,12 @@
 ثبت‌نام مستقیم، ثبت کلاس خصوصی و...) ثبت می‌شود، اگر از قبل در بخش «دانش‌آموزان»
 (User با role=student) وجود نداشته باشد، خودکار و بی‌صدا به آن بخش اضافه می‌شود —
 با برچسب needs_editing=True (چون اطلاعاتش کامل نیست: بدون تاریخ تولد/جنسیت/آدرس).
-اگر از قبل با همان کد ملی یا موبایل در سیستم بود، هیچ کاری انجام نمی‌شود (تکراری
-ساخته نمی‌شود).
+اگر کد ملی داده شده باشد فقط همان کد ملی برای یافتن حساب موجود استفاده می‌شود.
+در نبود کد ملی، موبایل همراه با نام کامل و فقط در صورت یکتا بودن تطبیق داده می‌شود؛
+شمارهٔ مشترک به‌تنهایی هویت افراد را یکی نمی‌کند.
 
-تطبیق بر اساس اولویت: کد ملی (اگر داده شده) -> موبایل (اگر داده شده). اگر هیچ‌کدام
-داده نشده باشد، باز هم یک رکورد ناقص ساخته می‌شود (چون به‌هرحال این فرد باید یک‌جا
-در سیستم قابل‌پیگیری باشد) با یک یوزرنیم موقت.
+اگر هویت با قواعد بالا پیدا نشود، یک User جدید با role='student' و needs_editing=True
+ساخته می‌شود تا این فرد در سیستم قابل‌پیگیری باشد.
 """
 import secrets
 
@@ -28,7 +28,8 @@ def _generate_unique_username(base):
 
 def sync_student_from_lead(first_name, last_name, phone='', national_code='', language_level='', gender=''):
     """
-    اگر دانش‌آموزی با این کد ملی/موبایل از قبل وجود دارد، همان را برمی‌گرداند (بدون تغییر).
+    اگر دانش‌آموزی با همان کد ملی وجود دارد، همان را برمی‌گرداند؛ در نبود کد ملی،
+    فقط موبایل+نام کاملِ یکتا برای بازیابی حساب استفاده می‌شود.
     وگرنه یک User جدید با role='student' و needs_editing=True می‌سازد.
     خروجی: (user, created: bool)
     """
@@ -45,8 +46,13 @@ def sync_student_from_lead(first_name, last_name, phone='', national_code='', la
     existing = None
     if national_code:
         existing = User.objects.filter(role='student', national_code=national_code).first()
-    if not existing and phone:
-        existing = User.objects.filter(role='student', phone=phone).first()
+    elif phone:
+        # موبایل می‌تواند بین خواهر/برادرها مشترک باشد؛ بدون کد ملی فقط
+        # نام کامل + موبایل و آن هم در صورت یکتا بودن، برای تطبیق کافی است.
+        candidates = list(User.objects.filter(
+            role='student', phone=phone, first_name=first_name, last_name=last_name,
+        ).order_by('id')[:2])
+        existing = candidates[0] if len(candidates) == 1 else None
 
     if existing:
         return existing, False

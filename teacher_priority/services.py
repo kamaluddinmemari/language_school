@@ -75,7 +75,7 @@ def build_ranking(include_history=True, term_id=None):
     today = timezone.localdate()
     terms = list(Term.objects.filter(start_date__isnull=False).order_by('-start_date', '-id'))
     started_terms = [term for term in terms if term.start_date <= today]
-    current_term = started_terms[0] if started_terms else (terms[-1] if terms else None)
+    current_term = started_terms[0] if started_terms else None
     if term_id not in (None, ''):
         try:
             requested_id = int(term_id)

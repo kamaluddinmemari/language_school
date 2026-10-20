@@ -283,15 +283,18 @@ class UnregisteredStudentListView(generics.ListCreateAPIView):
             return Response({'error': 'این شخص در ترم انتخاب‌شده قبلاً ثبت شده است؛ ثبت دوباره حتی با سطح متفاوت مجاز نیست.', 'duplicate_in_term': True, 'existing_record_id': exact_person.first().id}, status=status.HTTP_409_CONFLICT)
 
         normalized_level = ' '.join(str(data.get('class_level') or '').split()).casefold()
-        same_name = UnregisteredStudent.objects.filter(
-            term=term, first_name__iexact=data.get('first_name', ''), last_name__iexact=data.get('last_name', '')
-        ).order_by('-created_at', '-id')
-        if same_name.exists():
-            same_level = same_name.filter(identity_key__endswith=f'|level:{normalized_level}').first()
-            if same_level:
-                return Response({'error': 'فردی با همین نام و همین سطح در این ترم قبلاً ثبت شده است.', 'duplicate_in_term': True, 'existing_record_id': same_level.id}, status=status.HTTP_409_CONFLICT)
-            if not confirmed:
-                return Response({'warning': 'فردی با نام و نام‌خانوادگی مشابه در این ترم وجود دارد، اما شناسهٔ فرد متفاوت و سطح متفاوت است. آیا ثبت شود؟', 'same_name_different_person': True, 'existing_levels': list(same_name.values_list('class_level', flat=True))}, status=status.HTTP_409_CONFLICT)
+        # وقتی کد ملی موجود است، identity_key بالا تشخیص تکرار را انجام می‌دهد؛
+        # افراد هم‌نام با کد ملی متفاوت افراد جداگانه‌اند و نباید هشدار/توقف بگیرند.
+        if not data.get('national_code'):
+            same_name = UnregisteredStudent.objects.filter(
+                term=term, first_name__iexact=data.get('first_name', ''), last_name__iexact=data.get('last_name', '')
+            ).order_by('-created_at', '-id')
+            if same_name.exists():
+                same_level = same_name.filter(identity_key__endswith=f'|level:{normalized_level}').first()
+                if same_level:
+                    return Response({'error': 'فردی با همین نام و همین سطح در این ترم قبلاً ثبت شده است.', 'duplicate_in_term': True, 'existing_record_id': same_level.id}, status=status.HTTP_409_CONFLICT)
+                if not confirmed:
+                    return Response({'warning': 'فردی با نام و نام‌خانوادگی مشابه در این ترم وجود دارد، اما شناسهٔ فرد متفاوت و سطح متفاوت است. آیا ثبت شود؟', 'same_name_different_person': True, 'existing_levels': list(same_name.values_list('class_level', flat=True))}, status=status.HTTP_409_CONFLICT)
 
         other_term = UnregisteredStudent.objects.filter(identity_key__startswith=person_prefix).exclude(term=term).select_related('term').order_by('-created_at', '-id').first()
         warning = None
@@ -361,9 +364,15 @@ def _resolve_unregistered_student(item, create=False):
     found = None
     if item.national_code:
         found = students.filter(national_code=item.national_code).first()
-    if not found and item.phone:
-        found = students.filter(phone=item.phone).first()
-    if not found:
+    elif item.phone:
+        # شمارهٔ همراه ممکن است بین اعضای خانواده مشترک باشد؛ در نبود کد ملی
+        # فقط شماره همراهِ همراه با نام کامل و تطبیق یکتا قابل استفاده است.
+        same_person = students.filter(
+            phone=item.phone, first_name=item.first_name, last_name=item.last_name,
+        )
+        matches = list(same_person[:2])
+        found = matches[0] if len(matches) == 1 else None
+    else:
         same_name = list(students.filter(first_name=item.first_name, last_name=item.last_name)[:2])
         found = same_name[0] if len(same_name) == 1 else None
     if not found and create:
@@ -735,15 +744,19 @@ class DebtorFollowupView(APIView):
 
 
 def _resolve_debtor_student(debtor, create=False):
-    """دانش‌آموزِ واقعیِ یک بدهکار را پیدا می‌کند (student → موبایل → هم‌نامِ یکتا)؛ در صورت نیاز می‌سازد."""
+    """دانش‌آموز واقعی را با FK، سپس موبایل+نام کاملِ یکتا پیدا می‌کند؛ موبایل تنها کافی نیست."""
     from accounts.models import User
     from accounts.services import sync_student_from_lead
     if debtor.student_id:
         return debtor.student
     students = User.objects.filter(role='student')
     phone = (debtor.phone or '').strip()
-    found = students.filter(phone=phone).first() if phone else None
-    if not found:
+    if phone:
+        matches = list(students.filter(
+            phone=phone, first_name=debtor.first_name, last_name=debtor.last_name,
+        ).order_by('id')[:2])
+        found = matches[0] if len(matches) == 1 else None
+    else:
         same_name = list(students.filter(first_name=debtor.first_name, last_name=debtor.last_name)[:2])
         found = same_name[0] if len(same_name) == 1 else None
     if not found and create:
@@ -926,7 +939,7 @@ def _register_class_options(term_id, student, level_hint, gray_slot_ids, gender_
 
 class DebtorRegisterOptionsView(APIView):
     """
-    GET: کلاس‌های پیشنهادی برای «تسویه بدهی و ثبت در کلاس».
+    GET: کلاس‌های پیشنهادی برای ثبت در کلاس؛ این endpoint بدهی را تسویه نمی‌کند.
     اول کلاسی که اسم فرد در آن خاکستری است (پیشنهاد اصلی)، بعد سایر کلاس‌های هم‌سطح و هم‌جنسیتِ همان ترم.
     هیچ‌وقت به‌خاطر نداشتن سطح خطا نمی‌دهد: اگر سطح مشخص نباشد، همه‌ی کلاس‌های هم‌جنسیتِ ترم نشان داده می‌شود.
     """
@@ -967,67 +980,79 @@ class DebtorRegisterOptionsView(APIView):
         })
 
 
-class DebtorSettleView(APIView):
-    """
-    POST: «تسویه بدهی و ثبت در کلاس».
-    body (اختیاری): class_slot_id, payment_method, tuition_amount, pos_reference_code.
-    - با class_slot_id: فرد در همان کلاس ثبت‌نام قطعی می‌شود (اسم خاکستری ← مشکی، خاکستریِ کلاس‌های دیگر حذف)
-    - بدون class_slot_id: فقط تسویه؛ اگر اسمش در کلاسی خاکستری بود همان کلاس مشکی می‌شود
-    """
+class DebtorRegisterView(APIView):
+    """ثبت بدهکار/انتقالی در کلاس، بدون تسویه یا تغییر وضعیت بدهی."""
     permission_classes = [IsAuthenticated]
 
     def post(self, request, pk):
         if not can_edit_menu(request.user, "followups"):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
+        slot_id = request.data.get('class_slot_id')
+        if not slot_id:
+            return Response({'error': 'کلاس مقصد الزامی است'}, status=status.HTTP_400_BAD_REQUEST)
         from django.db import transaction
         from class_management.models import ClassSlot, ClassSlotEnrollment
-        from class_management.carryover import register_student_in_slot, finalize_registration, gray_enrollments
+        from class_management.carryover import register_student_in_slot
 
         with transaction.atomic():
             try:
                 debtor = Debtor.objects.select_for_update().get(pk=pk)
             except Debtor.DoesNotExist:
                 return Response({'error': 'مورد پیدا نشد'}, status=status.HTTP_404_NOT_FOUND)
-            slot_id = request.data.get('class_slot_id')
-            registered_class = None
-            if slot_id:
-                try:
-                    slot = ClassSlot.objects.select_for_update().get(pk=slot_id)
-                except (ClassSlot.DoesNotExist, ValueError, TypeError):
-                    return Response({'error': 'کلاس انتخاب‌شده پیدا نشد'}, status=status.HTTP_404_NOT_FOUND)
-                student = _resolve_debtor_student(debtor, create=True)
-                if not student:
-                    return Response({'error': 'ساخت/پیدا کردن پرونده‌ی دانش‌آموز ممکن نشد'}, status=status.HTTP_400_BAD_REQUEST)
-                payment_method = str(request.data.get('payment_method') or ClassSlotEnrollment.PaymentMethod.CASH)
-                if payment_method not in {v for v, _l in ClassSlotEnrollment.PaymentMethod.choices}:
-                    return Response({'error': 'روش پرداخت نامعتبر است'}, status=status.HTTP_400_BAD_REQUEST)
-                try:
-                    tuition_amount = int(request.data.get('tuition_amount', debtor.debt_amount) or 0)
-                except (TypeError, ValueError):
-                    return Response({'error': 'مبلغ نامعتبر است'}, status=status.HTTP_400_BAD_REQUEST)
-                enrollment, error = register_student_in_slot(
-                    student, slot, payment_method=payment_method, tuition_amount=max(tuition_amount, 0),
-                    pos_reference_code=str(request.data.get('pos_reference_code') or '')[:50],
-                )
-                if error:
-                    transaction.set_rollback(True)
-                    return Response({'error': error}, status=status.HTTP_400_BAD_REQUEST)
-                registered_class = slot.number
-            else:
-                student = _resolve_debtor_student(debtor, create=False)
-                if student and debtor.term_id:
-                    grays = list(gray_enrollments(student, debtor.term_id))
-                    if grays:
-                        finalize_registration(student, grays[0].class_slot)
-                        registered_class = grays[0].class_slot.number
-            debtor.refresh_from_db()
+            try:
+                slot = ClassSlot.objects.select_for_update().get(pk=slot_id)
+            except (ClassSlot.DoesNotExist, ValueError, TypeError):
+                return Response({'error': 'کلاس انتخاب‌شده پیدا نشد'}, status=status.HTTP_404_NOT_FOUND)
+            student = _resolve_debtor_student(debtor, create=True)
+            if not student:
+                return Response({'error': 'ساخت/پیدا کردن پرونده‌ی دانش‌آموز ممکن نشد'}, status=status.HTTP_400_BAD_REQUEST)
+            if not _slot_gender_ok(slot, student.gender):
+                transaction.set_rollback(True)
+                return Response({'error': 'جنسیت این فرد با کلاس انتخاب‌شده (دخترانه/پسرانه) مغایرت دارد؛ ثبت‌نام انجام نشد'}, status=status.HTTP_400_BAD_REQUEST)
+            payment_method = str(request.data.get('payment_method') or ClassSlotEnrollment.PaymentMethod.CASH)
+            if payment_method not in {value for value, _label in ClassSlotEnrollment.PaymentMethod.choices}:
+                return Response({'error': 'روش پرداخت نامعتبر است'}, status=status.HTTP_400_BAD_REQUEST)
+            try:
+                tuition_amount = max(int(request.data.get('tuition_amount') or 0), 0)
+            except (TypeError, ValueError):
+                return Response({'error': 'مبلغ نامعتبر است'}, status=status.HTTP_400_BAD_REQUEST)
+            _enrollment, error = register_student_in_slot(
+                student, slot, payment_method=payment_method, tuition_amount=tuition_amount,
+                pos_reference_code=str(request.data.get('pos_reference_code') or '')[:50],
+            )
+            if error:
+                transaction.set_rollback(True)
+                return Response({'error': error}, status=status.HTTP_400_BAD_REQUEST)
+            if debtor.awaiting_registration:
+                debtor.awaiting_registration = False
+                debtor.save(update_fields=['awaiting_registration', 'student'])
+
+        data = DebtorSerializer(debtor).data
+        data['registered_class_number'] = slot.number
+        return Response(data)
+
+
+class DebtorSettleView(APIView):
+    """POST: فقط وضعیت بدهی را تسویه می‌کند؛ ثبت‌نام کلاسی endpoint جداگانه دارد."""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, pk):
+        if not can_edit_menu(request.user, "followups"):
+            return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
+        if request.data.get('class_slot_id'):
+            return Response({'error': 'تسویه بدهی از ثبت در کلاس جداست؛ برای ثبت در کلاس از دکمهٔ مربوط استفاده کنید.'}, status=status.HTTP_400_BAD_REQUEST)
+        from django.db import transaction
+        with transaction.atomic():
+            try:
+                debtor = Debtor.objects.select_for_update().get(pk=pk)
+            except Debtor.DoesNotExist:
+                return Response({'error': 'مورد پیدا نشد'}, status=status.HTTP_404_NOT_FOUND)
+            if debtor.awaiting_registration:
+                return Response({'error': 'این مورد بدهی نیست؛ باید جداگانه در کلاس ثبت شود.'}, status=status.HTTP_400_BAD_REQUEST)
             debtor.status = Debtor.Status.SETTLED
             debtor.settled_at = timezone.now()
-            debtor.awaiting_registration = False
-            debtor.save()
-        data = DebtorSerializer(debtor).data
-        data['registered_class_number'] = registered_class
-        return Response(data)
+            debtor.save(update_fields=['status', 'settled_at'])
+        return Response(DebtorSerializer(debtor).data)
 
 
 class DebtorStatsView(APIView):
@@ -1283,14 +1308,15 @@ class PersonFinanceStatusView(APIView):
         if not student:
             return Response({'unregistered': [], 'debtors': []})
         term_id = request.query_params.get('term_id')
-        person = Q(first_name=student.first_name, last_name=student.last_name)
         if student.national_code:
-            person |= Q(national_code=student.national_code)
+            person = Q(national_code=student.national_code)
+        elif student.phone:
+            person = Q(phone=student.phone, first_name=student.first_name, last_name=student.last_name)
+        else:
+            person = Q(first_name=student.first_name, last_name=student.last_name)
+        dperson = Q(student_id=student.pk)
         if student.phone:
-            person |= Q(phone=student.phone)
-        dperson = Q(first_name=student.first_name, last_name=student.last_name) | Q(student_id=student.pk)
-        if student.phone:
-            dperson |= Q(phone=student.phone)
+            dperson |= Q(phone=student.phone, first_name=student.first_name, last_name=student.last_name)
         unreg = UnregisteredStudent.objects.filter(person).exclude(status=UnregisteredStudent.Status.REGISTERED)
         debt = Debtor.objects.filter(dperson).exclude(status=Debtor.Status.SETTLED)
         if term_id:

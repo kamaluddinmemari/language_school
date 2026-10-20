@@ -7,7 +7,9 @@ import unicodedata
 from datetime import datetime, timedelta
 from django.db import IntegrityError, models as django_models, transaction
 from django.db.models import Count, Exists, Max, OuterRef, Q
+from django.core.exceptions import ValidationError
 from django.shortcuts import get_object_or_404
+from django.http import HttpResponse
 from rest_framework import generics, status
 from rest_framework.views import APIView
 from rest_framework.response import Response
@@ -237,6 +239,8 @@ class CarryClassesToNextTermView(APIView):
         if time_slots:
             qs = qs.filter(time_slot__in=time_slots)
         assignment_by_id = {str(row.get('source_id')): row for row in assignments if row.get('source_id')}
+        if assignment_by_id:
+            qs = qs.filter(pk__in=[row.get('source_id') for row in assignments if row.get('source_id')])
         created, skipped, warnings = [], [], []
         created_targets = []
         students_carried_total = 0
@@ -277,18 +281,19 @@ class CarryClassesToNextTermView(APIView):
                 if ClassSlot.objects.filter(term=target_term, number=number, day_type=day_type, time_slot=time_slot, is_online=is_online).exists():
                     skipped.append({'source_id': source.id, 'reason': f'محل {number} در ترم مقصد برای روز و ساعت انتخاب‌شده قبلاً وجود دارد'})
                     continue
+                carry_flag = row.get('carry_students', True)
+                if isinstance(carry_flag, str):
+                    carry_flag = carry_flag.strip().lower() not in ('0', 'false', 'no', '')
                 target = ClassSlot.objects.create(
                     term=target_term, number=number, title=source.title, day_type=day_type,
                     time_slot=time_slot, gender=gender, is_online=is_online,
                     meeting_link=str(row.get('meeting_link') or ''), notes=source.notes, capacity=source.capacity, teacher_name=teacher_name,
                     previous_teacher_name=source.teacher_name or '', assigned_level=assigned_level,
+                    carried_from_slot=source, carry_students_from_source=bool(carry_flag),
                     schedule_kind=schedule_kind, schedule_days=schedule_days,
                     delivery_pattern=delivery_pattern, rotation_group='', current_count=0,
                 )
                 carried, student_skips = 0, []
-                carry_flag = row.get('carry_students', True)
-                if isinstance(carry_flag, str):
-                    carry_flag = carry_flag.strip().lower() not in ('0', 'false', 'no', '')
                 if carry_flag:
                     carried, student_skips = self._carry_students(source, target, request.user)
                     students_carried_total += carried
@@ -309,14 +314,20 @@ class CarryClassesToNextTermView(APIView):
         return Response({'message': message, 'created': created, 'skipped': skipped, 'warnings': warnings, 'students_carried': students_carried_total, 'followup_list_id': followup_list.id if followup_list else None})
 
     @staticmethod
-    def _carry_students(source, target, user=None):
+    def _carry_students(source, target, user=None, only_registered=False, enrollment_ids=None, include_unverified=False):
         """ثبت‌نام دانش‌آموزان تاییدشدهٔ کلاس مبدا در کلاس مقصد (کپی؛ ثبت‌نام ترم مبدا حفظ می‌شود).
 
         قواعد: هر کد ملی در یک ترم فقط یک کلاس؛ جنسیت باید با کلاس مقصد همخوان باشد (کلاس مختلط آزاد است).
         شهریهٔ ترم جدید صفر ثبت می‌شود تا پرداخت ترم قبل دوباره در گزارش مالی حساب نشود.
         """
         carried, skips = 0, []
-        enrollments = source.enrollments.filter(payment_verified=True).select_related('student').order_by('created_at')
+        enrollments = source.enrollments.select_related('student').order_by('created_at')
+        if not include_unverified:
+            enrollments = enrollments.filter(payment_verified=True)
+        if only_registered:
+            enrollments = enrollments.exclude(is_carryover=True, carryover_confirmed=False)
+        if enrollment_ids is not None:
+            enrollments = enrollments.filter(pk__in=enrollment_ids)
         for enrollment in enrollments:
             student = enrollment.student
             name = student.get_full_name() or student.username
@@ -339,6 +350,146 @@ class CarryClassesToNextTermView(APIView):
             create_awaiting_debtor(student, target, source.term, user)
             carried += 1
         return carried, skips
+
+
+class UpdateCarryoverStudentsView(APIView):
+    """ابتدا فهرست افراد قابل انتقال را نشان می‌دهد و فقط موارد تأییدشده را منتقل می‌کند."""
+    permission_classes = [IsAuthenticated]
+
+    def _get_terms(self, request):
+        if not can_edit_menu(request.user, 'class-management'):
+            return None, None, Response({'error': 'دسترسی به به‌روزرسانی زبان‌آموزان ندارید'}, status=status.HTTP_403_FORBIDDEN)
+        data = request.query_params if request.method == 'GET' else request.data
+        source_term_id = data.get('source_term_id')
+        target_term_id = data.get('target_term_id')
+        try:
+            source_term = Term.objects.get(pk=source_term_id)
+            target_term = Term.objects.get(pk=target_term_id)
+        except (Term.DoesNotExist, TypeError, ValueError):
+            return None, None, Response({'error': 'ترم مبدأ یا مقصد پیدا نشد'}, status=status.HTTP_404_NOT_FOUND)
+        if source_term.id == target_term.id:
+            return None, None, Response({'error': 'ترم مقصد باید با ترم مبدأ متفاوت باشد'}, status=status.HTTP_400_BAD_REQUEST)
+        return source_term, target_term, None
+
+    @staticmethod
+    def _slot_payload(slot):
+        return {
+            'id': slot.id, 'number': slot.number, 'day_type': slot.day_type,
+            'day_type_display': slot.day_type_display, 'time_slot': slot.time_slot,
+            'gender': slot.gender, 'gender_display': slot.get_gender_display(),
+            'teacher_name': slot.teacher_name, 'assigned_level': slot.assigned_level,
+            'is_online': slot.is_online,
+        }
+
+    def get(self, request):
+        source_term, target_term, error = self._get_terms(request)
+        if error:
+            return error
+        source_slots = list(ClassSlot.objects.filter(term=source_term).order_by('id'))
+        target_slots = list(ClassSlot.objects.filter(term=target_term).select_related('carried_from_slot').order_by('number', 'day_type', 'time_slot'))
+        enrollments = ClassSlotEnrollment.objects.filter(
+            class_slot__in=source_slots,
+        ).exclude(is_carryover=True, carryover_confirmed=False).select_related('student', 'class_slot').order_by(
+            'class_slot__number', 'student__last_name', 'student__first_name', 'id',
+        )
+        rows = []
+        for enrollment in enrollments:
+            source = enrollment.class_slot
+            student = enrollment.student
+            matches = [slot for slot in target_slots if slot.carried_from_slot_id == source.id]
+            if not matches:
+                matches = [slot for slot in target_slots
+                    if slot.number == source.number and slot.day_type == source.day_type
+                    and slot.time_slot == source.time_slot and slot.is_online == source.is_online]
+            if not matches and source.teacher_name.strip():
+                matches = [slot for slot in target_slots
+                    if slot.day_type == source.day_type and slot.time_slot == source.time_slot
+                    and slot.is_online == source.is_online
+                    and slot.previous_teacher_name.strip().casefold() == source.teacher_name.strip().casefold()]
+            if student.gender == 'female':
+                gender_targets = [slot for slot in target_slots if slot.gender in (ClassSlot.Gender.GIRLS, ClassSlot.Gender.MIXED)]
+            elif student.gender == 'male':
+                gender_targets = [slot for slot in target_slots if slot.gender in (ClassSlot.Gender.BOYS, ClassSlot.Gender.MIXED)]
+            else:
+                gender_targets = list(target_slots)
+            preferred = [slot for slot in matches if slot in gender_targets]
+            suggested = preferred[0].id if len(preferred) == 1 else None
+            # تکرار در هر کلاس ترم مقصد مانع انتقال است، نه فقط همان کلاس پیشنهادی.
+            existing = ClassSlotEnrollment.objects.filter(
+                student=student, class_slot__term=target_term,
+            ).select_related('class_slot').first()
+            rows.append({
+                'enrollment_id': enrollment.id,
+                'student_id': student.id,
+                'student_name': student.get_full_name() or student.username,
+                'student_gender': student.gender or '',
+                'source_class': self._slot_payload(source),
+                'payment_verified': enrollment.payment_verified,
+                'payment_status': 'تأییدشده' if enrollment.payment_verified else 'در انتظار تأیید پرداخت',
+                'target_options': [self._slot_payload(slot) for slot in gender_targets],
+                'suggested_target_id': suggested,
+                'already_in_target': bool(existing),
+                'existing_target_class': self._slot_payload(existing.class_slot) if existing else None,
+            })
+        return Response({
+            'source_term': {'id': source_term.id, 'title': source_term.title},
+            'target_term': {'id': target_term.id, 'title': target_term.title},
+            'students': rows,
+            'total': len(rows),
+        })
+
+    @transaction.atomic
+    def post(self, request):
+        source_term, target_term, error = self._get_terms(request)
+        if error:
+            return error
+        items = request.data.get('items') or []
+        if not isinstance(items, list) or not items:
+            return Response({'error': 'هیچ زبان‌آموزی برای انتقال انتخاب نشده است'}, status=status.HTTP_400_BAD_REQUEST)
+
+        selected_slots = {}
+        carried_total, warnings, followup_targets = 0, [], set()
+        seen_enrollment_ids = set()
+        for item in items:
+            try:
+                enrollment_id = int(item.get('enrollment_id'))
+                target_id = int(item.get('target_slot_id'))
+            except (TypeError, ValueError, AttributeError):
+                warnings.append('شناسهٔ زبان‌آموز یا کلاس مقصد نامعتبر است')
+                continue
+            if enrollment_id in seen_enrollment_ids:
+                continue
+            seen_enrollment_ids.add(enrollment_id)
+            enrollment = ClassSlotEnrollment.objects.select_for_update().select_related('student', 'class_slot').filter(
+                pk=enrollment_id, class_slot__term=source_term,
+            ).exclude(is_carryover=True, carryover_confirmed=False).first()
+            target = ClassSlot.objects.select_for_update().filter(pk=target_id, term=target_term).first()
+            if not enrollment or not target:
+                warnings.append(f'ردیف ثبت‌نام {enrollment_id} یا کلاس مقصد معتبر نیست')
+                continue
+            student = enrollment.student
+            if target.gender != ClassSlot.Gender.MIXED and student.gender and (
+                (target.gender == ClassSlot.Gender.GIRLS and student.gender != 'female') or
+                (target.gender == ClassSlot.Gender.BOYS and student.gender != 'male')
+            ):
+                warnings.append(f'«{student.get_full_name()}»: جنسیت با کلاس مقصد همخوانی ندارد')
+                continue
+            carried, skips = CarryClassesToNextTermView._carry_students(
+                enrollment.class_slot, target, request.user, only_registered=True,
+                enrollment_ids=[enrollment.id], include_unverified=True,
+            )
+            carried_total += carried
+            warnings.extend(skips)
+            if carried:
+                selected_slots[target.id] = target
+        followup_list = sync_carryover_followup_list(list(selected_slots.values()), source_term, target_term, request.user) if selected_slots else None
+        return Response({
+            'message': f'{carried_total} زبان‌آموز در ترم مقصد ثبت شد',
+            'classes_updated': len(selected_slots),
+            'students_carried': carried_total,
+            'warnings': warnings,
+            'followup_list_id': followup_list.id if followup_list else None,
+        })
 
 
 class TermDetailView(generics.RetrieveUpdateDestroyAPIView):
@@ -1927,38 +2078,68 @@ class EnrollmentReportView(APIView):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
 
         qs = ClassSlotEnrollment.objects.select_related('class_slot', 'student').all()
+        term_id = request.query_params.get('term_id')
         level = request.query_params.get('level')
         day_type = request.query_params.get('day_type')
         gender = request.query_params.get('gender')
+        student_gender = request.query_params.get('student_gender')
+        teacher_name = request.query_params.get('teacher_name')
         date_from = request.query_params.get('date_from')
         date_to = request.query_params.get('date_to')
 
+        if not term_id and not (date_from and date_to):
+            return Response({'error': 'برای گزارش، یک ترم یا هر دو تاریخ «از تاریخ» و «تا تاریخ» را انتخاب کنید.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        if term_id:
+            qs = qs.filter(class_slot__term_id=term_id)
         if level:
-            qs = qs.filter(class_slot__assigned_level=level)
+            level_list = [x.strip() for x in level.split(',') if x.strip()]
+            if level_list:
+                qs = qs.filter(class_slot__assigned_level__in=level_list)
         if day_type:
             qs = qs.filter(class_slot__day_type=day_type)
         if gender:
             qs = qs.filter(class_slot__gender=gender)
-        if date_from:
-            qs = qs.filter(created_at__date__gte=date_from)
-        if date_to:
-            qs = qs.filter(created_at__date__lte=date_to)
+        if student_gender in ('female', 'male'):
+            qs = qs.filter(student__gender=student_gender)
+        if teacher_name:
+            qs = qs.filter(class_slot__teacher_name=teacher_name)
+        # وقتی ترم انتخاب شده، بازه‌ی تاریخ فقط برای نمایش است (تاریخ ثبت‌نام‌ها ممکن است خارج
+        # از بازه‌ی ترم باشد و گزارش را اشتباهاً خالی می‌کرد)؛ فیلتر تاریخ فقط در حالت بدون ترم اعمال می‌شود.
+        if not term_id:
+            try:
+                if date_from:
+                    qs = qs.filter(created_at__date__gte=date_from)
+                if date_to:
+                    qs = qs.filter(created_at__date__lte=date_to)
+            except (ValueError, TypeError, ValidationError):
+                return Response({'error': 'فرمت تاریخ نامعتبر است'}, status=status.HTTP_400_BAD_REQUEST)
 
         enrollments = []
         by_level = {}
+        by_teacher_level = {}
+        by_student_gender = {}
         for e in qs.order_by('-created_at'):
             lvl = e.class_slot.assigned_level or 'نامشخص'
             row = by_level.setdefault(lvl, {'level': lvl, 'count': 0, 'total_tuition': 0, 'discount_count': 0, 'total_discount_amount': 0})
             row['count'] += 1
-            row['total_tuition'] += e.tuition_amount
-            if e.discount_percent > 0:
+            row['total_tuition'] += e.tuition_amount or 0
+            teacher = (e.class_slot.teacher_name or 'بدون استاد').strip()
+            teacher_level = by_teacher_level.setdefault((teacher, lvl), {'teacher': teacher, 'level': lvl, 'count': 0, 'female_count': 0, 'male_count': 0})
+            teacher_level['count'] += 1
+            if e.student.gender in ('female', 'male'):
+                teacher_level[f"{e.student.gender}_count"] += 1
+            gender_key = e.student.gender or 'unknown'
+            by_student_gender.setdefault(gender_key, {'gender': gender_key, 'count': 0})['count'] += 1
+            if (e.discount_percent or 0) > 0:
                 row['discount_count'] += 1
-                row['total_discount_amount'] += e.tuition_amount
+                row['total_discount_amount'] += e.tuition_amount or 0
             enrollments.append({
                 'id': e.id, 'student_name': f"{e.student.first_name} {e.student.last_name}",
                 'student_national_code': e.student.national_code, 'student_gender': e.student.gender,
+                'teacher_name': e.class_slot.teacher_name,
                 'class_number': e.class_slot.number, 'level': lvl, 'day_type_display': e.class_slot.day_type_display,
-                'time_slot': e.class_slot.time_slot, 'gender': e.class_slot.gender, 'gender_display': e.class_slot.gender_display,
+                'time_slot': e.class_slot.time_slot, 'gender': e.class_slot.gender, 'gender_display': e.class_slot.get_gender_display(),
                 'payment_method_display': e.get_payment_method_display(), 'tuition_amount': e.tuition_amount,
                 'discount_percent': e.discount_percent, 'created_at_jalali': e.created_at_jalali,
             })
@@ -1966,8 +2147,358 @@ class EnrollmentReportView(APIView):
         return Response({
             'enrollments': enrollments,
             'summary_by_level': sorted(by_level.values(), key=lambda r: r['level']),
+            'summary_by_teacher_level': sorted(by_teacher_level.values(), key=lambda r: (r['teacher'], r['level'])),
+            'summary_by_gender': sorted(by_student_gender.values(), key=lambda r: r['gender']),
             'total_count': len(enrollments),
-            'total_tuition': sum(r['tuition_amount'] for r in enrollments),
+            'total_tuition': sum((r['tuition_amount'] or 0) for r in enrollments),
+        })
+
+
+class EnrollmentTermChartView(APIView):
+    """
+    GET: داده‌ی نمودار میله‌ای «تعداد زبان‌آموزان» در گزارش دقیق ثبت‌نام + فهرست سطوح/استادان موجود در ترم.
+    پارامترها:
+      term_id   — (اختیاری) ترم؛ اگر نباشد همه‌ی ترم‌ها
+      group_by  — level (پیش‌فرض) | teacher
+      value     — (اختیاری) چند سطح (جداشده با ویرگول) یا یک استاد؛ خالی = همه
+      teacher_level — گروه‌بندی ترکیبی استاد و سطح
+      gender    — (اختیاری) female | male: جنسیت زبان‌آموز
+    خروجی: available_levels / available_teachers (برای قرمز و غیرفعال‌کردن موارد غایب در ترم)
+    و bars: [{label, count}] (تعداد زبان‌آموز یکتا).
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        if not can_view_menu(request.user, 'class-management'):
+            return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
+
+        term_id = (request.query_params.get('term_id') or '').strip()
+        group_by = request.query_params.get('group_by') or 'level'
+        value = (request.query_params.get('value') or '').strip()
+        gender = (request.query_params.get('gender') or '').strip()
+        if group_by not in ('level', 'teacher', 'teacher_level'):
+            group_by = 'level'
+        if term_id and not term_id.isdigit():
+            return Response({'error': 'ترم نامعتبر است'}, status=status.HTTP_400_BAD_REQUEST)
+
+        slot_qs = ClassSlot.objects.all()
+        if term_id:
+            slot_qs = slot_qs.filter(term_id=int(term_id))
+        available_levels = sorted({(l or '').strip() for l in slot_qs.values_list('assigned_level', flat=True) if (l or '').strip()})
+        available_teachers = sorted({(t or '').strip() for t in slot_qs.values_list('teacher_name', flat=True) if (t or '').strip()})
+        available_teacher_levels = sorted({f"{(t or 'بدون استاد').strip()} — {(l or 'بدون سطح').strip()}" for t, l in slot_qs.values_list('teacher_name', 'assigned_level')})
+
+        qs = ClassSlotEnrollment.objects.filter(class_slot__in=slot_qs, student__role='student').filter(
+            Q(is_carryover=False) | Q(carryover_confirmed=True)
+        ).select_related('class_slot', 'student')
+        if gender in ('female', 'male'):
+            qs = qs.filter(student__gender=gender)
+
+        field = 'assigned_level' if group_by == 'level' else 'teacher_name'
+        value_set = {x.strip() for x in value.split(',') if x.strip()} if group_by == 'level' else ({value} if value else set())
+        buckets = {}
+        for e in qs:
+            if group_by == 'teacher_level':
+                label = f"{(e.class_slot.teacher_name or 'بدون استاد').strip()} — {(e.class_slot.assigned_level or 'بدون سطح').strip()}"
+            else:
+                label = (getattr(e.class_slot, field) or '').strip() or ('بدون سطح' if group_by == 'level' else 'بدون استاد')
+            if value_set and label not in value_set:
+                continue
+            buckets.setdefault(label, set()).add(e.student_id)
+
+        pool = available_levels if group_by == 'level' else (available_teacher_levels if group_by == 'teacher_level' else available_teachers)
+        if value_set:
+            labels = [l for l in (pool if group_by in ('level', 'teacher_level') else sorted(value_set)) if l in value_set] + [l for l in sorted(value_set) if l not in pool]
+        else:
+            labels = list(pool) + [l for l in buckets if l not in pool]
+        bars = [{'label': l, 'count': len(buckets.get(l, ()))} for l in labels]
+        return Response({
+            'available_levels': available_levels,
+            'available_teachers': available_teachers,
+            'available_teacher_levels': available_teacher_levels,
+            'group_by': group_by,
+            'bars': bars,
+            'total': len({sid for ids in buckets.values() for sid in ids}),
+        })
+
+
+class LevelProgressionSkipReportView(APIView):
+    """گزارش زبان‌آموزانی که در ترم جاری از سطح ثبت‌نام‌شدهٔ قبلی، سطحی را جا انداخته‌اند."""
+    permission_classes = [IsAuthenticated]
+
+    HEADERS = [
+        'نام و نام‌خانوادگی', 'کد ملی', 'شماره همراه',
+        'آخرین ترم تحصیل‌شده', 'سطح قبلی', 'کلاس قبلی', 'روز کلاس قبلی', 'ساعت کلاس قبلی', 'استاد قبلی',
+        'ترم جاری', 'سطح فعلی', 'کلاس فعلی', 'روز کلاس فعلی', 'ساعت کلاس فعلی', 'استاد فعلی',
+        'سطح/سطوح جاافتاده', 'وضعیت عملیات',
+    ]
+
+    @staticmethod
+    def _cell_values(row):
+        return [
+            row['student_name'], row['national_code'], row['phone'],
+            row['previous_term_title'], row['previous_level'], row['previous_class_number'],
+            row['previous_day'], row['previous_time_slot'], row['previous_teacher'],
+            row['current_term_title'], row['current_levels'], row['current_class_numbers'],
+            row['current_days'], row['current_time_slots'], row['current_teachers'],
+            row['skipped_levels_text'], row.get('operation_status_text', ''),
+        ]
+
+    def get(self, request):
+        if not can_view_menu(request.user, 'class-management'):
+            return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
+
+        from level_tests.models import StandardLevel
+        from accounts.models import ClassRequest
+
+        requested_term_id = request.query_params.get('current_term_id')
+        if requested_term_id:
+            try:
+                current_term = Term.objects.filter(pk=int(requested_term_id)).first()
+            except (TypeError, ValueError):
+                current_term = None
+            if not current_term:
+                return Response({'error': 'ترم جاری پیدا نشد'}, status=status.HTTP_404_NOT_FOUND)
+        else:
+            current_term = Term.objects.order_by('-year', '-term_number').first()
+        if not current_term:
+            return Response({'error': 'هیچ ترمی تعریف نشده است'}, status=status.HTTP_400_BAD_REQUEST)
+
+        ordered_levels = list(StandardLevel.objects.all().order_by('age_group', 'order', 'code'))
+        levels_by_group = {}
+        levels_by_code = {}
+        for level in ordered_levels:
+            key = _normalize_level(level.code)
+            levels_by_group.setdefault(level.age_group, []).append(level)
+            levels_by_code[key] = level
+        level_positions = {
+            _normalize_level(level.code): (group, index)
+            for group, levels in levels_by_group.items()
+            for index, level in enumerate(levels)
+        }
+
+        current_enrollments = ClassSlotEnrollment.objects.filter(
+            class_slot__term_id=current_term.pk,
+            student__role='student',
+            payment_verified=True,
+        ).filter(Q(is_carryover=False) | Q(carryover_confirmed=True)).select_related(
+            'student', 'class_slot', 'class_slot__term',
+        ).order_by('student_id', 'created_at', 'id')
+        current_by_student = {}
+        for enrollment in current_enrollments:
+            current_by_student.setdefault(enrollment.student_id, []).append(enrollment)
+
+        if not current_by_student:
+            results = []
+        else:
+            earlier_term_filter = (
+                Q(class_slot__term__year__lt=current_term.year)
+                | Q(class_slot__term__year=current_term.year, class_slot__term__term_number__lt=current_term.term_number)
+            )
+            previous_enrollments = ClassSlotEnrollment.objects.filter(
+                student_id__in=current_by_student.keys(),
+                student__role='student',
+                class_slot__term__isnull=False,
+                payment_verified=True,
+            ).filter(earlier_term_filter).filter(
+                Q(is_carryover=False) | Q(carryover_confirmed=True)
+            ).select_related('student', 'class_slot', 'class_slot__term').order_by(
+                'student_id', '-class_slot__term__year', '-class_slot__term__term_number', '-created_at', '-id',
+            )
+            latest_previous_by_student = {}
+            for enrollment in previous_enrollments:
+                latest_previous_by_student.setdefault(enrollment.student_id, enrollment)
+
+            student_ids = list(current_by_student.keys())
+            operation_by_student = {}
+            sequence_requests = ClassRequest.objects.filter(
+                Q(student_id__in=student_ids),
+                Q(sequence_warning=True) | Q(source_level_test__sequence_warning=True),
+                class_type__in=[ClassRequest.ClassType.PRIVATE, ClassRequest.ClassType.MAKEUP],
+            ).exclude(status__in=[ClassRequest.Status.CANCELLED, ClassRequest.Status.REJECTED]).select_related(
+                'student', 'source_level_test', 'teacher',
+            ).order_by('-created_at', '-id')
+            for class_request in sequence_requests:
+                kind = 'private' if class_request.class_type == ClassRequest.ClassType.PRIVATE else 'makeup'
+                operation_by_student.setdefault(class_request.student_id, []).append({
+                    'kind': kind,
+                    'label': class_request.get_class_type_display(),
+                    'id': class_request.id,
+                    'status': class_request.get_status_display(),
+                    'payment_status': class_request.get_payment_status_display(),
+                    'level': class_request.language_level or '—',
+                    'sessions': class_request.session_count or 1,
+                    'teacher': class_request.teacher.get_full_name().strip() if class_request.teacher else 'تعیین نشده',
+                    'proposed_time': class_request.proposed_time or '—',
+                    'class_date': class_request.class_date_jalali or '—',
+                    'summary': f"وضعیت: {class_request.get_status_display()} — سطح: {class_request.language_level or '—'} — پرداخت: {class_request.get_payment_status_display()} — تعداد جلسات: {class_request.session_count or 1}",
+                })
+            sequence_tests = LevelTest.objects.filter(
+                student_id__in=student_ids,
+                sequence_warning=True,
+            ).select_related('student').order_by('-created_at', '-id')
+            for level_test in sequence_tests:
+                operation_by_student.setdefault(level_test.student_id, []).append({
+                    'kind': 'level-test',
+                    'label': 'تعیین سطح',
+                    'id': level_test.id,
+                    'status': level_test.get_status_display(),
+                    'test_date': level_test.test_date_jalali or '—',
+                    'age_group': level_test.get_age_group_display() if level_test.age_group else '—',
+                    'level': level_test.level or '—',
+                    'summary': f"وضعیت: {level_test.get_status_display()} — زمان: {level_test.test_date_jalali or 'تعیین نشده'} — گروه سنی: {level_test.get_age_group_display() if level_test.age_group else '—'} — سطح: {level_test.level or '—'}",
+                })
+            for student_id in operation_by_student:
+                operation_by_student[student_id].sort(key=lambda item: (item['kind'] != 'level-test', -int(item['id'])))
+
+            results = []
+            for student_id, current_rows in current_by_student.items():
+                previous = latest_previous_by_student.get(student_id)
+                if not previous:
+                    continue
+                previous_slot = previous.class_slot
+                previous_level_key = _normalize_level(previous_slot.assigned_level)
+                previous_level = levels_by_code.get(previous_level_key)
+                previous_position = level_positions.get(previous_level_key)
+                if not previous_level or not previous_position or previous_level.is_terminal:
+                    continue
+
+                missed_level_codes = set()
+                skipped_current_classes = []
+                all_current_classes = []
+                previous_group, previous_index = previous_position
+                group_levels = levels_by_group.get(previous_group, [])
+                for enrollment in current_rows:
+                    current_slot = enrollment.class_slot
+                    if current_slot.pk not in {item['id'] for item in all_current_classes}:
+                        all_current_classes.append({
+                            'id': current_slot.pk,
+                            'level': current_slot.assigned_level or '',
+                            'class_number': str(current_slot.number),
+                            'day': current_slot.day_type_display,
+                            'time_slot': current_slot.time_slot or '—',
+                            'teacher': current_slot.teacher_name or '—',
+                        })
+                    current_level_key = _normalize_level(current_slot.assigned_level)
+                    current_position = level_positions.get(current_level_key)
+                    if not current_position:
+                        continue
+                    current_group, current_index = current_position
+                    # فقط پرش روبه‌جلو در همان ردهٔ سنی، نسبت به ترتیب رسمی سطوح، گزارش می‌شود.
+                    if current_group != previous_group or current_index <= previous_index + 1:
+                        continue
+                    missed_level_codes.update(
+                        level.code for level in group_levels[previous_index + 1:current_index]
+                    )
+                    skipped_current_classes.append(current_slot.pk)
+                if not skipped_current_classes:
+                    continue
+
+                group_order = {level.code: index for index, level in enumerate(group_levels)}
+                missed_codes = sorted(missed_level_codes, key=lambda code: group_order.get(code, 10**9))
+                current_term_title = current_term.title
+                operations = operation_by_student.get(student_id, [])
+                results.append({
+                    'student_id': student_id,
+                    'student_name': previous.student.get_full_name().strip() or previous.student.username,
+                    'national_code': previous.student.national_code or '',
+                    'phone': previous.student.phone or '',
+                    'previous_term_id': previous_slot.term_id,
+                    'previous_term_title': previous_slot.term.title,
+                    'previous_level': previous_slot.assigned_level or '—',
+                    'previous_class_number': str(previous_slot.number),
+                    'previous_day': previous_slot.day_type_display,
+                    'previous_time_slot': previous_slot.time_slot or '—',
+                    'previous_teacher': previous_slot.teacher_name or '—',
+                    'current_term_id': current_term.pk,
+                    'current_term_title': current_term_title,
+                    'current_levels': '، '.join(dict.fromkeys(item['level'] or '—' for item in all_current_classes)),
+                    'current_class_numbers': '، '.join(dict.fromkeys(item['class_number'] for item in all_current_classes)),
+                    'current_class_ids': [item['id'] for item in all_current_classes],
+                    'level_change_slot_id': next((item['id'] for item in all_current_classes if item['id'] in skipped_current_classes), all_current_classes[0]['id'] if all_current_classes else None),
+                    'current_days': '؛ '.join(dict.fromkeys(item['day'] for item in all_current_classes)),
+                    'current_time_slots': '؛ '.join(dict.fromkeys(item['time_slot'] for item in all_current_classes)),
+                    'current_teachers': '؛ '.join(dict.fromkeys(item['teacher'] for item in all_current_classes)),
+                    'skipped_levels': missed_codes,
+                    'skipped_levels_text': '، '.join(missed_codes),
+                    'operations': operations,
+                    'operation_status_text': '، '.join(dict.fromkeys(item['label'] for item in operations)),
+                    'sequence_warning_details': {
+                        'previous_term': previous_slot.term.title,
+                        'previous_level': previous_slot.assigned_level or '—',
+                        'current_term': current_term_title,
+                        'current_level': '، '.join(dict.fromkeys(item['level'] or '—' for item in all_current_classes)),
+                        'skipped_levels': missed_codes,
+                        'skipped_levels_text': '، '.join(missed_codes),
+                        'previous_class': str(previous_slot.number),
+                        'current_classes': '، '.join(dict.fromkeys(item['class_number'] for item in all_current_classes)),
+                    },
+                })
+
+        results.sort(key=lambda row: (row['student_name'].casefold(), row['national_code']))
+        if request.query_params.get('format') == 'xlsx':
+            try:
+                from openpyxl import Workbook
+                from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+                from openpyxl.utils import get_column_letter
+            except ImportError:
+                return Response({'error': 'کتابخانهٔ openpyxl روی سرور نصب نیست؛ برای ساخت خروجی XLSX آن را نصب کنید.'}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+
+            import io
+            workbook = Workbook()
+            sheet = workbook.active
+            sheet.title = 'پرش سطح'
+            sheet.sheet_view.rightToLeft = True
+            sheet.merge_cells(start_row=1, start_column=1, end_row=1, end_column=len(self.HEADERS))
+            sheet.cell(row=1, column=1, value=f'گزارش رعایت‌نشدن توالی سطح — ترم جاری: {current_term.title}')
+            sheet.cell(row=1, column=1).font = Font(bold=True, size=14, color='FFFFFF')
+            sheet.cell(row=1, column=1).fill = PatternFill('solid', fgColor='17365D')
+            sheet.cell(row=1, column=1).alignment = Alignment(horizontal='center', vertical='center')
+            sheet.row_dimensions[1].height = 28
+            sheet.merge_cells(start_row=2, start_column=1, end_row=2, end_column=len(self.HEADERS))
+            sheet.cell(row=2, column=1, value=f'تعداد افراد: {len(results)} — آخرین ترم ثبت‌نام تأییدشدهٔ قبلی هر فرد، حتی اگر ترم‌ها متوالی نباشند، مبنای مقایسه است.')
+            sheet.cell(row=2, column=1).alignment = Alignment(horizontal='right', vertical='center', wrap_text=True)
+
+            header_row = 4
+            thin = Side(style='thin', color='D0D7DE')
+            border = Border(left=thin, right=thin, top=thin, bottom=thin)
+            for column_index, header in enumerate(self.HEADERS, start=1):
+                cell = sheet.cell(row=header_row, column=column_index, value=header)
+                cell.font = Font(bold=True, color='FFFFFF')
+                cell.fill = PatternFill('solid', fgColor='1F6FEB')
+                cell.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
+                cell.border = border
+            export_values = [self._cell_values(item) for item in results]
+            for row_index, item in enumerate(results, start=header_row + 1):
+                for column_index, value in enumerate(export_values[row_index - header_row - 1], start=1):
+                    cell = sheet.cell(row=row_index, column=column_index, value=str(value or ''))
+                    cell.data_type = 's'
+                    cell.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
+                    cell.border = border
+            sheet.row_dimensions[header_row].height = 34
+            for column_index, header in enumerate(self.HEADERS, start=1):
+                values = [len(str(row[column_index - 1] or '')) for row in export_values]
+                width = min(max([len(header), *values] or [len(header)]) + 2, 38)
+                sheet.column_dimensions[get_column_letter(column_index)].width = max(width, 12)
+            sheet.freeze_panes = f'A{header_row + 1}'
+            sheet.auto_filter.ref = f'A{header_row}:{get_column_letter(len(self.HEADERS))}{max(header_row, header_row + len(results))}'
+            sheet.page_setup.orientation = 'landscape'
+            sheet.page_setup.fitToWidth = 1
+            sheet.page_setup.fitToHeight = 0
+            sheet.sheet_properties.pageSetUpPr.fitToPage = True
+            buffer = io.BytesIO()
+            workbook.save(buffer)
+            response = HttpResponse(
+                buffer.getvalue(),
+                content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            )
+            response['Content-Disposition'] = f'attachment; filename="level-progression-skips-{current_term.pk}.xlsx"'
+            return response
+
+        return Response({
+            'current_term': {'id': current_term.pk, 'title': current_term.title},
+            'count': len(results),
+            'results': results,
         })
 
 
@@ -2915,7 +3446,7 @@ class RefundEnrollmentView(APIView):
 
 
 class TransferEnrollmentOptionsView(APIView):
-    """GET: لیست کلاس‌های هم‌سطح و هم‌جنسیت (به‌جز خودِ همین کلاس) برای دکمه‌ی «انتقال کلاس»"""
+    """GET: تمام کلاس‌های هم‌سطح و سازگار با جنسیت دانش‌آموز، حتی در صورت تکمیل ظرفیت."""
     permission_classes = [IsAuthenticated]
 
     def get(self, request, pk, student_id):
@@ -2926,14 +3457,25 @@ class TransferEnrollmentOptionsView(APIView):
         except ClassSlot.DoesNotExist:
             return Response({'error': 'کلاس پیدا نشد'}, status=status.HTTP_404_NOT_FOUND)
 
-        candidates = ClassSlot.objects.exclude(pk=slot.pk).filter(assigned_level=slot.assigned_level)
-        if slot.gender != ClassSlot.Gender.MIXED:
-            candidates = candidates.filter(gender__in=[slot.gender, ClassSlot.Gender.MIXED])
-        candidates = [c for c in candidates if c.real_seats_left > 0]
+        enrollment = ClassSlotEnrollment.objects.select_related('student').filter(class_slot=slot, student_id=student_id).first()
+        if not enrollment:
+            return Response({'error': 'این دانش‌آموز در کلاس مبدأ ثبت‌نام نیست'}, status=status.HTTP_404_NOT_FOUND)
+        student_gender = enrollment.student.gender or _student_gender_from_class(slot)
+        target_gender = {'female': ClassSlot.Gender.GIRLS, 'male': ClassSlot.Gender.BOYS}.get(student_gender)
+        candidates = ClassSlot.objects.exclude(pk=slot.pk).filter(term=slot.term, assigned_level=slot.assigned_level)
+        if target_gender:
+            candidates = candidates.filter(gender__in=[target_gender, ClassSlot.Gender.MIXED])
+        else:
+            # وقتی جنسیت فرد قابل تعیین نیست، فقط کلاس مختلط گزینهٔ امن محسوب می‌شود.
+            candidates = candidates.filter(gender=ClassSlot.Gender.MIXED)
+        candidates = candidates.order_by('day_type', 'time_slot', 'number')
 
         return Response([{
             'id': c.id, 'number': c.number, 'day_type_display': c.day_type_display,
             'time_slot': c.time_slot, 'teacher_name': c.teacher_name, 'seats_left': c.real_seats_left,
+            'real_seats_left': c.real_seats_left, 'capacity': c.capacity,
+            'real_enrolled_count': c.real_enrolled_count, 'gender': c.gender,
+            'gender_display': c.get_gender_display(), 'assigned_level': c.assigned_level,
             'tuition_amount': class_tariff_amount(c),
         } for c in candidates])
 
@@ -2955,7 +3497,7 @@ class TransferEnrollmentView(APIView):
         from django.contrib.auth import get_user_model
         User = get_user_model()
         try:
-            User.objects.select_for_update().get(pk=student_id, role='student')
+            student = User.objects.select_for_update().get(pk=student_id, role='student')
         except User.DoesNotExist:
             return Response({'error': 'دانش‌آموز پیدا نشد'}, status=status.HTTP_404_NOT_FOUND)
 
@@ -2968,6 +3510,16 @@ class TransferEnrollmentView(APIView):
 
         if target.pk == source.pk:
             return Response({'error': 'کلاس مقصد نمی‌تواند همان کلاس فعلی باشد'}, status=status.HTTP_400_BAD_REQUEST)
+        if target.term_id != source.term_id:
+            return Response({'error': 'کلاس مقصد باید در همان ترم باشد'}, status=status.HTTP_400_BAD_REQUEST)
+        change_level = str(request.data.get('change_level', '')).lower() in ('1', 'true', 'yes')
+        if not change_level and target.assigned_level != source.assigned_level:
+            return Response({'error': 'برای انتقال معمولی، کلاس مقصد باید هم‌سطح باشد'}, status=status.HTTP_400_BAD_REQUEST)
+        student_gender = student.gender or _student_gender_from_class(source)
+        if target.gender != ClassSlot.Gender.MIXED:
+            expected_gender = 'female' if target.gender == ClassSlot.Gender.GIRLS else 'male'
+            if student_gender != expected_gender:
+                return Response({'error': 'جنسیت دانش‌آموز با کلاس مقصد سازگار نیست؛ فقط کلاس هم‌جنس یا مختلط قابل انتخاب است'}, status=status.HTTP_400_BAD_REQUEST)
         if target.real_seats_left <= 0:
             return Response({'error': 'کلاس مقصد ظرفیت خالی ندارد'}, status=status.HTTP_400_BAD_REQUEST)
         existing_in_target_term = list(_same_term_enrollments(target, [student_id]).exclude(pk=enrollment.pk))
@@ -2990,11 +3542,22 @@ class TransferEnrollmentView(APIView):
         )
         tuition_note = tuition_difference(enrollment, target)
         enrollment.delete()
-        if str(request.data.get('change_level', '')).lower() in ('1', 'true', 'yes') and target.assigned_level:
+        if change_level and target.assigned_level:
             _student = User.objects.filter(pk=student_id).first()
             if _student:
                 _student.language_level = target.assigned_level
                 _student.save(update_fields=['language_level'])
+                # سطح اصلاح‌شده باید در فهرست پیگیری/بدهکاران هم مبنا باشد؛ در غیر این صورت
+                # رکورد بدهکاریِ قبلی هنوز سطح اشتباه کلاس را نمایش می‌داد.
+                from leads.models import Debtor
+                debtor_identity = Q(student_id=student_id)
+                if _student.phone:
+                    debtor_identity |= Q(phone=_student.phone, first_name=_student.first_name, last_name=_student.last_name)
+                if _student.national_code:
+                    debtor_identity |= Q(first_name=_student.first_name, last_name=_student.last_name, student__national_code=_student.national_code)
+                Debtor.objects.filter(debtor_identity).exclude(
+                    status=Debtor.Status.SETTLED,
+                ).update(class_level=target.assigned_level)
         if not target.assigned_level:
             target.assigned_level = source.assigned_level
             target.save()
@@ -4852,9 +5415,11 @@ class TermOverviewView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        if not can_edit_menu(request.user, 'class-management'):
+        if not can_view_menu(request.user, 'class-management'):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         from level_tests.models import StandardLevel
+        from accounts.models import ClassRequest
+        from level_tests.models import LevelTest
         term_id = request.query_params.get('term_id')
         term = Term.objects.filter(pk=term_id).first() if str(term_id or '').isdigit() else None
         if not term:
@@ -4864,11 +5429,15 @@ class TermOverviewView(APIView):
         gender = request.query_params.get('gender', '')
         student_param = request.query_params.get('student_id')
         if not gender and str(student_param or '').isdigit():
-            enrolled = ClassSlotEnrollment.objects.filter(
-                student_id=student_param,
-            ).select_related('class_slot').order_by('-created_at', '-id').first()
-            # اگر برای فرد هیچ ثبت‌نامی وجود نداشته باشد، جنسیت نامعلوم می‌ماند و همه‌ی کلاس‌ها نمایش داده می‌شوند.
-            gender = _student_gender_from_class(enrolled.class_slot) if enrolled else ''
+            from django.contrib.auth import get_user_model
+            student = get_user_model().objects.filter(pk=student_param, role='student').only('gender').first()
+            gender = getattr(student, 'gender', '') or ''
+            if not gender:
+                enrolled = ClassSlotEnrollment.objects.filter(
+                    student_id=student_param, class_slot__term=term,
+                ).select_related('class_slot').order_by('-created_at', '-id').first()
+                # اگر جنسیت پرونده خالی باشد، از کلاس همین ترم برای fallback استفاده می‌شود.
+                gender = _student_gender_from_class(enrolled.class_slot) if enrolled else ''
 
         def gender_ok(slot):
             if not gender or slot.gender == ClassSlot.Gender.MIXED:

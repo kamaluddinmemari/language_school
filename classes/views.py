@@ -25,6 +25,7 @@ from accounts.menu_permissions import can_view_menu
 def _private_class_queue_ordering(queryset):
     """صف پنل: «فوری»ها (خصوصیِ پرداخت‌شده/جبرانی) اول، بعد پرداخت‌شده‌ها/جبرانی‌ها، خصوصیِ پرداخت‌نشده بعد؛ قدیمی به جدید."""
     queue_group = Case(
+        When(sequence_warning=True, then=Value(-2)),
         When(force_last=True, then=Value(3)),
         When(
             Q(is_urgent=True) & (

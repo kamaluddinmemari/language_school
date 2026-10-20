@@ -139,6 +139,7 @@ class ClassRequestAdminSerializer(serializers.ModelSerializer):
             'payment_method', 'payment_reference', 'payment_confirmed_at', 'payment_confirmed_at_jalali',
             'is_refunded', 'refund_amount', 'refund_date', 'refund_date_jalali', 'refund_reference', 'refund_note',
             'refund_recorded_by', 'refund_recorded_by_name',
+            'sequence_warning', 'sequence_warning_details',
             'status', 'notes',
             'is_completed', 'completed_at', 'completed_at_jalali',
             'satisfaction', 'satisfaction_text', 'satisfaction_approved',
@@ -208,6 +209,8 @@ class ClassRequestAdminCreateSerializer(serializers.Serializer):
         choices=ClassRequest.PaymentStatus.choices,
         default=ClassRequest.PaymentStatus.UNPAID
     )
+    sequence_warning = serializers.BooleanField(required=False, default=False)
+    sequence_warning_details = serializers.JSONField(required=False, default=dict)
     is_urgent = serializers.BooleanField(required=False, default=False)
     payment_method = serializers.ChoiceField(choices=ClassRequest.PaymentMethod.choices, required=False, allow_blank=True)
     payment_reference = serializers.CharField(max_length=100, required=False, allow_blank=True)
