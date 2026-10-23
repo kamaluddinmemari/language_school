@@ -232,6 +232,8 @@ class StudentSerializer(serializers.ModelSerializer):
     password = serializers.CharField(write_only=True, required=False, allow_blank=True, validators=[password_validator])
     national_code = serializers.CharField(required=False, allow_blank=True, allow_null=True, max_length=10)
     has_app_account = serializers.SerializerMethodField()
+    not_in_recent_terms = serializers.SerializerMethodField()
+    class_info = serializers.SerializerMethodField()
 
     class Meta:
         model = User
@@ -239,11 +241,27 @@ class StudentSerializer(serializers.ModelSerializer):
             'id', 'first_name', 'last_name', 'father_name', 'phone', 'phone2',
             'national_code', 'birth_date', 'gender', 'language_level',
             'username', 'password', 'has_app_account', 'wallet_balance', 'needs_editing',
+            'not_in_recent_terms', 'class_info',
         ]
         read_only_fields = ['wallet_balance']
 
     def get_has_app_account(self, obj):
         return obj.has_usable_password()
+
+    def get_class_info(self, obj):
+        """مشخصات آخرین کلاس فرد (سطح، استاد، روز، ساعت، شماره کلاس، ترم)؛ فقط در لیست دانش‌آموزان محاسبه می‌شود."""
+        info = self.context.get('student_class_info')
+        if info is None:
+            return None
+        return info.get(obj.id)
+
+    def get_not_in_recent_terms(self, obj):
+        """True: در دو ترم اخیر (و ترم‌های بعدتر) در هیچ کلاسی ثبت‌نام نشده؛ فقط در لیست دانش‌آموزان محاسبه می‌شود."""
+        registered = self.context.get('recent_registered_ids')
+        if registered is None:
+            return None
+        return obj.id not in registered
+
     def validate_national_code(self, value):
         return value or None
 

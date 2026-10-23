@@ -1,6 +1,7 @@
 from django.db import models
 from django.utils import timezone
 from accounts.models import User
+from accounts.archive import keep_as_archived_student
 import jdatetime
 
 
@@ -125,6 +126,9 @@ class NewLead(models.Model):
     phone = models.CharField(max_length=20)
     term = models.ForeignKey('class_management.Term', on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
     identity_key = models.CharField(max_length=255, blank=True, default='', editable=False)
+    requested_level = models.CharField(max_length=50, blank=True, default='', help_text='سطح مورد تقاضا برای ثبت‌نام ترم آینده (کد یکی از سطوح استاندارد)')
+    gender = models.CharField(max_length=10, blank=True, default='', help_text='جنسیت (female/male) برای شمارش متقاضیان هر سطح')
+    assigned_to = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='assigned_new_leads', help_text='کارمندی که پیگیری این فرد به او سپرده شده است')
 
     status = models.CharField(max_length=10, choices=Status.choices, default=Status.PENDING)
     followup1_at = models.DateTimeField(null=True, blank=True)
@@ -490,7 +494,7 @@ class DiscountedPerson(models.Model):
 
 class DropoutFollowup(models.Model):
     """پیگیری نامحدود دانش‌آموزی که از یک ترم به ترم بعد ثبت‌نام نکرده است."""
-    student = models.ForeignKey(User, on_delete=models.CASCADE, related_name='dropout_followups')
+    student = models.ForeignKey(User, on_delete=keep_as_archived_student, related_name='dropout_followups')
     from_term = models.ForeignKey('class_management.Term', on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
     to_term = models.ForeignKey('class_management.Term', on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
     followed_up_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
@@ -511,7 +515,7 @@ class DropoutFollowup(models.Model):
 
 class ExcelDropout(models.Model):
     """ریزشیِ استخراج‌شده از مقایسه‌ی اکسلِ دو ترم متوالی (برای جفت‌ترم‌هایی که «ترم اخیر و ترم قبلش» نیستند) — در بخش ریزشی‌ها نمایش داده می‌شود."""
-    student = models.ForeignKey(User, on_delete=models.CASCADE, related_name='excel_dropouts')
+    student = models.ForeignKey(User, on_delete=keep_as_archived_student, related_name='excel_dropouts')
     from_term = models.ForeignKey('class_management.Term', on_delete=models.CASCADE, related_name='+', null=True, blank=True)
     to_term = models.ForeignKey('class_management.Term', on_delete=models.CASCADE, related_name='+')
     level = models.CharField(max_length=50, blank=True)

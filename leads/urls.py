@@ -1,7 +1,7 @@
 from django.urls import path
 from .views import (
     PersonFinanceStatusView,
-    NewLeadListView, NewLeadDetailView, NewLeadActionView,
+    NewLeadListView, NewLeadDetailView, NewLeadActionView, NewLeadRegisterView, NewLeadRegisterOptionsView,
     UnregisteredStudentListView, UnregisteredStudentDetailView,
     UnregisteredStudentFollowupView, UnregisteredStudentRegisterView, UnregisteredStudentRegisterOptionsView, UnregisteredStudentStatsView,
     DropoutStudentListView, DropoutStudentFollowupView,
@@ -11,6 +11,8 @@ from .views import (
 )
 
 urlpatterns = [
+    path('leads/new-lead-register/<int:pk>/', NewLeadRegisterView.as_view(), name='new_lead_register'),
+    path('leads/new-lead-register-options/<int:pk>/', NewLeadRegisterOptionsView.as_view(), name='new_lead_register_options'),
     path('leads/new-leads/', NewLeadListView.as_view(), name='new_lead_list'),
     path('leads/new-leads/<int:pk>/', NewLeadDetailView.as_view(), name='new_lead_detail'),
     path('leads/new-leads/<int:pk>/<str:action>/', NewLeadActionView.as_view(), name='new_lead_action'),

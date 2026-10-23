@@ -942,6 +942,11 @@ class DropoutExtractRegisterView(APIView):
                 slot = ClassSlot.objects.select_for_update().get(pk=int(request.data.get('class_slot_id')))
             except (ClassSlot.DoesNotExist, TypeError, ValueError):
                 return Response({'error': 'کلاس انتخاب‌شده پیدا نشد'}, status=status.HTTP_404_NOT_FOUND)
+            from .disciplinary import disciplinary_guard
+            warning = disciplinary_guard(request, [student], skip_unregistered=True)
+            if warning:
+                transaction.set_rollback(True)
+                return warning
             if not _slot_gender_ok(slot, student.gender):
                 return Response({'error': 'جنسیت این فرد با کلاس انتخاب‌شده (دخترانه/پسرانه) مغایرت دارد؛ ثبت‌نام انجام نشد'}, status=status.HTTP_400_BAD_REQUEST)
             payment_method = str(request.data.get('payment_method') or ClassSlotEnrollment.PaymentMethod.CASH)

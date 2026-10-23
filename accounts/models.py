@@ -11,6 +11,9 @@ persian_only_validator = RegexValidator(
 )
 
 
+from .archive import keep_as_archived_student
+
+
 class User(AbstractUser):
 
     class Role(models.TextChoices):
@@ -20,6 +23,7 @@ class User(AbstractUser):
         EVALUATOR = 'evaluator', 'کارشناس آموزش'
         OFFICE = 'office', 'کارشناس اداری'
         EMPLOYEE = 'employee', 'کارمند'
+        ARCHIVED = 'archived', 'پروندهٔ بایگانی‌شده (دانش‌آموز حذف‌شده)'
 
     class Gender(models.TextChoices):
         FEMALE = 'female', 'خانم'
@@ -50,6 +54,7 @@ class User(AbstractUser):
     phone = models.CharField(max_length=11, help_text='یکتا بودن این فیلد الزامی نیست — چون معمولاً چند خواهر/برادر با یک شماره موبایلِ والدین ثبت‌نام می‌شوند')
     phone2 = models.CharField(max_length=11, blank=True)
     national_code = models.CharField(max_length=10, unique=True, null=True, blank=True)
+    archived_national_code = models.CharField(max_length=10, blank=True, default='', help_text='فقط برای پروندهٔ بایگانی‌شده: کد ملی دانش‌آموز حذف‌شده (یکتا نیست تا ثبت مجدد همان فرد مشکل نسازد)')
     birth_date = models.DateField(null=True, blank=True)
     gender = models.CharField(max_length=10, choices=Gender.choices, blank=True, help_text='برای دانش‌آموزان، مبنای تخصیص کلاس دخترانه/پسرانه/مختلط')
     language_level = models.CharField(max_length=50, blank=True)
@@ -222,7 +227,8 @@ class ClassRequest(models.Model):
         MAKEUP = 'makeup', 'جبرانی'
         OTHER = 'other', 'سایر'
 
-    student = models.ForeignKey(User, on_delete=models.CASCADE, related_name='requests', limit_choices_to={'role': 'student'})
+    # حذف دانش‌آموز سوابق خصوصی/جبرانی را پاک نمی‌کند؛ به پروندهٔ بایگانی‌شده منتقل می‌شوند (accounts/archive.py)
+    student = models.ForeignKey(User, on_delete=keep_as_archived_student, related_name='requests', limit_choices_to={'role': 'student'})
     teacher = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='assigned_classes', limit_choices_to={'role__in': User.TEACHER_LIKE_ROLES})
     assigned_teachers = models.ManyToManyField(User, blank=True, related_name='referred_classes', limit_choices_to={'role__in': User.TEACHER_LIKE_ROLES})
     accepted_teachers = models.ManyToManyField(User, blank=True, related_name='accepted_classes', limit_choices_to={'role__in': User.TEACHER_LIKE_ROLES})
@@ -513,6 +519,7 @@ class FormArchive(models.Model):
     class DocumentType(models.TextChoices):
         DISCIPLINARY = 'disciplinary', 'تعهد انضباطی'
         REFUND = 'refund', 'استرداد'
+        CERTIFICATE = 'certificate', 'گواهی اشتغال به تحصیل'
 
     document_type = models.CharField(max_length=20, choices=DocumentType.choices)
     number = models.CharField(max_length=32)

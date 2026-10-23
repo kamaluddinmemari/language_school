@@ -153,6 +153,9 @@ class AvailableClassSlotsForLevelView(APIView):
         results = [{
             'id': c.id,
             'number': c.number,
+            'term_number': latest_term.term_number,
+            'term_year': latest_term.year,
+            'term_title': latest_term.title,
             'level': c.assigned_level,
             'day_display': c.get_day_type_display(),
             'time_slot': c.time_slot,
@@ -227,6 +230,16 @@ class LevelTestListCreateView(APIView):
                 'error': f"⚠️ این فرد از قبل در فهرست تعیین‌سطح‌های در انتظار ثبت شده است: {duplicate.first_name} {duplicate.last_name} (شمارهٔ پیگیری: {duplicate.id}). برای جلوگیری از ثبت تکراری، ابتدا همان مورد را بررسی کنید.",
                 'duplicate_id': duplicate.id,
             }, status=status.HTTP_409_CONFLICT)
+        # هشدار فوری: داوطلبِ بدهکار از قبل یا جزو «ثبت‌نام‌نشده‌ها» (بدون دور زدن تأیید کاربر)
+        from class_management.disciplinary import disciplinary_guard, pseudo_person
+        student_obj = serializer.validated_data.get('student')
+        person = student_obj or pseudo_person(
+            serializer.validated_data.get('first_name'), serializer.validated_data.get('last_name'),
+            national_code, serializer.validated_data.get('phone'),
+        )
+        warning = disciplinary_guard(request, [person], skip_disciplinary=True, title='هشدار هنگام ثبت درخواست تعیین سطح')
+        if warning:
+            return warning
         obj = serializer.save(created_by=request.user, status=LevelTest.Status.PENDING)
         return Response(LevelTestSerializer(obj).data, status=status.HTTP_201_CREATED)
 
@@ -283,10 +296,14 @@ class StudentRequestLevelTestView(APIView):
 
         mode_label = 'حضوری' if mode == LevelTest.Mode.ONSITE else 'آنلاین'
         admins = list(User.objects.filter(role__in=['admin', 'office']))
+        # درخواست از اپ قابل «تأیید در لحظه» نیست؛ هشدار بدهکار/ثبت‌نام‌نشده بودن در همان اعلان مدیران می‌آید
+        from class_management.disciplinary import person_reasons
+        warning_reasons, _count = person_reasons(student, skip_disciplinary=True)
+        warning_note = (' ⚠ هشدار: ' + '؛ '.join(r['text'] for r in warning_reasons)) if warning_reasons else ''
         send_notification(
             sender=None, recipients=admins,
-            title='درخواست وقت تعیین سطح جدید',
-            body=f'{student.first_name} {student.last_name} درخواست تعیین سطح {mode_label} داد و منتظر تعیین وقت است',
+            title='⚠ درخواست وقت تعیین سطح جدید' if warning_note else 'درخواست وقت تعیین سطح جدید',
+            body=f'{student.first_name} {student.last_name} درخواست تعیین سطح {mode_label} داد و منتظر تعیین وقت است.{warning_note}',
         )
 
         return Response(LevelTestSerializer(obj).data, status=status.HTTP_201_CREATED)

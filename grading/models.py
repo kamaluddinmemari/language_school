@@ -2,6 +2,7 @@ from django.db import models
 from django.conf import settings
 from django.utils import timezone
 import jdatetime
+from accounts.archive import keep_current_term_records
 
 
 def _jalali(dt):
@@ -118,7 +119,7 @@ class StudentGrade(models.Model):
         'class_management.ClassSlot', on_delete=models.CASCADE, related_name='grades',
     )
     student = models.ForeignKey(
-        settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='grades',
+        settings.AUTH_USER_MODEL, on_delete=keep_current_term_records, related_name='grades',
         limit_choices_to={'role': 'student'},
     )
     term = models.ForeignKey(

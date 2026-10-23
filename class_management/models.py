@@ -2,6 +2,7 @@ from django.db import models
 from django.conf import settings
 from django.utils import timezone
 import jdatetime
+from accounts.archive import keep_current_term_records
 from level_tests.levels import get_all_level_choices
 from level_tests.models import LevelTest
 
@@ -321,7 +322,8 @@ class ClassSlotEnrollment(models.Model):
         WALLET = 'wallet', 'کیف پول'
 
     class_slot = models.ForeignKey(ClassSlot, on_delete=models.CASCADE, related_name='enrollments')
-    student = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='class_slot_enrollments')
+    # حذف دانش‌آموز ثبت‌نام ترم جاری را پاک نمی‌کند (accounts/archive.py)
+    student = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=keep_current_term_records, related_name='class_slot_enrollments')
     payment_method = models.CharField(max_length=20, choices=PaymentMethod.choices)
     tuition_amount = models.PositiveIntegerField(default=0, help_text='مبلغ شهریه‌ی پرداختی (تومان)')
     discount_percent = models.PositiveIntegerField(default=0, help_text='درصد تخفیفی که موقع این ثبت‌نام اعمال شد (اگر داشته باشد)')
@@ -578,7 +580,7 @@ class ClassAttendance(models.Model):
 
     class_slot = models.ForeignKey(ClassSlot, null=True, blank=True, on_delete=models.CASCADE, related_name='attendances')
     online_course = models.ForeignKey('OnlineCourse', null=True, blank=True, on_delete=models.CASCADE, related_name='attendances')
-    student = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='class_attendances')
+    student = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=keep_current_term_records, related_name='class_attendances')
     # کلاس‌های یک‌روز در هفته هر روز ۳ جلسه دارند؛ شمارهٔ جلسه در همان روز (۱ تا ۳). سایر کلاس‌ها همیشه ۱.
     session_in_day = models.PositiveSmallIntegerField(default=1)
     date = models.DateField(default=timezone.now, help_text='تاریخ جلسه (میلادی ذخیره می‌شود؛ شمسی نمایش داده می‌شود)')

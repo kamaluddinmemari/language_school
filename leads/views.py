@@ -58,7 +58,7 @@ class NewLeadListView(generics.ListCreateAPIView):
     def get_queryset(self):
         if not can_edit_menu(self.request.user, "new-leads"):
             return NewLead.objects.none()
-        return NewLead.objects.all().prefetch_related('followups__followed_up_by')
+        return NewLead.objects.all().select_related('assigned_to').prefetch_related('followups__followed_up_by')
 
     def get_serializer_context(self):
         """
@@ -227,7 +227,7 @@ class UnregisteredStudentListView(generics.ListCreateAPIView):
         if not can_edit_menu(self.request.user, "followups"):
             return UnregisteredStudent.objects.none()
         purge_old_archives()
-        qs = UnregisteredStudent.objects.all()
+        qs = UnregisteredStudent.objects.all().select_related('term', 'assigned_to', 'submitted_by', 'reported_slot', 'dropout_from_term', 'misplaced_from_slot').prefetch_related('followups__followed_up_by')
         term_id = self.request.query_params.get('term_id')
         if term_id:
             from class_management.models import Term
@@ -442,6 +442,11 @@ class UnregisteredStudentRegisterView(APIView):
                 real_student = _resolve_unregistered_student(student, create=True)
                 if not real_student:
                     return Response({'error': 'ساخت/پیدا کردن پرونده‌ی دانش‌آموز ممکن نشد'}, status=status.HTTP_400_BAD_REQUEST)
+                from class_management.disciplinary import disciplinary_guard
+                warning = disciplinary_guard(request, [real_student], skip_unregistered=True)
+                if warning:
+                    transaction.set_rollback(True)
+                    return warning
                 person_gender = real_student.gender or student.gender
                 if not _slot_gender_ok(slot, person_gender):
                     transaction.set_rollback(True)
@@ -469,6 +474,91 @@ class UnregisteredStudentRegisterView(APIView):
         data = UnregisteredStudentSerializer(student).data
         data['registered_class_number'] = registered_class
         return Response(data)
+
+
+def _new_lead_student(lead, create=False):
+    """پروندهٔ دانش‌آموزیِ متناظر با سرنخ لیست انتظار (اگر create=True و نبود، ساخته می‌شود)."""
+    from types import SimpleNamespace
+    proxy = SimpleNamespace(
+        national_code=lead.national_code, phone=lead.phone, first_name=lead.first_name,
+        last_name=lead.last_name, class_level=lead.requested_level,
+    )
+    return _resolve_unregistered_student(proxy, create=create)
+
+
+class NewLeadRegisterOptionsView(APIView):
+    """GET: کلاس‌های پیشنهادی (هم‌سطح و هم‌جنسیت با سطح درخواستی) برای «ثبت در کلاس» یک فرد لیست انتظار."""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, pk):
+        if not can_edit_menu(request.user, "new-leads"):
+            return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
+        try:
+            lead = NewLead.objects.select_related('term').get(pk=pk)
+        except NewLead.DoesNotExist:
+            return Response({'error': 'مورد پیدا نشد'}, status=status.HTTP_404_NOT_FOUND)
+        from class_management.models import Term
+        term_param = request.query_params.get('term_id')
+        term = Term.objects.filter(pk=term_param).first() if str(term_param or '').isdigit() else None
+        term = term or get_current_term() or lead.term
+        term_id = getattr(term, 'pk', None)
+        student = _new_lead_student(lead, create=False)
+        level, classes = _register_class_options(term_id, student, lead.requested_level, [], lead.gender)
+        return Response({
+            'id': lead.id, 'student_id': getattr(student, 'id', None),
+            'student_name': f'{lead.first_name} {lead.last_name}', 'level': level,
+            'term': term_id, 'term_title': getattr(term, 'title', ''), 'classes': classes,
+        })
+
+
+class NewLeadRegisterView(APIView):
+    """POST: ثبت قطعی فرد لیست انتظار در یک کلاس (class_slot_id، payment_method، tuition_amount) و علامت‌گذاری «ثبت‌نام شد»."""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, pk):
+        if not can_edit_menu(request.user, "new-leads"):
+            return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
+        from django.db import transaction
+        from class_management.models import ClassSlot, ClassSlotEnrollment
+        from class_management.carryover import register_student_in_slot
+        from class_management.disciplinary import disciplinary_guard
+        with transaction.atomic():
+            try:
+                lead = NewLead.objects.select_for_update().get(pk=pk)
+            except NewLead.DoesNotExist:
+                return Response({'error': 'مورد پیدا نشد'}, status=status.HTTP_404_NOT_FOUND)
+            try:
+                slot = ClassSlot.objects.select_for_update().get(pk=request.data.get('class_slot_id'))
+            except (ClassSlot.DoesNotExist, ValueError, TypeError):
+                return Response({'error': 'کلاس انتخاب‌شده پیدا نشد'}, status=status.HTTP_404_NOT_FOUND)
+            student = _new_lead_student(lead, create=True)
+            if not student:
+                return Response({'error': 'ساخت/پیدا کردن پرونده‌ی دانش‌آموز ممکن نشد'}, status=status.HTTP_400_BAD_REQUEST)
+            warning = disciplinary_guard(request, [student])
+            if warning:
+                transaction.set_rollback(True)
+                return warning
+            if not _slot_gender_ok(slot, student.gender or lead.gender):
+                transaction.set_rollback(True)
+                return Response({'error': 'جنسیت این فرد با کلاس انتخاب‌شده (دخترانه/پسرانه) مغایرت دارد؛ ثبت‌نام انجام نشد'}, status=status.HTTP_400_BAD_REQUEST)
+            payment_method = str(request.data.get('payment_method') or ClassSlotEnrollment.PaymentMethod.CASH)
+            if payment_method not in {v for v, _l in ClassSlotEnrollment.PaymentMethod.choices}:
+                return Response({'error': 'روش پرداخت نامعتبر است'}, status=status.HTTP_400_BAD_REQUEST)
+            try:
+                tuition_amount = max(int(request.data.get('tuition_amount') or 0), 0)
+            except (TypeError, ValueError):
+                return Response({'error': 'مبلغ نامعتبر است'}, status=status.HTTP_400_BAD_REQUEST)
+            _enrollment, error = register_student_in_slot(
+                student, slot, payment_method=payment_method, tuition_amount=tuition_amount,
+                pos_reference_code=str(request.data.get('pos_reference_code') or '')[:50],
+            )
+            if error:
+                transaction.set_rollback(True)
+                return Response({'error': error}, status=status.HTTP_400_BAD_REQUEST)
+            lead.status = NewLead.Status.REGISTERED
+            lead.registered_at = timezone.now()
+            lead.save()
+        return Response({'id': lead.id, 'status': lead.status, 'registered_class_number': slot.number})
 
 
 def _term_scoped_stats_qs(qs, term_id, resolved_status):
@@ -631,7 +721,7 @@ class DebtorListView(generics.ListCreateAPIView):
         if not can_edit_menu(self.request.user, "followups"):
             return Debtor.objects.none()
         purge_old_archives()
-        qs = Debtor.objects.all()
+        qs = Debtor.objects.all().select_related('student', 'term', 'assigned_to', 'source_slot', 'carried_from_term').prefetch_related('followups__followed_up_by')
         term_id = self.request.query_params.get('term_id')
         if term_id:
             from class_management.models import Term
@@ -811,6 +901,7 @@ def _register_class_options(term_id, student, level_hint, gray_slot_ids, gender_
     from class_management.views import _compute_level_suggestion, _normalize_level
     from level_tests.models import StandardLevel
     from types import SimpleNamespace
+    import re
 
     slots = list(ClassSlot.objects.filter(term_id=term_id).order_by('number', 'day_type', 'time_slot')) if term_id else []
     by_id = {slot.id: slot for slot in slots}
@@ -838,22 +929,47 @@ def _register_class_options(term_id, student, level_hint, gray_slot_ids, gender_
             return True
         return (slot.gender == ClassSlot.Gender.GIRLS and gender == 'female') or (slot.gender == ClassSlot.Gender.BOYS and gender == 'male')
 
+    def canon(code):
+        # «Teen 2»، «teen2»، «TEEN-2» و «Teen_2» همه یک سطح‌اند؛ فاصله/خط‌تیره/زیرخط و حروف بزرگ‌وکوچک نادیده گرفته می‌شوند.
+        return re.sub(r'[\s_\-]+', '', str(code or '')).lower()
+
+    db_levels = {canon(item.code): item for item in StandardLevel.objects.all()}
+    kids_prefixes = ('e', 's', 'g', 'u', 'm', 'h', 'i')
+
+    def natural_level(code):
+        """
+        (گروه سنی، شماره‌ی ترتیبی) مستقیم از خودِ کد سطح: teenstarter=۰، teen1..teen15، کودک E1..I5، بزرگسال ۱۰۱..۶۰۶.
+        ترتیبِ سطح‌ها فقط از روی همین کد گرفته می‌شود تا به ستون order جدول (که ممکن است خالی/تکراری/یک‌واحد جابه‌جا
+        باشد) یا به شکل نوشتن کد (فاصله/حروف) وابسته نباشد — وابستگی قبلی باعث می‌شد سطح خودِ فرد (مثلاً teen2)
+        پیشنهاد داده نشود و فهرست از teen3 شروع شود.
+        """
+        c = canon(code)
+        if c == 'teenstarter':
+            return 'teen', 0
+        m = re.fullmatch(r'teen(\d{1,2})', c)
+        if m:
+            return 'teen', int(m.group(1))
+        m = re.fullmatch(r'([a-z])(\d)', c)
+        if m and m.group(1) in kids_prefixes:
+            return 'kids', kids_prefixes.index(m.group(1)) * 10 + int(m.group(2))
+        if re.fullmatch(r'\d{3}', c):
+            return 'adult', int(c)
+        return None
+
     def level_meta(code):
         raw = str(code or '').strip()
         if not raw:
             return None
-        db_level = StandardLevel.objects.filter(code__iexact=raw).first()
+        natural = natural_level(raw)
+        db_level = db_levels.get(canon(raw))
         if db_level:
-            return db_level
-        normalized = raw.lower().replace(' ', '')
-        fallback_sequences = (
-            ('kids', [f'{prefix}{n}' for prefix in ('e', 's', 'g', 'u', 'm', 'h', 'i') for n in range(1, 6)]),
-            ('teen', ['teenstarter'] + [f'teen{n}' for n in range(1, 16)]),
-            ('adult', [str(n) for block in range(1, 7) for n in range(block * 100 + 1, block * 100 + 7)]),
-        )
-        for age_group, sequence in fallback_sequences:
-            if normalized in sequence:
-                return SimpleNamespace(age_group=age_group, order=sequence.index(normalized))
+            # گروه سنی از جدول سطوح استاندارد؛ ترتیب از خودِ کد (در صورت قابل‌تشخیص بودن) وگرنه ستون order
+            return SimpleNamespace(
+                age_group=db_level.age_group,
+                order=natural[1] if natural and natural[0] == db_level.age_group else db_level.order,
+            )
+        if natural:
+            return SimpleNamespace(age_group=natural[0], order=natural[1])
         return None
 
     target_level = _normalize_level(level)
@@ -866,7 +982,7 @@ def _register_class_options(term_id, student, level_hint, gray_slot_ids, gender_
         'adult': {'adult'},
     }
     slot_level_meta = {
-        str(slot.assigned_level or '').strip().lower(): level_meta(slot.assigned_level)
+        canon(slot.assigned_level): level_meta(slot.assigned_level)
         for slot in slots if slot.assigned_level
     }
 
@@ -874,9 +990,11 @@ def _register_class_options(term_id, student, level_hint, gray_slot_ids, gender_
         """سطح فعلی و همه‌ی سطح‌های بعدی؛ بعد از کودک، نوجوان و بعد از نوجوان، بزرگسال هم مجاز است."""
         if not progressive_levels:
             return True
-        slot_level = slot_level_meta.get(str(slot.assigned_level or '').strip().lower())
+        slot_level = slot_level_meta.get(canon(slot.assigned_level))
         if not current_standard:
-            return bool(slot_level and _normalize_level(slot.assigned_level) == target_level)
+            return bool(canon(slot.assigned_level) and canon(slot.assigned_level) == canon(level))
+        if canon(slot.assigned_level) == canon(level):
+            return True  # خودِ سطح فرد همیشه پیشنهاد می‌شود (مثلاً teen2 ← teen2 و بالاتر)
         if not slot_level:
             return False
         slot_age_rank = age_rank.get(slot_level.age_group)
@@ -892,7 +1010,7 @@ def _register_class_options(term_id, student, level_hint, gray_slot_ids, gender_
             continue
         if slot.id in gray_slot_ids:
             suggested.append(slot)
-        elif target_level and _normalize_level(slot.assigned_level) == target_level:
+        elif target_level and canon(slot.assigned_level) == canon(level):
             same_level.append(slot)
         elif progressive_levels and current_standard:
             progressive_others.append(slot)
@@ -915,10 +1033,10 @@ def _register_class_options(term_id, student, level_hint, gray_slot_ids, gender_
         # سطح‌ها از کم به زیاد؛ کلاس خاکستری فقط در سطح خودش اولویت دارد، نه اینکه
         # ترتیب سطح‌ها را به‌هم بزند. در یک سطح، شماره/ترتیب کلاس همان ترتیب قبلی است.
         ordered.sort(key=lambda pair: (
-            age_rank.get(slot_level_meta.get(str(pair[0].assigned_level or '').strip().lower()).age_group, 99)
-            if slot_level_meta.get(str(pair[0].assigned_level or '').strip().lower()) else 99,
-            slot_level_meta.get(str(pair[0].assigned_level or '').strip().lower()).order
-            if slot_level_meta.get(str(pair[0].assigned_level or '').strip().lower()) else 999999,
+            age_rank.get(slot_level_meta.get(canon(pair[0].assigned_level)).age_group, 99)
+            if slot_level_meta.get(canon(pair[0].assigned_level)) else 99,
+            slot_level_meta.get(canon(pair[0].assigned_level)).order
+            if slot_level_meta.get(canon(pair[0].assigned_level)) else 999999,
             0 if pair[1] == 'suggested' else 1,
             pair[0].number,
             pair[0].day_type,
@@ -931,7 +1049,7 @@ def _register_class_options(term_id, student, level_hint, gray_slot_ids, gender_
         item['suggested'] = tag == 'suggested'
         item['tuition_amount'] = slot_tuition(slot)
         item['suggestion_reason'] = 'اسم فرد در این کلاس به‌صورت «منتظر ثبت‌نام» (خاکستری) آمده است' if tag == 'suggested' else (
-            'هم‌سطح و هم‌جنسیت' if target_level and _normalize_level(slot.assigned_level) == target_level else ('از این سطح به بعد و گروه سنی بعدی' if progressive_levels and current_standard else 'سطح فرد مشخص نیست / کلاس هم‌جنسیت')
+            'هم‌سطح و هم‌جنسیت' if target_level and canon(slot.assigned_level) == canon(level) else ('از این سطح به بعد و گروه سنی بعدی' if progressive_levels and current_standard else 'سطح فرد مشخص نیست / کلاس هم‌جنسیت')
         )
         classes.append(item)
     return level, classes
@@ -1006,6 +1124,11 @@ class DebtorRegisterView(APIView):
             student = _resolve_debtor_student(debtor, create=True)
             if not student:
                 return Response({'error': 'ساخت/پیدا کردن پرونده‌ی دانش‌آموز ممکن نشد'}, status=status.HTTP_400_BAD_REQUEST)
+            from class_management.disciplinary import disciplinary_guard
+            warning = disciplinary_guard(request, [student], skip_debtor=True)
+            if warning:
+                transaction.set_rollback(True)
+                return warning
             if not _slot_gender_ok(slot, student.gender):
                 transaction.set_rollback(True)
                 return Response({'error': 'جنسیت این فرد با کلاس انتخاب‌شده (دخترانه/پسرانه) مغایرت دارد؛ ثبت‌نام انجام نشد'}, status=status.HTTP_400_BAD_REQUEST)
@@ -1120,7 +1243,7 @@ class FollowupStaffListView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        if not can_edit_menu(request.user, 'followups'):
+        if not (can_edit_menu(request.user, 'followups') or can_edit_menu(request.user, 'new-leads')):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         from accounts.models import User
         users = User.objects.filter(role__in=('admin', 'office', 'employee'), is_active=True).order_by('first_name', 'last_name')

@@ -28,6 +28,11 @@ class NewLeadSerializer(serializers.ModelSerializer):
     needs_level_test_marked_at_jalali = serializers.ReadOnlyField()
     age = serializers.ReadOnlyField()
     level_test = serializers.SerializerMethodField()
+    assigned_to_name = serializers.SerializerMethodField()
+
+    def get_assigned_to_name(self, obj):
+        u = obj.assigned_to
+        return (f'{u.first_name} {u.last_name}'.strip() or u.username) if u else None
 
     def get_followup1_by_name(self, obj):
         return obj.followup1_by.get_full_name() if obj.followup1_by else None
@@ -78,6 +83,7 @@ class NewLeadSerializer(serializers.ModelSerializer):
         model = NewLead
         fields = [
             'id', 'first_name', 'last_name', 'father_name', 'national_code', 'birth_date', 'birth_date_jalali', 'age', 'phone',
+            'requested_level', 'gender', 'assigned_to', 'assigned_to_name',
             'status', 'status_display', 'term', 'term_title',
             'followup1_at', 'followup1_at_jalali', 'followup1_by_name',
             'followup2_at', 'followup2_at_jalali', 'followup2_by_name',
@@ -176,6 +182,18 @@ def _norm_level(v):
 
 
 def _unregistered_enrollment_q(obj):
+    """نتیجه روی خودِ ردیف کش می‌شود تا برای هر ردیف فقط یک‌بار (نه چندبار) کوئری کاربر زده شود."""
+    cached = getattr(obj, '_enrollment_q_cache', None)
+    if cached is None:
+        cached = _compute_unregistered_enrollment_q(obj)
+        try:
+            obj._enrollment_q_cache = cached
+        except AttributeError:
+            pass
+    return cached
+
+
+def _compute_unregistered_enrollment_q(obj):
     """برای یک ردیف ثبت‌نام‌نشده، شناسهٔ دانش‌آموز متناظر را بدون ادغام هم‌نام‌ها برمی‌گرداند."""
     from django.db.models import Q
     from accounts.models import User

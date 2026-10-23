@@ -40,6 +40,7 @@ from .serializers import (
 from level_tests.models import LevelTest
 from accounts.menu_permissions import can_edit_menu, can_view_menu
 from .allocation import allocate_classes
+from .disciplinary import disciplinary_guard
 from .carryover import sync_carryover_followup_list, create_awaiting_debtor, finalize_registration, register_student_in_slot, gray_enrollments
 from .attendance import DEFAULT_SESSION_COUNT, jalali_date, roster_attendance_payload, session_date_and_sub, session_dates_for_slot, term_holiday_warnings_for_slot
 
@@ -379,7 +380,56 @@ class UpdateCarryoverStudentsView(APIView):
             'gender': slot.gender, 'gender_display': slot.get_gender_display(),
             'teacher_name': slot.teacher_name, 'assigned_level': slot.assigned_level,
             'is_online': slot.is_online,
+            'level_match': None,
         }
+
+    @staticmethod
+    def _allowed_levels(source):
+        """سطح مناسب برای ترم بعد: سطح بعدیِ سطح کلاس مبدأ (اگر سطح پایانی/ناشناخته باشد، همان سطح). خالی = سطح مبدأ نامشخص."""
+        raw = str(source.assigned_level or '').strip()
+        if not raw:
+            return set()
+        try:
+            nxt = _next_level_for_carryover(raw, {})[0]
+        except Exception:
+            nxt = raw
+        return {str(nxt or raw).strip().casefold()}
+
+    @staticmethod
+    def _rank_targets(source, candidates):
+        """
+        کلاس‌های مناسب ترم مقصد را برای یک کلاس مبدأ امتیاز می‌دهد (بالاتر = مناسب‌تر). فقط کلاس‌هایی پیشنهاد می‌شوند که
+        سطحشان با سطح فرد در ترم بعد (سطح بعدی سطح کلاس مبدأ) یکی باشد؛ جنسیت/مختلط پیش‌تر در candidates اعمال شده است.
+        سطوح تطبیق: ۱) منتقل‌شده از همین کلاس ۲) همان محل/روز/ساعت ۳) استاد ترم قبل ۴) همان استاد در همان روز و ساعت
+        ۵) همان روز و ساعت ۶) همان نوع روز.
+        """
+        def norm(value):
+            return str(value or '').strip().casefold()
+        allowed = UpdateCarryoverStudentsView._allowed_levels(source)
+        teacher = norm(source.teacher_name)
+        ranked = []
+        for slot in candidates:
+            if slot.is_online != source.is_online:
+                continue
+            if allowed and norm(slot.assigned_level) not in allowed:
+                continue
+            same_time = slot.day_type == source.day_type and slot.time_slot == source.time_slot
+            score, why = 1, 'سطح مناسب ترم بعد'
+            if slot.carried_from_slot_id == source.id:
+                score, why = 100, 'کلاس منتقل‌شده از همین کلاس'
+            elif slot.number == source.number and same_time:
+                score, why = 80, 'همان محل، روز و ساعت'
+            elif teacher and same_time and norm(slot.previous_teacher_name) == teacher:
+                score, why = 70, 'استاد ترم قبل مطابق است'
+            elif teacher and same_time and norm(slot.teacher_name) == teacher:
+                score, why = 60, 'همان استاد در همان روز و ساعت'
+            elif same_time:
+                score, why = 40, 'سطح مناسب در همان روز و ساعت'
+            elif slot.day_type == source.day_type:
+                score, why = 20, 'سطح مناسب با همان نوع روز'
+            ranked.append((slot, score, why))
+        ranked.sort(key=lambda item: (-item[1], item[0].number, item[0].time_slot or ''))
+        return ranked
 
     def get(self, request):
         source_term, target_term, error = self._get_terms(request)
@@ -396,24 +446,19 @@ class UpdateCarryoverStudentsView(APIView):
         for enrollment in enrollments:
             source = enrollment.class_slot
             student = enrollment.student
-            matches = [slot for slot in target_slots if slot.carried_from_slot_id == source.id]
-            if not matches:
-                matches = [slot for slot in target_slots
-                    if slot.number == source.number and slot.day_type == source.day_type
-                    and slot.time_slot == source.time_slot and slot.is_online == source.is_online]
-            if not matches and source.teacher_name.strip():
-                matches = [slot for slot in target_slots
-                    if slot.day_type == source.day_type and slot.time_slot == source.time_slot
-                    and slot.is_online == source.is_online
-                    and slot.previous_teacher_name.strip().casefold() == source.teacher_name.strip().casefold()]
             if student.gender == 'female':
                 gender_targets = [slot for slot in target_slots if slot.gender in (ClassSlot.Gender.GIRLS, ClassSlot.Gender.MIXED)]
             elif student.gender == 'male':
                 gender_targets = [slot for slot in target_slots if slot.gender in (ClassSlot.Gender.BOYS, ClassSlot.Gender.MIXED)]
             else:
                 gender_targets = list(target_slots)
-            preferred = [slot for slot in matches if slot in gender_targets]
-            suggested = preferred[0].id if len(preferred) == 1 else None
+            ranked = self._rank_targets(source, gender_targets)
+            matched_ids = {slot.id for slot, _score, _why in ranked}
+            gender_targets = [slot for slot, _score, _why in ranked] + [slot for slot in gender_targets if slot.id not in {r[0].id for r in ranked}]
+            suggested = ranked[0][0].id if ranked else None
+            suggestion_reason = ranked[0][2] if ranked else ''
+            if len(ranked) > 1 and ranked[1][1] == ranked[0][1]:
+                suggestion_reason += ' — چند کلاس مشابه وجود دارد؛ لطفاً بررسی کنید'
             # تکرار در هر کلاس ترم مقصد مانع انتقال است، نه فقط همان کلاس پیشنهادی.
             existing = ClassSlotEnrollment.objects.filter(
                 student=student, class_slot__term=target_term,
@@ -426,8 +471,10 @@ class UpdateCarryoverStudentsView(APIView):
                 'source_class': self._slot_payload(source),
                 'payment_verified': enrollment.payment_verified,
                 'payment_status': 'تأییدشده' if enrollment.payment_verified else 'در انتظار تأیید پرداخت',
-                'target_options': [self._slot_payload(slot) for slot in gender_targets],
+                'target_options': [dict(self._slot_payload(slot), level_match=(slot.id in matched_ids)) for slot in gender_targets],
+                'next_level': next(iter(self._allowed_levels(source)), ''),
                 'suggested_target_id': suggested,
+                'suggestion_reason': suggestion_reason,
                 'already_in_target': bool(existing),
                 'existing_target_class': self._slot_payload(existing.class_slot) if existing else None,
             })
@@ -1011,6 +1058,8 @@ class StudentClassSearchView(APIView):
                 'first_name': student.first_name or '',
                 'last_name': student.last_name or '',
                 'national_code': student.national_code or '',
+                'father_name': student.father_name or '',
+                'gender': student.gender or '',
                 'phone': student.phone or '',
                 'level': slot.assigned_level or '',
                 'class_number': slot.number,
@@ -1222,6 +1271,10 @@ class ClassSlotEnrollView(APIView):
             return Response({'error': 'دانش‌آموز پیدا نشد'}, status=status.HTTP_404_NOT_FOUND)
         except User.MultipleObjectsReturned:
             return Response({'error': 'بیش از یک دانش‌آموز با این مشخصات ثبت شده — با مدیر سیستم هماهنگ کنید'}, status=status.HTTP_400_BAD_REQUEST)
+
+        warning = disciplinary_guard(request, [student])
+        if warning:
+            return warning
 
         prior_enrollments = list(_same_term_enrollments(slot, [student.id]).filter(student=student))
         # اسم‌های خاکستری (منتظر ثبت‌نام) — چه در همین کلاس چه در کلاس‌های دیگرِ همین ترم — مانع ثبت‌نام نیستند
@@ -1734,6 +1787,11 @@ class ClassSlotExcelImportView(APIView):
                 candidates = eligible_after_wallet
             if not candidates:
                 return Response({'error': 'هیچ دانش‌آموز واجد شرایطی برای ثبت باقی نمانده است', 'rejected': rejected}, status=status.HTTP_400_BAD_REQUEST)
+            from django.contrib.auth import get_user_model as _gum
+            _flag_students = list(_gum().objects.filter(pk__in=[row['student_id'] for row in candidates if row.get('student_id')]))
+            warning = disciplinary_guard(request, _flag_students)
+            if warning:
+                return warning
             current_enrolled_count = ClassSlotEnrollment.objects.filter(class_slot=slot).count()
             force_over_capacity = str(request.data.get('force_over_capacity', '')).lower() in ('1', 'true', 'yes')
             new_seat_count = len([row for row in candidates if not row.get('awaiting_confirm')])

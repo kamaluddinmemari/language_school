@@ -372,6 +372,59 @@ class StudentListView(generics.ListCreateAPIView):
             return User.objects.none()
         return User.objects.filter(role='student').order_by('-id')
 
+    def get_serializer_context(self):
+        context = super().get_serializer_context()
+        if self.request.method == 'GET':
+            context['recent_registered_ids'] = self._recent_registered_ids()
+            context['student_class_info'] = self._student_class_info()
+        return context
+
+    @staticmethod
+    def _student_class_info():
+        """آخرین کلاس (جدیدترین ترم، سپس جدیدترین ثبت‌نام) هر دانش‌آموز؛ اسم‌های خاکستریِ قطعی‌نشده حساب نمی‌شوند."""
+        from class_management.models import ClassSlotEnrollment
+        rows = (
+            ClassSlotEnrollment.objects
+            .exclude(is_carryover=True, carryover_confirmed=False)
+            .select_related('class_slot', 'class_slot__term')
+            .order_by('class_slot__term__year', 'class_slot__term__term_number', 'created_at', 'id')
+        )
+        info = {}
+        for enrollment in rows.iterator():  # ردیف‌های جدیدتر روی قبلی می‌نشینند
+            slot = enrollment.class_slot
+            info[enrollment.student_id] = {
+                'level': (slot.assigned_level or '').strip(),
+                'teacher': (slot.teacher_name or '').strip(),
+                'day': (slot.day_type_display or '').strip() if slot.day_type else '',
+                'time': (slot.time_slot or '').strip(),
+                'class_number': slot.number,
+                'term': slot.term.title if slot.term_id else '',
+            }
+        return info
+
+    @staticmethod
+    def _recent_registered_ids():
+        """
+        شناسه‌ی دانش‌آموزانی که در «دو ترم اخیر» ثبت‌نام دارند. دو ترم اخیر = دو ترمِ آخرِ شروع‌شده (تاریخ شروع ≤ امروز)؛
+        ثبت‌نام در ترم‌های بعدتر (پیش‌ثبت‌نام) هم ثبت‌نام حساب می‌شود. اسم‌های خاکستریِ منتقل‌شده (ثبت‌نام قطعی‌نشده) حساب نمی‌شوند.
+        """
+        from django.utils import timezone as dj_tz
+        from class_management.models import ClassSlotEnrollment, Term
+        terms = list(Term.objects.order_by('year', 'term_number', 'id'))
+        today = dj_tz.localdate()
+        started = [t for t in terms if t.start_date and t.start_date <= today] or terms
+        if not started:
+            return set()
+        recent_start = started[-2] if len(started) >= 2 else started[0]
+        position = {t.id: i for i, t in enumerate(terms)}
+        cutoff = position[recent_start.id]
+        term_ids = [t.id for t in terms if position[t.id] >= cutoff]
+        return set(
+            ClassSlotEnrollment.objects.filter(class_slot__term_id__in=term_ids)
+            .exclude(is_carryover=True, carryover_confirmed=False)
+            .values_list('student_id', flat=True).distinct()
+        )
+
     def create(self, request, *args, **kwargs):
         if not can_edit_menu(request.user, 'students'):
             return Response({'error': 'فقط مدیر می‌تونه دانش‌آموز اضافه کنه'}, status=status.HTTP_403_FORBIDDEN)
@@ -804,7 +857,148 @@ class StudentDetailView(generics.RetrieveUpdateDestroyAPIView):
     def destroy(self, request, *args, **kwargs):
         if not can_edit_menu(request.user, 'students'):
             return Response({'error': 'فقط مدیر می‌تونه حذف کنه'}, status=status.HTTP_403_FORBIDDEN)
+        # هشدار پیش از حذف: دانش‌آموزِ دارای ثبت‌نام فعال/خصوصی/بدهکار/ثبت‌نام‌نشده/تعیین سطح؛ با تأیید (?confirm_disciplinary=1) حذف می‌شود
+        from class_management.disciplinary import student_delete_blockers
+        confirmed = str(request.query_params.get('confirm_disciplinary', '')).lower() in ('1', 'true', 'yes')
+        if not confirmed:
+            student = self.get_object()
+            reasons = student_delete_blockers(student)
+            if reasons:
+                name = f'{student.first_name} {student.last_name}'.strip() or student.username
+                return Response({
+                    'code': 'disciplinary_warning',
+                    'error': f'«{name}» به این دلایل نباید حذف شود:\n- ' + '\n- '.join(reasons) + '\nبا حذف، ثبت‌نام‌های ترم‌های تمام‌شده و نتایج تعیین سطح این فرد پاک می‌شوند؛ ثبت‌نام ترم جاری، بدهکاران، ثبت‌نام‌نشده‌ها و کلاس‌های خصوصی/جبرانی حفظ می‌شود.',
+                    'confirm_prompt': 'با وجود این هشدار، دانش‌آموز حذف شود؟',
+                    'reasons': reasons,
+                }, status=status.HTTP_409_CONFLICT)
         return super().destroy(request, *args, **kwargs)
+
+
+class StudentStatusCheckView(APIView):
+    """
+    GET ?q= : «وضعیت دانش‌آموز» — با نام، نام‌خانوادگی، کد ملی یا شماره همراه جستجو می‌کند و برای هر فرد
+    «تأیید» (سبز) یا «رد» (قرمز) همراه دلیل برمی‌گرداند: بدهکار از قبل، جزو ثبت‌نام‌نشده‌ها، دو تعهدنامهٔ انضباطی یا بیشتر.
+    فقط جستجو می‌کند و چیزی را تغییر نمی‌دهد.
+    """
+    permission_classes = [IsAuthenticated]
+    MAX_RESULTS = 20
+
+    @staticmethod
+    def _variants(token):
+        fa = token.replace('ي', 'ی').replace('ك', 'ک')
+        return {token, fa, fa.replace('ی', 'ي').replace('ک', 'ك')}
+
+    def get(self, request):
+        if request.user.role not in {'admin', 'office', 'employee', 'evaluator'}:
+            return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
+        from django.db.models import Q
+        from class_management.disciplinary import person_reasons, pseudo_person
+        from leads.models import Debtor, UnregisteredStudent
+        raw = ' '.join(str(request.query_params.get('q', '')).translate(str.maketrans('۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩', '01234567890123456789')).split())
+        if len(raw) < 2:
+            return Response({'query': raw, 'results': []})
+        compact = raw.replace(' ', '')
+        is_number = compact.isdigit()
+
+        def text_q(prefix_first, prefix_last):
+            cond = Q()
+            for token in raw.split(' '):
+                token_q = Q()
+                for variant in self._variants(token):
+                    token_q |= Q(**{f'{prefix_first}__icontains': variant}) | Q(**{f'{prefix_last}__icontains': variant})
+                cond &= token_q
+            return cond
+
+        people = {}
+
+        def key_of(first, last, code, phone):
+            code = _form_archive_digits(code)
+            if code:
+                return 'c' + code
+            name = _form_archive_label(f'{first} {last}')
+            phone = _form_archive_phone(phone)
+            return f'n{name}|{phone}'
+
+        def add(person, source):
+            key = key_of(person.first_name, person.last_name, person.national_code, person.phone)
+            entry = people.get(key)
+            if entry is None:
+                people[key] = {'person': person, 'sources': {source}}
+            else:
+                entry['sources'].add(source)
+                if getattr(person, 'id', None) and not getattr(entry['person'], 'id', None):
+                    entry['person'] = person
+
+        if is_number:
+            students = User.objects.filter(role='student').filter(Q(national_code__contains=compact) | Q(phone__contains=compact) | Q(phone2__contains=compact))
+            debtors = Debtor.objects.filter(phone__contains=compact)
+            unregistered = UnregisteredStudent.objects.filter(Q(national_code__contains=compact) | Q(phone__contains=compact))
+        else:
+            students = User.objects.filter(role='student').filter(text_q('first_name', 'last_name'))
+            debtors = Debtor.objects.filter(text_q('first_name', 'last_name'))
+            unregistered = UnregisteredStudent.objects.filter(text_q('first_name', 'last_name'))
+        student_names = set()
+        for student in students.order_by('last_name', 'first_name')[:self.MAX_RESULTS]:
+            add(student, 'student')
+            student_names.add(_form_archive_label(f'{student.first_name} {student.last_name}'))
+        # ردیف‌های بدهکار/ثبت‌نام‌نشده‌ای که همان دانش‌آموزِ پیداشده‌اند دوباره جدا نشان داده نمی‌شوند (دلیلشان در همان فرد می‌آید)
+        for debtor in debtors[:self.MAX_RESULTS]:
+            if _form_archive_label(f'{debtor.first_name} {debtor.last_name}') in student_names:
+                continue
+            add(pseudo_person(debtor.first_name, debtor.last_name, '', debtor.phone, getattr(debtor, 'student_id', None)), 'debtor')
+        for item in unregistered[:self.MAX_RESULTS]:
+            if _form_archive_label(f'{item.first_name} {item.last_name}') in student_names:
+                continue
+            add(pseudo_person(item.first_name, item.last_name, item.national_code, item.phone), 'unregistered')
+
+        # کلاس‌های ترم جاری برای دانش‌آموزان پیداشده (سطح، شماره کلاس، روز، ساعت، استاد)
+        from class_management.models import ClassSlotEnrollment
+        from leads.models import get_current_term
+        term = get_current_term()
+        classes_by_student = {}
+        student_ids = [getattr(e['person'], 'id', None) for e in people.values() if getattr(e['person'], 'role', None) == 'student']
+        if term and student_ids:
+            for enrollment in ClassSlotEnrollment.objects.filter(class_slot__term=term, student_id__in=student_ids).select_related('class_slot').order_by('class_slot__number'):
+                slot = enrollment.class_slot
+                classes_by_student.setdefault(enrollment.student_id, []).append({
+                    'class_number': slot.number, 'level': slot.assigned_level or '', 'day': slot.day_type_display,
+                    'time': slot.time_slot or '', 'teacher': slot.teacher_name or '',
+                })
+        results = []
+        for entry in list(people.values())[:self.MAX_RESULTS]:
+            person = entry['person']
+            reasons, _count = person_reasons(person)
+            is_student = getattr(person, 'role', None) == 'student'
+            results.append({
+                'term_title': term.title if term else '',
+                'classes': classes_by_student.get(getattr(person, 'id', None), []) if is_student else [],
+                'name': f'{person.first_name} {person.last_name}'.strip(),
+                'national_code': person.national_code or '',
+                'phone': person.phone or '',
+                'is_student': 'student' in entry['sources'],
+                'approved': not reasons,
+                'verdict': 'approved' if not reasons else 'rejected',
+                'reasons': [r['text'] for r in reasons],
+            })
+        results.sort(key=lambda r: (r['approved'], r['name']))
+        return Response({'query': raw, 'results': results})
+
+
+class StudentDeleteCheckView(APIView):
+    """POST {ids:[...]}: پیش‌بررسی حذف گروهی — فهرست دانش‌آموزانی که دلیل هشدار دارند (بدون حذف چیزی)."""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        if not can_edit_menu(request.user, 'students'):
+            return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
+        from class_management.disciplinary import student_delete_blockers
+        ids = [int(i) for i in (request.data.get('ids') or []) if str(i).isdigit()]
+        flagged = []
+        for student in User.objects.filter(role='student', pk__in=ids):
+            reasons = student_delete_blockers(student)
+            if reasons:
+                flagged.append({'id': student.id, 'name': f'{student.first_name} {student.last_name}'.strip() or student.username, 'reasons': reasons})
+        return Response({'flagged': flagged, 'checked': len(ids)})
 
 
 class UserRoleView(APIView):
@@ -1072,7 +1266,7 @@ class StaffCredentialsDetailView(APIView):
 
 
 FORM_ARCHIVE_ROLES = {'admin', 'office', 'employee', 'evaluator'}
-FORM_ARCHIVE_TYPES = {'disciplinary', 'refund'}
+FORM_ARCHIVE_TYPES = {'disciplinary', 'refund', 'certificate'}
 
 
 def _form_archive_payload(request, archive):
@@ -1135,6 +1329,63 @@ def _form_archive_same_refund_period(left, right):
         and _form_archive_label(left.get('level')) == _form_archive_label(right.get('level'))
         and _form_archive_label(left.get('term')) == _form_archive_label(right.get('term'))
     )
+
+
+def _remove_refunded_student_from_class(data):
+    """
+    با ثبت فرم استرداد، فرد به‌صورت خودکار از کلاس همان ترم حذف می‌شود (لیست کلاسی/حضور و غیاب).
+    تشخیص فرد: student_id (اگر از جستجوی ثبت‌نام‌شده‌ها انتخاب شده باشد)، وگرنه کد ملی، موبایل، و در نهایت
+    نام کامل (فقط اگر دقیقاً یک دانش‌آموز با آن نام باشد). تشخیص ترم: slot_id، وگرنه عنوان ترم در فرم.
+    خروجی: فهرست کلاس‌هایی که فرد از آن‌ها حذف شد.
+    """
+    from django.contrib.auth import get_user_model
+    from class_management.models import ClassSlotEnrollment, ClassSlot, Term
+    data = data if isinstance(data, dict) else {}
+    User = get_user_model()
+    students = User.objects.filter(role='student')
+    student = None
+    try:
+        student_id = int(data.get('student_id'))
+    except (TypeError, ValueError):
+        student_id = None
+    if student_id:
+        student = students.filter(pk=student_id).first()
+    if not student:
+        code = _form_archive_digits(data.get('national_code'))
+        phone = _form_archive_phone(data.get('phone'))
+        matches = []
+        if code:
+            matches = [u for u in students.filter(national_code__isnull=False).exclude(national_code='') if _form_archive_digits(u.national_code) == code]
+        if len(matches) != 1 and phone:
+            matches = [u for u in students.exclude(phone='') if _form_archive_phone(u.phone) == phone]
+        if len(matches) != 1:
+            name = _form_archive_label(f"{data.get('first_name') or ''} {data.get('last_name') or ''}")
+            if name:
+                matches = [u for u in students if _form_archive_label(f'{u.first_name} {u.last_name}') == name]
+        if len(matches) == 1:
+            student = matches[0]
+    if not student:
+        return []
+
+    enrollments = ClassSlotEnrollment.objects.filter(student=student).select_related('class_slot')
+    slot = None
+    try:
+        slot = ClassSlot.objects.filter(pk=int(data.get('slot_id'))).first()
+    except (TypeError, ValueError):
+        slot = None
+    if slot:
+        enrollments = enrollments.filter(class_slot__term_id=slot.term_id) if slot.term_id else enrollments.filter(class_slot_id=slot.id)
+    else:
+        label = _form_archive_label(data.get('term'))
+        term = next((t for t in Term.objects.all() if _form_archive_label(t.title) == label), None) if label else None
+        if not term:
+            return []
+        enrollments = enrollments.filter(class_slot__term=term)
+    removed = []
+    for enrollment in list(enrollments):
+        removed.append({'slot_id': enrollment.class_slot_id, 'class_number': enrollment.class_slot.number, 'student_id': student.id})
+        enrollment.delete()
+    return removed
 
 
 def _form_archive_image(request):
@@ -1223,7 +1474,11 @@ class FormArchiveListCreateView(APIView):
             if archive:
                 return Response({'error': f'شمارهٔ {number} قبلاً برای فرد دیگری ثبت شده است.'}, status=status.HTTP_409_CONFLICT)
             raise
-        return Response(_form_archive_payload(request, archive), status=status.HTTP_201_CREATED)
+        payload = _form_archive_payload(request, archive)
+        if document_type == 'refund':
+            removed = _remove_refunded_student_from_class(data)
+            payload['removed_from_classes'] = removed
+        return Response(payload, status=status.HTTP_201_CREATED)
 
 
 class FormArchiveDetailView(APIView):

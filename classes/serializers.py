@@ -54,6 +54,13 @@ class StudentInfoSerializer(serializers.ModelSerializer):
         model = User
         fields = ['id', 'first_name', 'last_name', 'phone', 'phone2', 'national_code']
 
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        # دانش‌آموزِ حذف‌شده: سوابق خصوصی/جبرانی‌اش به پروندهٔ بایگانی‌شده وصل است و کد ملی در فیلد جدا نگه‌داری می‌شود
+        if getattr(instance, 'role', '') == 'archived' and not data.get('national_code'):
+            data['national_code'] = instance.archived_national_code or ''
+        return data
+
 
 class TeacherInfoSerializer(serializers.ModelSerializer):
     class Meta:
