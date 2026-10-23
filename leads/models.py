@@ -1,3 +1,4 @@
+from datetime import time as datetime_time
 from django.db import models
 from django.utils import timezone
 from accounts.models import User
@@ -525,3 +526,41 @@ class ExcelDropout(models.Model):
     class Meta:
         ordering = ['-created_at']
         constraints = [models.UniqueConstraint(fields=['student', 'from_term', 'to_term'], name='uniq_excel_dropout_pair')]
+
+
+class EmployeeFollowupDeadlineRule(models.Model):
+    """موعد مشترک پیگیری‌های کارمندان برای یک ترم؛ تاریخ ثابت یا پایان هفتهٔ N ترم."""
+    class Mode(models.TextChoices):
+        DATE = 'date', 'تاریخ مشخص'
+        TERM_WEEK = 'term_week', 'هفتهٔ ترم'
+
+    term = models.ForeignKey(
+        'class_management.Term', on_delete=models.CASCADE,
+        related_name='employee_followup_deadline_rules',
+    )
+    enabled = models.BooleanField(default=False)
+    mode = models.CharField(max_length=12, choices=Mode.choices, default=Mode.DATE)
+    deadline_date = models.DateField(null=True, blank=True)
+    deadline_time = models.TimeField(default=datetime_time(23, 59))
+    deadline_week = models.PositiveSmallIntegerField(null=True, blank=True)
+    updated_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=['term'], name='unique_employee_followup_deadline_per_term')]
+
+    def resolved_deadline_at(self):
+        if not self.enabled:
+            return None
+        due_date = self.deadline_date
+        if self.mode == self.Mode.TERM_WEEK and self.deadline_week and self.term_id:
+            from datetime import timedelta
+            due_date = self.term.start_date + timedelta(days=(int(self.deadline_week) * 7) - 1)
+            if self.term.end_date and due_date > self.term.end_date:
+                due_date = self.term.end_date
+        if not due_date:
+            return None
+        from datetime import datetime
+        naive = datetime.combine(due_date, self.deadline_time)
+        return timezone.make_aware(naive, timezone.get_current_timezone()) if timezone.is_naive(naive) else naive

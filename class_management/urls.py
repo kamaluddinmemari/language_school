@@ -25,6 +25,10 @@ from .views import (
     TeacherCompensationReportView,
     TermRetentionFollowUpView, LevelProgressionSkipReportView,
 )
+from .survey import (
+    SurveyAssignView, SurveyDeadlineAlertsView, SurveyDeadlineView, SurveyDeadlinesView,
+    SurveyListView, SurveyResponseView, SurveyReportExcelView, SurveyReportView, SurveyQuestionView,
+)
 
 urlpatterns = [
     path('class-management/slots/', ClassSlotListView.as_view(), name='class_slot_list'),
@@ -82,6 +86,16 @@ urlpatterns = [
     path('class-management/dropout-extract/register/', DropoutExtractRegisterView.as_view(), name='dropout_extract_register'),
     path('class-management/dropout-extract/followups/', DropoutExtractFollowUpView.as_view(), name='dropout_extract_followups'),
     path('class-management/dropout-extract/stats/', DropoutStatsView.as_view(), name='dropout_extract_stats'),
+    path('class-management/surveys/', SurveyListView.as_view(), name='class_survey_lists'),
+    path('class-management/surveys/deadlines/', SurveyDeadlinesView.as_view(), name='class_survey_deadlines'),
+    path('class-management/surveys/deadline-alerts/', SurveyDeadlineAlertsView.as_view(), name='class_survey_deadline_alerts'),
+    path('class-management/surveys/<int:survey_id>/responses/', SurveyResponseView.as_view(), name='class_survey_response'),
+    path('class-management/surveys/<int:survey_id>/assign/', SurveyAssignView.as_view(), name='class_survey_assign'),
+    path('class-management/surveys/<int:survey_id>/deadline/', SurveyDeadlineView.as_view(), name='class_survey_deadline'),
+    path('class-management/surveys/<int:survey_id>/report.xlsx/', SurveyReportExcelView.as_view(), name='class_survey_report_excel'),
+    path('class-management/surveys/<int:survey_id>/report/', SurveyReportView.as_view(), name='class_survey_report'),
+    path('class-management/surveys/questions/', SurveyQuestionView.as_view(), name='class_survey_questions'),
+    path('class-management/surveys/questions/<int:pk>/', SurveyQuestionView.as_view(), name='class_survey_question_detail'),
     path('class-management/terms/', TermListView.as_view(), name='term_list'),
     path('class-management/terms/<int:pk>/', TermDetailView.as_view(), name='term_detail'),
     path('class-management/terms/<int:term_id>/holidays/', TermHolidayListView.as_view(), name='term_holiday_list'),

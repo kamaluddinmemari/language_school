@@ -957,3 +957,71 @@ class DropoutExtractFollowUp(models.Model):
 
     def __str__(self):
         return f'{self.national_code} — {self.term_id}'
+
+
+class ClassSurveyList(models.Model):
+    """نمونهٔ تصادفیِ ذخیره‌شده برای نظرسنجی کلاس‌های یک ترم."""
+    name = models.CharField(max_length=200)
+    term = models.ForeignKey(Term, on_delete=models.CASCADE, related_name='class_survey_lists')
+    percentage = models.PositiveSmallIntegerField(default=20)
+    rows = models.JSONField(default=list, blank=True)
+    # تنظیمات مهلت در سطح لیست نگه‌داری می‌شوند؛ due_at هر ردیف snapshot قابل‌گزارش آن است.
+    deadline_enabled = models.BooleanField(default=False)
+    deadline_mode = models.CharField(
+        max_length=12,
+        choices=[
+            ('none', 'بدون مهلت'),
+            ('date', 'تاریخ ثابت'),
+            ('automatic', 'خودکار از تاریخ ایجاد'),
+            ('session', 'بر اساس جلسهٔ کلاس'),
+        ],
+        default='none',
+    )
+    deadline_at = models.DateTimeField(null=True, blank=True)
+    deadline_days = models.PositiveSmallIntegerField(null=True, blank=True)
+    deadline_session_number = models.PositiveSmallIntegerField(null=True, blank=True)
+    use_teacher_class_sampling = models.BooleanField(default=False)
+    teacher_class_percentage = models.PositiveSmallIntegerField(null=True, blank=True)
+    created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return self.name
+
+
+class ClassSurveyQuestion(models.Model):
+    AGE_GROUPS = [('all', 'همه'), ('kids', 'کودک'), ('teen', 'نوجوان'), ('adult', 'بزرگسال')]
+    age_group = models.CharField(max_length=10, choices=AGE_GROUPS, default='all')
+    text = models.CharField(max_length=500)
+    sort_order = models.PositiveSmallIntegerField(default=0)
+    active = models.BooleanField(default=True)
+
+    class Meta:
+        ordering = ['age_group', 'sort_order', 'id']
+
+
+class ClassSurveyResponse(models.Model):
+    survey_list = models.ForeignKey(ClassSurveyList, on_delete=models.CASCADE, related_name='responses')
+    student = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=keep_current_term_records, related_name='+')
+    class_slot = models.ForeignKey(ClassSlot, on_delete=models.CASCADE, related_name='+')
+    assigned_to = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
+    answers = models.JSONField(default=dict, blank=True)
+    completed = models.BooleanField(default=False)
+    respondent_name = models.CharField(max_length=200, blank=True)
+    call_status = models.CharField(
+        max_length=12,
+        choices=[('', 'ثبت نشده'), ('answered', 'پاسخ داده شد'), ('no_answer', 'پاسخ نداد')],
+        blank=True,
+        default='',
+    )
+    contacted_at = models.DateTimeField(null=True, blank=True)
+    due_at = models.DateTimeField(null=True, blank=True)
+    updated_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=['survey_list', 'student', 'class_slot'], name='unique_survey_response_row')]
+        indexes = [models.Index(fields=['survey_list', 'completed', 'due_at'])]

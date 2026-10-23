@@ -35,19 +35,8 @@ ARCHIVE_KEEP_DAYS = 5
 
 
 def purge_old_archives():
-    """
-    بدهکارِ تسویه‌شده و فرد ثبت‌نام‌شده فقط ۵ روز (از زمان تسویه/ثبت‌نام) در بایگانی می‌ماند و بعد خودکار حذف می‌شود.
-    هر بار که فهرست‌ها باز می‌شوند اجرا می‌شود (بدون نیاز به زمان‌بند).
-    """
-    from datetime import timedelta
-    from django.db.models import Q
-    cutoff = timezone.now() - timedelta(days=ARCHIVE_KEEP_DAYS)
-    Debtor.objects.filter(status=Debtor.Status.SETTLED).filter(
-        Q(settled_at__lt=cutoff) | Q(settled_at__isnull=True, updated_at__lt=cutoff)
-    ).delete()
-    UnregisteredStudent.objects.filter(status=UnregisteredStudent.Status.REGISTERED).filter(
-        Q(registered_at__lt=cutoff) | Q(registered_at__isnull=True, updated_at__lt=cutoff)
-    ).delete()
+    """سوابق حل‌شده برای بایگانی بر اساس ترم نگهداری می‌شوند و اینجا سخت‌حذف نمی‌شوند."""
+    return None
 
 
 
@@ -58,7 +47,11 @@ class NewLeadListView(generics.ListCreateAPIView):
     def get_queryset(self):
         if not can_edit_menu(self.request.user, "new-leads"):
             return NewLead.objects.none()
-        return NewLead.objects.all().select_related('assigned_to').prefetch_related('followups__followed_up_by')
+        qs = NewLead.objects.all().select_related('assigned_to', 'term').prefetch_related('followups__followed_up_by')
+        term_id = self.request.query_params.get('term_id')
+        if term_id:
+            return qs.filter(term_id=term_id)
+        return qs
 
     def get_serializer_context(self):
         """
@@ -239,10 +232,13 @@ class UnregisteredStudentListView(generics.ListCreateAPIView):
             earlier_terms = Term.objects.filter(
                 Q(year__lt=term.year) | Q(year=term.year, term_number__lt=term.term_number)
             )
-            qs = qs.filter(
-                Q(term_id=term_id) |
-                (Q(term__in=earlier_terms) & ~Q(status=UnregisteredStudent.Status.REGISTERED))
-            )
+            if str(self.request.query_params.get('archive') or '').lower() in ('1', 'true', 'yes'):
+                qs = qs.filter(term_id=term_id)
+            else:
+                qs = qs.filter(
+                    Q(term_id=term_id) |
+                    (Q(term__in=earlier_terms) & ~Q(status=UnregisteredStudent.Status.REGISTERED))
+                )
         return qs
 
     def create(self, request, *args, **kwargs):
@@ -561,7 +557,7 @@ class NewLeadRegisterView(APIView):
         return Response({'id': lead.id, 'status': lead.status, 'registered_class_number': slot.number})
 
 
-def _term_scoped_stats_qs(qs, term_id, resolved_status):
+def _term_scoped_stats_qs(qs, term_id, resolved_status, archive=False):
     """آمار هم‌دامنه با لیست: ترم انتخاب‌شده + موارد حل‌نشده‌ی ترم‌های قبل (مثل UnregisteredStudentListView/DebtorListView)."""
     if not term_id:
         return qs
@@ -569,6 +565,8 @@ def _term_scoped_stats_qs(qs, term_id, resolved_status):
     term = Term.objects.filter(pk=term_id).first()
     if not term:
         return qs.none()
+    if archive:
+        return qs.filter(term_id=term.pk)
     earlier = Term.objects.filter(Q(year__lt=term.year) | Q(year=term.year, term_number__lt=term.term_number))
     return qs.filter(Q(term_id=term.pk) | (Q(term__in=earlier) & ~Q(status=resolved_status)))
 
@@ -579,7 +577,8 @@ class UnregisteredStudentStatsView(APIView):
     def get(self, request):
         if not can_edit_menu(request.user, "followups"):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
-        qs = _term_scoped_stats_qs(UnregisteredStudent.objects.all(), request.query_params.get('term_id'), UnregisteredStudent.Status.REGISTERED)
+        archive = str(request.query_params.get('archive') or '').lower() in ('1', 'true', 'yes')
+        qs = _term_scoped_stats_qs(UnregisteredStudent.objects.all(), request.query_params.get('term_id'), UnregisteredStudent.Status.REGISTERED, archive=archive)
         tracking = qs.filter(status=UnregisteredStudent.Status.TRACKING)
         registered = qs.filter(status=UnregisteredStudent.Status.REGISTERED)
         now_local = timezone.localtime(timezone.now())
@@ -599,7 +598,7 @@ class UnregisteredStudentStatsView(APIView):
             'tracking_count': tracking.count(),
             'registered_count': registered.count(),
             'total_tuition_potential': sum(potential_price(s) for s in tracking) + sum(
-                d.debt_amount for d in _term_scoped_stats_qs(Debtor.objects.all(), request.query_params.get('term_id'), Debtor.Status.SETTLED).filter(status=Debtor.Status.PENDING, awaiting_registration=True)),
+                d.debt_amount for d in _term_scoped_stats_qs(Debtor.objects.all(), request.query_params.get('term_id'), Debtor.Status.SETTLED, archive=archive).filter(status=Debtor.Status.PENDING, awaiting_registration=True)),
             'total_tuition_registered': sum(s.tuition_price or 0 for s in registered),
             'generated_at_jalali': jdatetime.datetime.fromgregorian(datetime=now_local).strftime('%Y/%m/%d - %H:%M:%S'),
         })
@@ -733,10 +732,13 @@ class DebtorListView(generics.ListCreateAPIView):
             earlier_terms = Term.objects.filter(
                 Q(year__lt=term.year) | Q(year=term.year, term_number__lt=term.term_number)
             )
-            qs = qs.filter(
-                Q(term_id=term_id) |
-                (Q(term__in=earlier_terms) & ~Q(status=Debtor.Status.SETTLED))
-            )
+            if str(self.request.query_params.get('archive') or '').lower() in ('1', 'true', 'yes'):
+                qs = qs.filter(term_id=term_id)
+            else:
+                qs = qs.filter(
+                    Q(term_id=term_id) |
+                    (Q(term__in=earlier_terms) & ~Q(status=Debtor.Status.SETTLED))
+                )
         return qs
 
     def create(self, request, *args, **kwargs):
@@ -1184,7 +1186,8 @@ class DebtorStatsView(APIView):
     def get(self, request):
         if not can_edit_menu(request.user, "followups"):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
-        qs = _term_scoped_stats_qs(Debtor.objects.all(), request.query_params.get('term_id'), Debtor.Status.SETTLED)
+        archive = str(request.query_params.get('archive') or '').lower() in ('1', 'true', 'yes')
+        qs = _term_scoped_stats_qs(Debtor.objects.all(), request.query_params.get('term_id'), Debtor.Status.SETTLED, archive=archive)
         # «منتظر ثبت‌نام»های انتقالی در واقع ثبت‌نام‌نشده‌اند و در جمع بدهی‌ها نمی‌آیند
         pending = qs.filter(status=Debtor.Status.PENDING, awaiting_registration=False)
         settled = qs.filter(status=Debtor.Status.SETTLED)
@@ -1453,3 +1456,108 @@ class PersonFinanceStatusView(APIView):
             'unregistered': [self._unreg_row(u) for u in unreg.select_related('reported_slot', 'submitted_by')[:5]],
             'debtors': [{'id': d.id, 'debt_amount': d.debt_amount, 'term_title': d.term_title, 'awaiting_registration': d.awaiting_registration} for d in debt[:5]],
         })
+
+
+class EmployeeFollowupDeadlineView(APIView):
+    """تنظیم اختیاری موعد مشترک پنج نوع پیگیری برای یک ترم."""
+    permission_classes = [IsAuthenticated]
+
+    def _allowed(self, user):
+        return can_edit_menu(user, 'followups') or can_edit_menu(user, 'new-leads')
+
+    def _serialize(self, rule, term):
+        from datetime import timedelta
+        duration = max(1, (term.end_date - term.start_date).days + 1)
+        week_count = max(1, (duration + 6) // 7)
+        due = rule.resolved_deadline_at() if rule else None
+        due_jalali = None
+        if due:
+            import jdatetime
+            due_jalali = jdatetime.datetime.fromgregorian(datetime=timezone.localtime(due)).strftime('%Y/%m/%d - %H:%M')
+        return {
+            'term_id': term.pk, 'term_title': term.title,
+            'enabled': bool(rule.enabled) if rule else False,
+            'mode': rule.mode if rule else 'date',
+            'deadline_date': rule.deadline_date.isoformat() if rule and rule.deadline_date else '',
+            'deadline_time': str(rule.deadline_time)[:5] if rule and rule.deadline_time else '23:59',
+            'deadline_week': rule.deadline_week if rule and rule.deadline_week else 1,
+            'week_count': week_count,
+            'due_at': due.isoformat() if due else '', 'due_at_jalali': due_jalali or '',
+            'is_overdue': bool(due and due <= timezone.now()),
+        }
+
+    def get(self, request):
+        if not self._allowed(request.user):
+            return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
+        from class_management.models import Term
+        term = Term.objects.filter(pk=request.query_params.get('term_id')).first()
+        if not term:
+            return Response({'error': 'ترم انتخاب‌شده پیدا نشد'}, status=status.HTTP_404_NOT_FOUND)
+        from .models import EmployeeFollowupDeadlineRule
+        rule = EmployeeFollowupDeadlineRule.objects.filter(term=term).first()
+        return Response(self._serialize(rule, term))
+
+    def post(self, request):
+        if not self._allowed(request.user):
+            return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
+        from class_management.models import Term
+        from .models import EmployeeFollowupDeadlineRule
+        term = Term.objects.filter(pk=request.data.get('term_id')).first()
+        if not term:
+            return Response({'error': 'ترم انتخاب‌شده پیدا نشد'}, status=status.HTTP_404_NOT_FOUND)
+        enabled = str(request.data.get('enabled', '')).lower() in ('1', 'true', 'yes', 'on')
+        mode = str(request.data.get('mode') or EmployeeFollowupDeadlineRule.Mode.DATE)
+        if mode not in (EmployeeFollowupDeadlineRule.Mode.DATE, EmployeeFollowupDeadlineRule.Mode.TERM_WEEK):
+            return Response({'error': 'مبنای ددلاین نامعتبر است'}, status=status.HTTP_400_BAD_REQUEST)
+        duration = max(1, (term.end_date - term.start_date).days + 1)
+        week_count = max(1, (duration + 6) // 7)
+        due_date = None
+        due_time = None
+        due_week = None
+        if enabled and mode == EmployeeFollowupDeadlineRule.Mode.DATE:
+            from django.utils.dateparse import parse_date, parse_time
+            due_date = parse_date(str(request.data.get('deadline_date') or ''))
+            due_time = parse_time(str(request.data.get('deadline_time') or '23:59'))
+            if not due_date or not due_time:
+                return Response({'error': 'تاریخ و ساعت ددلاین را کامل وارد کنید'}, status=status.HTTP_400_BAD_REQUEST)
+        elif enabled:
+            try:
+                due_week = int(request.data.get('deadline_week'))
+            except (TypeError, ValueError):
+                due_week = 0
+            if due_week < 1 or due_week > week_count:
+                return Response({'error': f'شماره هفته باید بین ۱ تا {week_count} باشد'}, status=status.HTTP_400_BAD_REQUEST)
+            from datetime import time
+            due_time = time(23, 59)
+        rule, _ = EmployeeFollowupDeadlineRule.objects.get_or_create(term=term)
+        rule.enabled = enabled
+        rule.mode = mode
+        rule.deadline_date = due_date
+        if due_time is None:
+            from datetime import time
+            due_time = time(23, 59)
+        rule.deadline_time = due_time
+        rule.deadline_week = due_week
+        rule.updated_by = request.user
+        rule.save()
+        return Response(self._serialize(rule, term))
+
+
+class EmployeeFollowupTermListView(APIView):
+    """فهرست ترم‌ها برای Hub پیگیری، با همان مجوزهای دسترسی به پیگیری‌ها."""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        if not (can_edit_menu(request.user, 'followups') or can_edit_menu(request.user, 'new-leads')):
+            return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
+        from class_management.models import Term
+        return Response([
+            {
+                'id': term.id, 'year': term.year, 'term_number': term.term_number,
+                'title': term.title, 'start_date': term.start_date.isoformat(),
+                'end_date': term.end_date.isoformat(),
+                'start_date_jalali': term.start_date_jalali,
+                'end_date_jalali': term.end_date_jalali,
+            }
+            for term in Term.objects.all().order_by('-start_date', '-id')
+        ])
