@@ -7,7 +7,7 @@ from .views import (
     DropoutStudentListView, DropoutStudentFollowupView,
     DebtorListView, DebtorDetailView, DebtorFollowupView, DebtorSettleView, DebtorRegisterView, DebtorRegisterOptionsView, DebtorStatsView,
     DiscountedPersonListView, DiscountedPersonDetailView, FollowupStaffListView, EmployeeFollowupDeadlineView,
-    EmployeeFollowupTermListView,
+    EmployeeFollowupTermListView, EmployeeFollowupProgressView,
     UnregisteredMoveOptionsView, UnregisteredMoveView,
 )
 
@@ -40,6 +40,7 @@ urlpatterns = [
 
     path('leads/followup-staff/', FollowupStaffListView.as_view(), name='followup_staff_list'),
     path('leads/employee-followup-deadline/', EmployeeFollowupDeadlineView.as_view(), name='employee_followup_deadline'),
+    path('leads/employee-followup-progress/', EmployeeFollowupProgressView.as_view(), name='employee_followup_progress'),
     path('leads/employee-followup-terms/', EmployeeFollowupTermListView.as_view(), name='employee_followup_terms'),
     path('leads/discounts/', DiscountedPersonListView.as_view(), name='discounted_person_list'),
     path('leads/discounts/<int:pk>/', DiscountedPersonDetailView.as_view(), name='discounted_person_detail'),

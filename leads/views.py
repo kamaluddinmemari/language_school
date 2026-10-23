@@ -1543,6 +1543,38 @@ class EmployeeFollowupDeadlineView(APIView):
         return Response(self._serialize(rule, term))
 
 
+class EmployeeFollowupProgressView(APIView):
+    """تعداد کل و انجام‌شده‌ی پنج نوع پیگیری برای یک کارمند و ترم."""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        if not (can_edit_menu(request.user, 'followups') or can_edit_menu(request.user, 'new-leads')):
+            return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
+        employee_id, term_id = request.query_params.get('employee_id'), request.query_params.get('term_id')
+        if not employee_id or not term_id:
+            return Response({'items': {}})
+        try:
+            employee_id, term_id = int(employee_id), int(term_id)
+        except (TypeError, ValueError):
+            return Response({'error': 'شناسه کارمند یا ترم نامعتبر است'}, status=status.HTTP_400_BAD_REQUEST)
+        from class_management.models import ClassSurveyResponse, DropoutExtractFollowUp
+        items = {}
+        def add(key, total, completed):
+            total, completed = int(total), min(int(completed), int(total))
+            items[key] = {'total': total, 'completed': completed, 'percent': round(completed * 100 / total) if total else 0}
+        waiting = NewLead.objects.filter(term_id=term_id, assigned_to_id=employee_id)
+        add('waiting-list', waiting.exclude(status=NewLead.Status.CANCELLED).count(), waiting.filter(Q(followup1_at__isnull=False) | Q(registered_at__isnull=False)).count())
+        unregistered = UnregisteredStudent.objects.filter(term_id=term_id, assigned_to_id=employee_id)
+        add('unregistered', unregistered.exclude(status=UnregisteredStudent.Status.REGISTERED).count(), unregistered.filter(followups__isnull=False).distinct().count())
+        debtors = Debtor.objects.filter(term_id=term_id, assigned_to_id=employee_id)
+        add('debtors', debtors.exclude(status=Debtor.Status.SETTLED).count(), debtors.filter(followups__isnull=False).distinct().count())
+        dropout = DropoutExtractFollowUp.objects.filter(term_id=term_id, assigned_to_id=employee_id)
+        add('consecutive-dropouts', dropout.exclude(not_coming=True).count(), dropout.filter(Q(contacted=True) | Q(not_coming=True)).count())
+        survey = ClassSurveyResponse.objects.filter(survey_list__term_id=term_id, assigned_to_id=employee_id)
+        add('class-survey', survey.count(), survey.filter(completed=True).count())
+        return Response({'employee_id': employee_id, 'term_id': term_id, 'items': items})
+
+
 class EmployeeFollowupTermListView(APIView):
     """فهرست ترم‌ها برای Hub پیگیری، با همان مجوزهای دسترسی به پیگیری‌ها."""
     permission_classes = [IsAuthenticated]

@@ -159,6 +159,24 @@ def _row(enrollment, row_number=None):
     return result
 
 
+def _selection_options(term_id):
+    """استادان و کلاس‌های ترم جاری برای انتخاب هدفمند نمونه‌گیری."""
+    slots = ClassSlot.objects.filter(term_id=term_id).order_by('teacher_name', 'number', 'day_type', 'time_slot')
+    counts = defaultdict(int)
+    for slot_id in ClassSlotEnrollment.objects.filter(
+        class_slot__term_id=term_id, student__role='student'
+    ).values_list('class_slot_id', flat=True):
+        counts[slot_id] += 1
+    teachers = sorted({(slot.teacher_name or '').strip() or 'بدون استاد' for slot in slots}, key=str.casefold)
+    classes = [{
+        'id': slot.id,
+        'teacher_name': (slot.teacher_name or '').strip() or 'بدون استاد',
+        'label': f"کلاس {slot.number} — {slot.get_day_type_display()} — {slot.time_slot or 'بدون ساعت'} — {slot.assigned_level or 'بدون سطح'}",
+        'student_count': counts[slot.id],
+    } for slot in slots]
+    return {'teachers': teachers, 'classes': classes}
+
+
 def _survey_slots(survey, responses=None):
     """تمام کلاس‌های survey (نه فقط rows فیلترشده بر اساس کارمند) را یکتا و مرتب برمی‌گرداند."""
     if responses is None:
@@ -463,6 +481,9 @@ class SurveyListView(APIView):
         if error:
             return Response({'error': error}, status=400)
         payload['questions'] = _questions()
+        term_id = request.query_params.get('term_id')
+        if term_id:
+            payload['selection_options'] = _selection_options(term_id)
         return Response(payload)
 
     def post(self, request):
@@ -494,6 +515,23 @@ class SurveyListView(APIView):
             ClassSlotEnrollment.objects.filter(class_slot__term=term, student__role='student')
             .select_related('student', 'class_slot')
         )
+        use_selected_classes = _as_bool(request.data.get('use_selected_classes'), default=False)
+        selected_class_slot_ids = []
+        if use_selected_classes:
+            raw_ids = request.data.get('selected_class_slot_ids') or []
+            if not isinstance(raw_ids, list) or not raw_ids:
+                return Response({'error': 'حداقل یک کلاس برای نظرسنجی انتخاب کنید'}, status=400)
+            try:
+                selected_class_slot_ids = list({int(value) for value in raw_ids})
+            except (TypeError, ValueError):
+                return Response({'error': 'فهرست کلاس‌های انتخاب‌شده نامعتبر است'}, status=400)
+            valid_ids = set(ClassSlot.objects.filter(term=term, id__in=selected_class_slot_ids).values_list('id', flat=True))
+            invalid_ids = set(selected_class_slot_ids) - valid_ids
+            if invalid_ids:
+                return Response({'error': 'یک یا چند کلاس متعلق به ترم انتخاب‌شده نیست'}, status=400)
+            enrollments = [item for item in enrollments if item.class_slot_id in valid_ids]
+        if not enrollments:
+            return Response({'error': 'در کلاس‌های انتخاب‌شده ثبت‌نامی برای نمونه‌گیری وجود ندارد'}, status=400)
         rng = random.SystemRandom()
         if use_teacher_class_sampling:
             enrollments_by_slot = defaultdict(list)
@@ -531,6 +569,7 @@ class SurveyListView(APIView):
                 name=name, term=term, percentage=percentage, rows=rows, created_by=request.user,
                 use_teacher_class_sampling=use_teacher_class_sampling,
                 teacher_class_percentage=teacher_class_percentage if use_teacher_class_sampling else None,
+                selected_class_slot_ids=selected_class_slot_ids,
             )
             ClassSurveyResponse.objects.bulk_create([
                 ClassSurveyResponse(survey_list=survey, student_id=row['student_id'], class_slot_id=row['class_slot_id'])

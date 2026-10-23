@@ -982,6 +982,7 @@ class ClassSurveyList(models.Model):
     deadline_session_number = models.PositiveSmallIntegerField(null=True, blank=True)
     use_teacher_class_sampling = models.BooleanField(default=False)
     teacher_class_percentage = models.PositiveSmallIntegerField(null=True, blank=True)
+    selected_class_slot_ids = models.JSONField(default=list, blank=True)
     created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
     created_at = models.DateTimeField(auto_now_add=True)
 
