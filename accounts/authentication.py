@@ -1,3 +1,5 @@
+from datetime import timedelta
+
 from django.contrib.auth.models import update_last_login
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 from rest_framework_simplejwt.views import TokenObtainPairView
@@ -16,6 +18,12 @@ class TrackedTokenObtainPairSerializer(TokenObtainPairSerializer):
             from .models import AppAccessSettings
             if not AppAccessSettings.is_role_enabled(self.user.role):
                 raise drf_serializers.ValidationError({'error': 'دسترسی به اپ برای نقش شما موقتاً توسط مدیر غیرفعال شده است'})
+            # اپ موبایل فقط بار اول رمز می‌خواهد: refresh token ده سال اعتبار دارد و access به‌صورت خودکار
+            # از روی آن تمدید می‌شود. پنل وب همچنان عمر پیش‌فرض (کوتاه) دارد.
+            refresh = self.get_token(self.user)
+            refresh.set_exp(lifetime=timedelta(days=3650))
+            data['refresh'] = str(refresh)
+            data['access'] = str(refresh.access_token)
         # زمان ورود قبلی باید قبل از به‌روزرسانی last_login خوانده شود.
         previous_last_login = self.user.last_login
         data['previous_last_login'] = previous_last_login.isoformat() if previous_last_login else None

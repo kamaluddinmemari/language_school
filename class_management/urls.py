@@ -6,7 +6,7 @@ from .views import (
     BulkCreatePhysicalClassesView, ClassSlotEnrollView, ClassSlotExcelImportView, ClassSlotUnenrollView, ClassSlotRosterView,
     TuitionSuggestionView, TuitionSettingListView, TuitionSettingDetailView, DiscountedPersonListView, DiscountedPersonDetailView,
     TermOverviewView, AttendanceStatusView, RefundEnrollmentView, TransferEnrollmentOptionsView, TransferEnrollmentView, CreditToWalletView,
-    ConfirmCarryoverEnrollmentView, MarkCarryoverEnrollmentView,
+    ConfirmCarryoverEnrollmentView, MarkCarryoverEnrollmentView, GraduatedStudentsView, GraduatedStudentLookupView,
     StudentFinancialHistoryView, EnrollmentReportView, EnrollmentTermChartView, SplitClassView, DirectEnrollSuggestionsView,
     MyDirectEnrollSuggestionsView, SelfEnrollView, VerifyEnrollmentPaymentView, MyEnrollmentsView,
     LevelRenewalApprovalListView, LevelRenewalApprovalDecideView,
@@ -27,7 +27,7 @@ from .views import (
 )
 from .survey import (
     SurveyAssignView, SurveyDeadlineAlertsView, SurveyDeadlineView, SurveyDeadlinesView,
-    SurveyListView, SurveyResponseView, SurveyReportExcelView, SurveyReportView, SurveyQuestionView,
+    SurveyListView, SurveyResponseView, TeacherSurveyResultsView, SurveyReportExcelView, SurveyReportView, SurveyQuestionView,
 )
 
 urlpatterns = [
@@ -56,6 +56,8 @@ urlpatterns = [
     path('class-management/stats/', ClassStatsView.as_view(), name='class_stats'),
     path('class-management/enrollment-pulse/', EnrollmentPulseView.as_view(), name='enrollment_pulse'),
     path('class-management/student-search/', StudentClassSearchView.as_view(), name='student_class_search'),
+    path('class-management/graduated-students/', GraduatedStudentsView.as_view(), name='graduated_students'),
+    path('class-management/graduated-students/lookup/', GraduatedStudentLookupView.as_view(), name='graduated_student_lookup'),
     path('class-management/tuition-settings/', TuitionSettingListView.as_view(), name='tuition_setting_list'),
     path('class-management/tuition-settings/<int:pk>/', TuitionSettingDetailView.as_view(), name='tuition_setting_detail'),
     path('class-management/discounted-persons/', DiscountedPersonListView.as_view(), name='discounted_person_list'),
@@ -103,6 +105,7 @@ urlpatterns = [
     path('class-management/terms/carry-classes/', CarryClassesToNextTermView.as_view(), name='carry_classes_to_next_term'),
     path('class-management/terms/update-carryover-students/', UpdateCarryoverStudentsView.as_view(), name='update_carryover_students'),
     path('class-management/teachers/<int:teacher_id>/education-history/', TeacherEducationHistoryView.as_view(), name='teacher_education_history'),
+    path('class-management/my-survey-results/', TeacherSurveyResultsView.as_view(), name='my_survey_results'),
     path('class-management/my-term-classes/', TeacherTermClassesView.as_view(), name='my_term_classes'),
     path('class-management/teacher-term-report/', TeacherTermReportView.as_view(), name='teacher_term_report'),
     path('class-management/teacher-session-events/', TeacherSessionEventListCreateView.as_view(), name='teacher_session_event_list_create'),

@@ -1459,29 +1459,36 @@ class PersonFinanceStatusView(APIView):
 
 
 class EmployeeFollowupDeadlineView(APIView):
-    """تنظیم اختیاری موعد مشترک پنج نوع پیگیری برای یک ترم."""
+    """تنظیم اختیاریِ موعد جداگانه برای هر یک از پنج نوع پیگیری در یک ترم."""
     permission_classes = [IsAuthenticated]
 
     def _allowed(self, user):
         return can_edit_menu(user, 'followups') or can_edit_menu(user, 'new-leads')
 
-    def _serialize(self, rule, term):
-        from datetime import timedelta
+    @staticmethod
+    def _types():
+        from .models import EmployeeFollowupDeadlineRule
+        return [value for value, _label in EmployeeFollowupDeadlineRule.FollowupType.choices]
+
+    @staticmethod
+    def _week_count(term):
         duration = max(1, (term.end_date - term.start_date).days + 1)
-        week_count = max(1, (duration + 6) // 7)
+        return max(1, (duration + 6) // 7)
+
+    def _serialize(self, rule, term, followup_type):
         due = rule.resolved_deadline_at() if rule else None
         due_jalali = None
         if due:
             import jdatetime
             due_jalali = jdatetime.datetime.fromgregorian(datetime=timezone.localtime(due)).strftime('%Y/%m/%d - %H:%M')
         return {
-            'term_id': term.pk, 'term_title': term.title,
+            'term_id': term.pk, 'term_title': term.title, 'followup_type': followup_type,
             'enabled': bool(rule.enabled) if rule else False,
             'mode': rule.mode if rule else 'date',
             'deadline_date': rule.deadline_date.isoformat() if rule and rule.deadline_date else '',
             'deadline_time': str(rule.deadline_time)[:5] if rule and rule.deadline_time else '23:59',
             'deadline_week': rule.deadline_week if rule and rule.deadline_week else 1,
-            'week_count': week_count,
+            'week_count': self._week_count(term),
             'due_at': due.isoformat() if due else '', 'due_at_jalali': due_jalali or '',
             'is_overdue': bool(due and due <= timezone.now()),
         }
@@ -1490,12 +1497,20 @@ class EmployeeFollowupDeadlineView(APIView):
         if not self._allowed(request.user):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         from class_management.models import Term
+        from .models import EmployeeFollowupDeadlineRule
         term = Term.objects.filter(pk=request.query_params.get('term_id')).first()
         if not term:
             return Response({'error': 'ترم انتخاب‌شده پیدا نشد'}, status=status.HTTP_404_NOT_FOUND)
-        from .models import EmployeeFollowupDeadlineRule
-        rule = EmployeeFollowupDeadlineRule.objects.filter(term=term).first()
-        return Response(self._serialize(rule, term))
+        rules = {rule.followup_type: rule for rule in EmployeeFollowupDeadlineRule.objects.filter(term=term)}
+        followup_type = request.query_params.get('followup_type')
+        if followup_type:
+            if followup_type not in self._types():
+                return Response({'error': 'نوع پیگیری نامعتبر است'}, status=status.HTTP_400_BAD_REQUEST)
+            return Response(self._serialize(rules.get(followup_type), term, followup_type))
+        return Response({
+            'term_id': term.pk, 'term_title': term.title,
+            'items': {kind: self._serialize(rules.get(kind), term, kind) for kind in self._types()},
+        })
 
     def post(self, request):
         if not self._allowed(request.user):
@@ -1505,12 +1520,14 @@ class EmployeeFollowupDeadlineView(APIView):
         term = Term.objects.filter(pk=request.data.get('term_id')).first()
         if not term:
             return Response({'error': 'ترم انتخاب‌شده پیدا نشد'}, status=status.HTTP_404_NOT_FOUND)
+        followup_type = str(request.data.get('followup_type') or '')
+        if followup_type not in self._types():
+            return Response({'error': 'نوع پیگیری را مشخص کنید'}, status=status.HTTP_400_BAD_REQUEST)
         enabled = str(request.data.get('enabled', '')).lower() in ('1', 'true', 'yes', 'on')
         mode = str(request.data.get('mode') or EmployeeFollowupDeadlineRule.Mode.DATE)
         if mode not in (EmployeeFollowupDeadlineRule.Mode.DATE, EmployeeFollowupDeadlineRule.Mode.TERM_WEEK):
             return Response({'error': 'مبنای ددلاین نامعتبر است'}, status=status.HTTP_400_BAD_REQUEST)
-        duration = max(1, (term.end_date - term.start_date).days + 1)
-        week_count = max(1, (duration + 6) // 7)
+        week_count = self._week_count(term)
         due_date = None
         due_time = None
         due_week = None
@@ -1529,7 +1546,7 @@ class EmployeeFollowupDeadlineView(APIView):
                 return Response({'error': f'شماره هفته باید بین ۱ تا {week_count} باشد'}, status=status.HTTP_400_BAD_REQUEST)
             from datetime import time
             due_time = time(23, 59)
-        rule, _ = EmployeeFollowupDeadlineRule.objects.get_or_create(term=term)
+        rule, _ = EmployeeFollowupDeadlineRule.objects.get_or_create(term=term, followup_type=followup_type)
         rule.enabled = enabled
         rule.mode = mode
         rule.deadline_date = due_date
@@ -1540,7 +1557,7 @@ class EmployeeFollowupDeadlineView(APIView):
         rule.deadline_week = due_week
         rule.updated_by = request.user
         rule.save()
-        return Response(self._serialize(rule, term))
+        return Response(self._serialize(rule, term, followup_type))
 
 
 class EmployeeFollowupProgressView(APIView):

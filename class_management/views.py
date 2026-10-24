@@ -1002,6 +1002,192 @@ class SpinOffSurplusView(APIView):
         }, status=status.HTTP_201_CREATED)
 
 
+_PERSIAN_LATIN = {
+    'ا': 'a', 'آ': 'a', 'ب': 'b', 'پ': 'p', 'ت': 't', 'ث': 's', 'ج': 'j', 'چ': 'ch',
+    'ح': 'h', 'خ': 'kh', 'د': 'd', 'ذ': 'z', 'ر': 'r', 'ز': 'z', 'ژ': 'zh', 'س': 's',
+    'ش': 'sh', 'ص': 's', 'ض': 'z', 'ط': 't', 'ظ': 'z', 'ع': '', 'غ': 'gh', 'ف': 'f',
+    'ق': 'gh', 'ک': 'k', 'گ': 'g', 'ل': 'l', 'م': 'm', 'ن': 'n', 'و': 'v', 'ه': 'h',
+    'ی': 'y', 'ي': 'y', 'ئ': 'y', 'ء': '', 'ة': 'h',
+}
+
+_COMMON_ENGLISH_NAMES = {
+    'محمد': 'Mohammad', 'محمود': 'Mahmoud', 'علی': 'Ali', 'رضا': 'Reza', 'حسین': 'Hossein',
+    'مهدی': 'Mehdi', 'امیر': 'Amir', 'امیرحسین': 'Amirhossein', 'امیر حسین': 'Amirhossein',
+    'احمد': 'Ahmad', 'احسان': 'Ehsan', 'سعید': 'Saeed', 'سجاد': 'Sajjad', 'مجید': 'Majid',
+    'مصطفی': 'Mostafa', 'ابوالفضل': 'Abolfazl', 'یوسف': 'Yousef', 'آرین': 'Arian',
+    'پارسا': 'Parsa', 'نیما': 'Nima', 'کیان': 'Kian', 'آریا': 'Aria', 'سام': 'Sam', 'اشکان': 'Ashkan',
+    'فاطمه': 'Fatemeh', 'زهرا': 'Zahra', 'مریم': 'Maryam', 'سارا': 'Sara', 'نازنین': 'Nazanin',
+    'نرگس': 'Narges', 'سمیه': 'Somayeh', 'الهام': 'Elham', 'نگار': 'Negar', 'کیانا': 'Kiana',
+    'یاسمن': 'Yasaman', 'مبینا': 'Mobina', 'مهسا': 'Mahsa', 'مهتاب': 'Mahtab', 'حدیث': 'Hadis',
+    'ریحانه': 'Reyhaneh', 'ترانه': 'Taraneh', 'پرنیا': 'Parnia', 'آتنا': 'Atena', 'سحر': 'Sahar',
+}
+
+def _english_name(value):
+    text = str(value or '').strip()
+    normalized = ' '.join(text.replace('\u200c', ' ').split())
+    if normalized in _COMMON_ENGLISH_NAMES:
+        return _COMMON_ENGLISH_NAMES[normalized]
+    words = []
+    for word in normalized.split():
+        if word in _COMMON_ENGLISH_NAMES:
+            words.append(_COMMON_ENGLISH_NAMES[word])
+            continue
+        result = ''.join(_PERSIAN_LATIN.get(char, char if char.isascii() else '') for char in word)
+        words.append(result)
+    return ' '.join(words).strip().title()
+
+
+class GraduatedStudentsView(APIView):
+    """دانش‌آموزان ثبت‌نام‌شده در سطح پایانی هر ردهٔ سنیِ یک ترم."""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        if not can_edit_menu(request.user, 'class-management'):
+            return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
+        term_id = request.query_params.get('term_id')
+        if term_id:
+            term = Term.objects.filter(pk=term_id).first()
+        else:
+            term = Term.objects.order_by('-year', '-term_number', '-id').first()
+        if not term:
+            return Response({'term_id': None, 'term_title': '', 'rows': []})
+        level_groups = {
+            'kids': {'current': ('i5', 'u5'), 'next': ('i4', 'u4')},
+            'teen': {'current': ('teen15',), 'next': ('teen14',)},
+            'adult': {'current': ('606', '406'), 'next': ('605', '405')},
+        }
+        all_levels = [level for group in level_groups.values() for levels in group.values() for level in levels]
+        age_rank = {'kids': 0, 'teen': 1, 'adult': 2}
+        gender_rank = {'female': 0, 'male': 1}
+        rows_by_student = {}
+        enrollments = ClassSlotEnrollment.objects.filter(
+            class_slot__term=term,
+            student__role='student',
+            payment_verified=True,
+            class_slot__assigned_level__in=all_levels,
+        ).select_related('student', 'class_slot').order_by(
+            'student__first_name', 'student__last_name', 'class_slot__number', 'class_slot__id'
+        )
+        for enrollment in enrollments:
+            student, slot = enrollment.student, enrollment.class_slot
+            level = (slot.assigned_level or '').strip()
+            age_group = next((group for group, spec in level_groups.items() if any(level.casefold() == terminal.casefold() for levels in spec.values() for terminal in levels)), 'adult')
+            next_term = any(level.casefold() == terminal.casefold() for terminal in level_groups[age_group]['next'])
+            if student.id in rows_by_student:
+                current = rows_by_student[student.id]
+                if slot.teacher_name and slot.teacher_name not in current['teacher']:
+                    current['teacher'] = f"{current['teacher']}، {slot.teacher_name}" if current['teacher'] else slot.teacher_name
+                continue
+            rows_by_student[student.id] = {
+                'id': student.id,
+                'first_name': student.first_name or '', 'last_name': student.last_name or '',
+                'first_name_en': _english_name(student.first_name), 'last_name_en': _english_name(student.last_name),
+                'father_name': student.father_name or '', 'national_code': student.national_code or '',
+                'phone': student.phone or '', 'level': level, 'teacher': slot.teacher_name or '',
+                'gender': student.gender or '', 'age_group': age_group, 'next_term': next_term,
+            }
+        # بررسی می‌کنیم فرد در سه ترم آخر تا سطح فعلی، مسیر سطح‌ها را به‌ترتیب طی کرده باشد.
+        history_terms = list(Term.objects.filter(
+            Q(year__lt=term.year) | Q(year=term.year, term_number__lte=term.term_number)
+        ).order_by('-year', '-term_number', '-id')[:3])
+        history_terms.reverse()
+        candidate_ids = list(rows_by_student.keys())
+        history = {}
+        if candidate_ids and history_terms:
+            history_qs = ClassSlotEnrollment.objects.filter(
+                student_id__in=candidate_ids, class_slot__term_id__in=[item.id for item in history_terms], payment_verified=True,
+            ).select_related('class_slot')
+            for item in history_qs:
+                history.setdefault(item.student_id, {}).setdefault(item.class_slot.term_id, set()).add((item.class_slot.assigned_level or '').strip().casefold())
+        try:
+            from level_tests.models import StandardLevel
+            standard_levels = list(StandardLevel.objects.all().order_by('age_group', 'order', 'code'))
+        except Exception:
+            standard_levels = []
+        fallback_sequences = {
+            'kids': [f'{prefix}{number}' for prefix in ('i', 'u') for number in range(1, 6)],
+            'teen': ['teenstarter'] + [f'teen{number}' for number in range(1, 16)],
+            'adult': [str(number) for number in range(101, 607)],
+        }
+        for row in rows_by_student.values():
+            siblings = [item.code for item in standard_levels if item.age_group == row['age_group']]
+            sequence = siblings or fallback_sequences[row['age_group']]
+            target_index = next((index for index, code in enumerate(sequence) if code.casefold() == row['level'].casefold()), -1)
+            expected = sequence[target_index - 2:target_index + 1] if target_index >= 2 else []
+            student_history = history.get(row['id'], {})
+            has_valid_sequence = len(history_terms) == 3 and len(expected) == 3 and all(
+                any(level == expected[position].casefold() for level in student_history.get(history_terms[position].id, set()))
+                for position in range(3)
+            )
+            row['sequence_warning'] = not has_valid_sequence
+            row['sequence_warning_text'] = 'هشدار مهم: توالی سه‌ترمی سطح‌ها کامل یا به‌ترتیب نیست.' if row['sequence_warning'] else ''
+        # ترتیب: بزرگسال، نوجوان، کودک؛ داخل هر ردهٔ سنی افراد همسطح کنار هم می‌مانند.
+        age_rank = {'adult': 0, 'teen': 1, 'kids': 2}
+        level_rank = {code: index for index, code in enumerate(
+            ('406', '606', '405', '605', 'teen15', 'teen14', 'i5', 'u5', 'i4', 'u4')
+        )}
+        rows = sorted(rows_by_student.values(), key=lambda row: (
+            age_rank.get(row['age_group'], 9), int(row.get('next_term', False)), level_rank.get(row['level'].casefold(), 99),
+            gender_rank.get(row['gender'], 9), row['last_name'], row['first_name'], row['id'],
+        ))
+        from django.contrib.auth import get_user_model
+        User = get_user_model()
+        teachers = sorted({
+            f"{teacher.first_name or ''} {teacher.last_name or ''}".strip()
+            for teacher in User.objects.filter(role__in=User.TEACHER_LIKE_ROLES)
+            if f"{teacher.first_name or ''} {teacher.last_name or ''}".strip()
+        })
+        return Response({'term_id': term.id, 'term_title': term.title, 'rows': rows, 'count': len(rows), 'teachers': teachers})
+
+
+class GraduatedStudentLookupView(APIView):
+    """پیشنهاد هوشمند برای ردیف دستی فارغ‌التحصیلان + ساخت شکل انگلیسی نام و نام‌خانوادگی.
+
+    GET ?first_name=&last_name=&national_code=&phone= : حداکثر ۸ دانش‌آموز مطابق فیلدهای پرشده.
+    پاسخ شامل first_name_en / last_name_en / full_name_en برای همان نام تایپ‌شده هم هست.
+    """
+    permission_classes = [IsAuthenticated]
+    MAX_ROWS = 8
+
+    def get(self, request):
+        if not can_edit_menu(request.user, 'class-management'):
+            return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
+        digits = StudentClassSearchView._digits_to_en
+        variants = StudentClassSearchView._text_variants
+        first = ' '.join(str(request.query_params.get('first_name', '')).split())
+        last = ' '.join(str(request.query_params.get('last_name', '')).split())
+        national_code = ''.join(ch for ch in digits(request.query_params.get('national_code', '')) if ch.isdigit())
+        phone = ''.join(ch for ch in digits(request.query_params.get('phone', '')) if ch.isdigit())
+        first_en, last_en = _english_name(first), _english_name(last)
+        result = {
+            'first_name_en': first_en, 'last_name_en': last_en,
+            'full_name_en': f'{first_en} {last_en}'.strip(), 'matches': [],
+        }
+        if len(first) < 2 and len(last) < 2 and len(national_code) < 3 and len(phone) < 4:
+            return Response(result)
+        from django.contrib.auth import get_user_model
+        students = get_user_model().objects.filter(role='student')
+        for field, value in (('first_name', first), ('last_name', last)):
+            if len(value) >= 2:
+                cond = Q()
+                for variant in variants(value):
+                    cond |= Q(**{f'{field}__icontains': variant})
+                students = students.filter(cond)
+        if len(national_code) >= 3:
+            students = students.filter(national_code__contains=national_code)
+        if len(phone) >= 4:
+            students = students.filter(phone__contains=phone)
+        for student in students.order_by('last_name', 'first_name', 'id')[:self.MAX_ROWS]:
+            fe, le = _english_name(student.first_name), _english_name(student.last_name)
+            result['matches'].append({
+                'id': student.id, 'first_name': student.first_name or '', 'last_name': student.last_name or '',
+                'national_code': student.national_code or '', 'phone': student.phone or '',
+                'email': getattr(student, 'email', '') or '', 'gender': student.gender or '',
+                'first_name_en': fe, 'last_name_en': le, 'full_name_en': f'{fe} {le}'.strip(),
+            })
+        return Response(result)
+
+
 class StudentClassSearchView(APIView):
     """GET ?q=&term=: جستجوی دانش‌آموز بر اساس کد ملی یا نام/نام‌خانوادگی در یک ترم.
 

@@ -26,6 +26,7 @@ MOBILE_MENU_GROUPS = {
             ('level-tests', 'تعیین سطح'),
             ('teacher-notices', 'پیام‌های مدیریت'),
             ('teacher-term-classes', 'کلاس‌های ترمیک'),
+            ('teacher-survey-results', 'مشاهده نتایج نظرسنجی ترم'),
             ('TeacherRosterAttendance', 'حضور و غیاب کلاس'),
             ('TeacherQrAttendance', 'حضور با QR'),
             ('TeacherGrading', 'ثبت نمرات کلاس'),

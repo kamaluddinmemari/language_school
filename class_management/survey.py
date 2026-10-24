@@ -1212,3 +1212,81 @@ class SurveyQuestionView(APIView):
             return Response({'error': 'دسترسی ویرایش ندارید'}, status=403)
         ClassSurveyQuestion.objects.filter(pk=pk).delete()
         return Response(status=204)
+
+
+class TeacherSurveyResultsView(APIView):
+    """GET /api/class-management/my-survey-results/?term_id=
+
+    نتایج نظرسنجی کلاس‌های خودِ استاد در یک ترم، به تفکیک درس (کلاس)، همراه با نظرات.
+    نظرات ناشناس‌اند؛ نام دانش‌آموز یا شماره تماس هرگز برگردانده نمی‌شود.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        if request.user.role not in User.TEACHER_LIKE_ROLES:
+            return Response({'error': 'این بخش فقط برای اساتید است'}, status=403)
+        teacher_name = request.user.get_full_name().strip()
+        slots_qs = ClassSlot.objects.filter(teacher_name__iexact=teacher_name) if teacher_name else ClassSlot.objects.none()
+        term_ids = set(slots_qs.values_list('term_id', flat=True))
+        terms = list(Term.objects.filter(id__in=term_ids).order_by('-start_date', '-id'))
+        terms_payload = [{'id': term.id, 'title': term.title} for term in terms]
+        if not terms:
+            return Response({'terms': [], 'term': None, 'overall': None, 'courses': []})
+        term = next((item for item in terms if str(item.id) == str(request.query_params.get('term_id'))), terms[0])
+
+        slots = list(slots_qs.filter(term=term).order_by('day_type', 'time_slot', 'number'))
+        question_map = {str(q.id): q.text for q in ClassSurveyQuestion.objects.all()}
+        responses = ClassSurveyResponse.objects.filter(
+            survey_list__term=term, class_slot__in=slots, completed=True,
+        ).order_by('id')
+        by_slot = defaultdict(list)
+        for item in responses:
+            by_slot[item.class_slot_id].append(item)
+
+        def percent(yes, total):
+            return round(yes * 100 / total, 1) if total else 0
+
+        courses, all_yes, all_no, all_responses = [], 0, 0, 0
+        for slot in slots:
+            questions = defaultdict(lambda: {'yes_count': 0, 'no_count': 0})
+            comments = []
+            for item in by_slot.get(slot.id, []):
+                for raw_qid, raw_value in (item.answers or {}).items():
+                    qid = str(raw_qid)
+                    answer = raw_value.get('answer') if isinstance(raw_value, dict) else raw_value
+                    note = str(raw_value.get('note') or '').strip() if isinstance(raw_value, dict) else ''
+                    text = question_map.get(qid, f'سؤال {qid}')
+                    if answer in ('yes', 'no'):
+                        questions[qid]['question'] = text
+                        questions[qid]['yes_count' if answer == 'yes' else 'no_count'] += 1
+                    elif isinstance(answer, str) and answer.strip():
+                        comments.append({'question': text, 'text': answer.strip()})
+                    if note:
+                        comments.append({'question': text, 'text': note})
+            question_rows = []
+            for qid, values in questions.items():
+                total = values['yes_count'] + values['no_count']
+                question_rows.append({
+                    'question_id': qid, 'question': values.get('question', ''),
+                    'yes_count': values['yes_count'], 'no_count': values['no_count'], 'count': total,
+                    'yes_percent': percent(values['yes_count'], total), 'no_percent': percent(values['no_count'], total),
+                })
+            question_rows.sort(key=lambda row: int(row['question_id']) if row['question_id'].isdigit() else 0)
+            yes = sum(row['yes_count'] for row in question_rows)
+            no = sum(row['no_count'] for row in question_rows)
+            all_yes, all_no, all_responses = all_yes + yes, all_no + no, all_responses + len(by_slot.get(slot.id, []))
+            courses.append({
+                'slot_id': slot.id, 'number': slot.number, 'level': (slot.assigned_level or '').strip(),
+                'day': slot.day_type_display, 'time_slot': slot.time_slot or '',
+                'response_count': len(by_slot.get(slot.id, [])),
+                'yes_count': yes, 'no_count': no, 'satisfaction_percent': percent(yes, yes + no),
+                'questions': question_rows, 'comments': comments,
+            })
+        return Response({
+            'terms': terms_payload, 'term': {'id': term.id, 'title': term.title},
+            'overall': {
+                'response_count': all_responses, 'yes_count': all_yes, 'no_count': all_no,
+                'satisfaction_percent': percent(all_yes, all_yes + all_no),
+            },
+            'courses': courses,
+        })

@@ -529,15 +529,23 @@ class ExcelDropout(models.Model):
 
 
 class EmployeeFollowupDeadlineRule(models.Model):
-    """موعد مشترک پیگیری‌های کارمندان برای یک ترم؛ تاریخ ثابت یا پایان هفتهٔ N ترم."""
+    """موعد پیگیری‌های کارمندان برای یک ترم؛ برای هر نوع پیگیری جداگانه، با تاریخ ثابت یا پایان هفتهٔ N ترم."""
     class Mode(models.TextChoices):
         DATE = 'date', 'تاریخ مشخص'
         TERM_WEEK = 'term_week', 'هفتهٔ ترم'
+
+    class FollowupType(models.TextChoices):
+        UNREGISTERED = 'unregistered', 'پیگیری افراد ثبت‌نام‌نشده'
+        DEBTORS = 'debtors', 'پیگیری بدهکاران'
+        WAITING_LIST = 'waiting-list', 'پیگیری لیست انتظار'
+        CONSECUTIVE_DROPOUTS = 'consecutive-dropouts', 'پیگیری ریزشی‌های دو ترم متوالی'
+        CLASS_SURVEY = 'class-survey', 'پیگیری نظرسنجی کلاس‌ها'
 
     term = models.ForeignKey(
         'class_management.Term', on_delete=models.CASCADE,
         related_name='employee_followup_deadline_rules',
     )
+    followup_type = models.CharField(max_length=30, choices=FollowupType.choices, default=FollowupType.UNREGISTERED)
     enabled = models.BooleanField(default=False)
     mode = models.CharField(max_length=12, choices=Mode.choices, default=Mode.DATE)
     deadline_date = models.DateField(null=True, blank=True)
@@ -548,7 +556,7 @@ class EmployeeFollowupDeadlineRule(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
-        constraints = [models.UniqueConstraint(fields=['term'], name='unique_employee_followup_deadline_per_term')]
+        constraints = [models.UniqueConstraint(fields=['term', 'followup_type'], name='unique_employee_followup_deadline_per_term_type')]
 
     def resolved_deadline_at(self):
         if not self.enabled:

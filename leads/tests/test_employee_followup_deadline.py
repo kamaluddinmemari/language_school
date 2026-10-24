@@ -36,12 +36,12 @@ class EmployeeFollowupDeadlineAndArchiveTests(TestCase):
         return view.as_view()(request)
 
     def test_deadline_can_be_disabled_set_by_date_or_term_week(self):
-        initial = self.call(EmployeeFollowupDeadlineView, path='/api/leads/employee-followup-deadline/', query={'term_id': self.term2.id})
+        initial = self.call(EmployeeFollowupDeadlineView, path='/api/leads/employee-followup-deadline/', query={'term_id': self.term2.id, 'followup_type': 'debtors'})
         self.assertEqual(initial.status_code, 200)
         self.assertFalse(initial.data['enabled'])
 
         dated = self.call(EmployeeFollowupDeadlineView, method='POST', path='/api/leads/employee-followup-deadline/', data={
-            'term_id': self.term2.id, 'enabled': True, 'mode': 'date',
+            'term_id': self.term2.id, 'followup_type': 'debtors', 'enabled': True, 'mode': 'date',
             'deadline_date': '2026-10-30', 'deadline_time': '17:15',
         })
         self.assertEqual(dated.status_code, 200)
@@ -49,18 +49,37 @@ class EmployeeFollowupDeadlineAndArchiveTests(TestCase):
         self.assertTrue(dated.data['due_at'].startswith('2026-10-30T17:15:00'))
 
         weekly = self.call(EmployeeFollowupDeadlineView, method='POST', path='/api/leads/employee-followup-deadline/', data={
-            'term_id': self.term2.id, 'enabled': True, 'mode': 'term_week', 'deadline_week': 2,
+            'term_id': self.term2.id, 'followup_type': 'debtors', 'enabled': True, 'mode': 'term_week', 'deadline_week': 2,
         })
         self.assertEqual(weekly.status_code, 200)
         self.assertEqual(weekly.data['deadline_week'], 2)
         self.assertTrue(weekly.data['due_at'].startswith('2026-10-14T23:59:00'))
 
         disabled = self.call(EmployeeFollowupDeadlineView, method='POST', path='/api/leads/employee-followup-deadline/', data={
-            'term_id': self.term2.id, 'enabled': False, 'mode': 'term_week', 'deadline_week': 2,
+            'term_id': self.term2.id, 'followup_type': 'debtors', 'enabled': False, 'mode': 'term_week', 'deadline_week': 2,
         })
         self.assertEqual(disabled.status_code, 200)
         self.assertFalse(disabled.data['enabled'])
-        self.assertFalse(EmployeeFollowupDeadlineRule.objects.get(term=self.term2).enabled)
+        self.assertFalse(EmployeeFollowupDeadlineRule.objects.get(term=self.term2, followup_type='debtors').enabled)
+
+    def test_each_followup_type_has_its_own_deadline(self):
+        url = '/api/leads/employee-followup-deadline/'
+        self.call(EmployeeFollowupDeadlineView, method='POST', path=url, data={
+            'term_id': self.term2.id, 'followup_type': 'debtors', 'enabled': True, 'mode': 'date',
+            'deadline_date': '2026-10-30', 'deadline_time': '17:15',
+        })
+        self.call(EmployeeFollowupDeadlineView, method='POST', path=url, data={
+            'term_id': self.term2.id, 'followup_type': 'class-survey', 'enabled': True, 'mode': 'term_week', 'deadline_week': 3,
+        })
+        missing = self.call(EmployeeFollowupDeadlineView, method='POST', path=url, data={'term_id': self.term2.id, 'enabled': True})
+        self.assertEqual(missing.status_code, 400)
+        overview = self.call(EmployeeFollowupDeadlineView, path=url, query={'term_id': self.term2.id})
+        items = overview.data['items']
+        self.assertEqual(set(items), {'unregistered', 'debtors', 'waiting-list', 'consecutive-dropouts', 'class-survey'})
+        self.assertTrue(items['debtors']['due_at'].startswith('2026-10-30T17:15:00'))
+        self.assertTrue(items['class-survey']['due_at'].startswith('2026-10-21T23:59:00'))
+        self.assertFalse(items['unregistered']['enabled'])
+        self.assertFalse(items['waiting-list']['enabled'])
 
     def test_archives_are_exact_by_term_and_resolved_rows_are_retained(self):
         old_lead = NewLead.objects.create(first_name='آرشیو', last_name='ترم یک', phone='09120009011', term=self.term1, status='registered')
