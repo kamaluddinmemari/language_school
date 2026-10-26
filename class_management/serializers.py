@@ -17,14 +17,27 @@ class TermSerializer(serializers.ModelSerializer):
     end_date_jalali = serializers.ReadOnlyField()
     title = serializers.ReadOnlyField()
     class_count = serializers.SerializerMethodField()
+    pre_registration_start_jalali = serializers.ReadOnlyField()
+    pre_registration_end = serializers.ReadOnlyField()
+    pre_registration_end_jalali = serializers.ReadOnlyField()
+    is_current = serializers.SerializerMethodField()
 
     class Meta:
         model = Term
         fields = [
             'id', 'year', 'term_number', 'start_date', 'end_date',
-            'start_date_jalali', 'end_date_jalali', 'title', 'class_count', 'holidays', 'created_at',
+            'pre_registration_start', 'pre_registration_start_jalali', 'pre_registration_end', 'pre_registration_end_jalali',
+            'start_date_jalali', 'end_date_jalali', 'title', 'class_count', 'is_current', 'holidays', 'created_at',
         ]
         read_only_fields = ['id', 'created_at']
+
+    def get_is_current(self, obj):
+        # ترم جاری یک‌بار برای کل پاسخ محاسبه می‌شود
+        if '_current_term_id' not in self.context:
+            from .models import get_current_term
+            current = get_current_term()
+            self.context['_current_term_id'] = current.id if current else None
+        return obj.id == self.context['_current_term_id']
 
     def get_class_count(self, obj):
         return obj.class_slots.count()

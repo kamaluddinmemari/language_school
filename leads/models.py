@@ -99,16 +99,11 @@ def auto_mark_unregistered_registered(student, term_id=None, slot_id=None):
 
 def get_current_term():
     """
-    ترمی با جدیدترین تاریخ شروع که تا امروز آغاز شده است؛ تاریخ پایان در انتخاب پیش‌فرض
-    اثر ندارد. ترم‌های آینده تا روز شروع‌شان انتخاب نمی‌شوند. اگر هنوز ترمی شروع نشده،
-    ترم جاری وجود ندارد و None برگردانده می‌شود.
+    ترم جاری؛ منبع واحد در class_management.models.get_current_term است: معیار اصلی تاریخ شروع پیش‌ثبت‌نام
+    (یک هفته از آن تاریخ) یا رسیدن تاریخ شروع ترم، و تیک اختیاریِ «آخرین ترم موجود» بیرون از بازهٔ پیش‌ثبت‌نام.
     """
-    from class_management.models import Term
-    today = timezone.localdate()
-    # ترم‌های آینده تا روز شروع‌شان نباید پیش‌فرض شوند؛ پایان‌یافتن ترم مانع
-    # از انتخاب آن به‌عنوان آخرین ترم شروع‌شده نیست.
-    current = Term.objects.filter(start_date__lte=today).order_by('-start_date', '-id').first()
-    return current
+    from class_management.models import get_current_term as resolve_current_term
+    return resolve_current_term()
 
 
 class NewLead(models.Model):

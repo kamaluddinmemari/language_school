@@ -1070,3 +1070,176 @@ class DropoutStatsView(APIView):
             'teachers_ranked': teachers,
             'dropouts': sorted(people.values(), key=lambda row: (row['teacher'], row['level'], row['name'])),
         })
+
+
+# ---------------------------------------------------------------------------
+# ثبت گروهی افراد یک لیست ذخیره‌شده در «پیشنهاد اصلی» (کلاس خاکستری) — با فهرست بررسی نهایی پیش از انتقال
+# ---------------------------------------------------------------------------
+def _slot_brief(slot):
+    return {
+        'id': slot.id, 'number': slot.number, 'level': slot.assigned_level or '', 'day': slot.day_type_display or '',
+        'time_slot': slot.time_slot or '', 'teacher': slot.teacher_name or '', 'gender': slot.gender,
+        'seats_left': slot.real_seats_left,
+    }
+
+
+class DropoutExtractBulkRegisterPreviewView(APIView):
+    """
+    GET ?list_id= : فهرست بررسی نهایی. برای هر فردِ هنوز ثبت‌نام‌نشده‌ی لیست (و نه «نمی‌آید»):
+    کلاس/سطح/روز قبلی (از ردیف لیست) و کلاس پیشنهاد اصلی جدید (کلاس خاکستری همان ترم). همراه با فهرست کلاس‌های ترم برای ویرایش.
+    (با کوئری‌های گروهی ساخته می‌شود تا برای لیست‌های بزرگ هم سریع و بدون تایم‌اوت باشد.)
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        if not can_edit_menu(request.user, 'class-management'):
+            return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
+        from django.db.models import Count
+        from django.contrib.auth import get_user_model
+        from .models import ClassSlot
+        from .carryover import list_registration_status
+        try:
+            saved = DropoutExtractList.objects.select_related('term').get(pk=int(request.query_params.get('list_id')))
+        except (DropoutExtractList.DoesNotExist, TypeError, ValueError):
+            return Response({'error': 'لیست پیدا نشد'}, status=status.HTTP_404_NOT_FOUND)
+        try:
+            all_rows = [r for r in (saved.rows or []) if isinstance(r, dict)]
+            statuses = list_registration_status(saved)
+            not_coming = set(DropoutExtractFollowUp.objects.filter(saved_list=saved, not_coming=True).values_list('national_code', flat=True))
+            slots = list(
+                ClassSlot.objects.filter(term_id=saved.term_id)
+                .annotate(_seats_used=Count('enrollments', filter=Q(enrollments__payment_verified=True), distinct=True))
+                .order_by('number', 'day_type', 'time_slot')
+            )
+            slot_map = {sl.id: sl for sl in slots}
+
+            def brief(sl):
+                return {
+                    'id': sl.id, 'number': sl.number, 'level': sl.assigned_level or '', 'day': sl.day_type_display or '',
+                    'time_slot': sl.time_slot or '', 'teacher': sl.teacher_name or '', 'gender': sl.gender,
+                    'seats_left': sl.capacity - sl._seats_used,
+                }
+
+            # دانش‌آموزان و ثبت‌نام‌های خاکستری به‌صورت گروهی
+            User = get_user_model()
+            codes = {_valid_code(r.get('national_code')) for r in all_rows}
+            codes.discard('')
+            ids = {r.get('student_id') for r in all_rows if r.get('student_id')}
+            students = User.objects.filter(role='student').filter(Q(national_code__in=codes) | Q(pk__in=ids))
+            by_id = {u.pk: u for u in students}
+            by_code = {_valid_code(u.national_code): u for u in students if u.national_code}
+            gray_by_student = {}
+            for e in ClassSlotEnrollment.objects.filter(
+                student_id__in=list(by_id.keys()), class_slot__term_id=saved.term_id,
+                is_carryover=True, carryover_confirmed=False, payment_verified=True,
+            ).order_by('class_slot__number', 'id'):
+                gray_by_student.setdefault(e.student_id, []).append(e)
+
+            rows, skipped_registered, skipped_not_coming = [], 0, 0
+            for row in all_rows:
+                key = str(row.get('key'))
+                if statuses.get(key) == 'ثبت‌نام قطعی شد':
+                    skipped_registered += 1
+                    continue
+                if key in not_coming:
+                    skipped_not_coming += 1
+                    continue
+                student = by_id.get(row.get('student_id')) or by_code.get(_valid_code(row.get('national_code')))
+                gray = next((e for e in gray_by_student.get(student.pk, []) if e.class_slot_id in slot_map), None) if student else None
+                new_slot = slot_map.get(gray.class_slot_id) if gray else None
+                rows.append({
+                    'key': key, 'first_name': row.get('first_name') or '', 'last_name': row.get('last_name') or '',
+                    'national_code': row.get('national_code') or '',
+                    'old': {
+                        'level': row.get('level') or '', 'class_number': row.get('class_number'),
+                        'day': row.get('day') or '', 'time_slot': row.get('time_slot') or '', 'teacher': row.get('teacher') or '',
+                    },
+                    'new_slot_id': new_slot.id if new_slot else None,
+                    'new': brief(new_slot) if new_slot else None,
+                })
+            return Response({
+                'list_id': saved.id, 'list_name': saved.name, 'term_id': saved.term_id, 'term_title': saved.term.title,
+                'rows': rows, 'slots': [brief(sl) for sl in slots],
+                'total_in_list': len(all_rows), 'skipped_registered': skipped_registered, 'skipped_not_coming': skipped_not_coming,
+                'with_suggestion': sum(1 for r in rows if r['new_slot_id']), 'without_suggestion': sum(1 for r in rows if not r['new_slot_id']),
+            })
+        except Exception as exc:  # علت دقیق به کاربر نمایش داده شود تا قابل پیگیری باشد
+            import logging
+            logging.getLogger(__name__).exception('bulk register preview failed')
+            return Response({'error': f'خطای سرور در ساخت فهرست: {type(exc).__name__}: {exc}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+class DropoutExtractBulkRegisterView(APIView):
+    """
+    POST {list_id, items:[{key, class_slot_id}]} : ثبت قطعی همه‌ی ردیف‌های تأییدشده در کلاس انتخاب‌شده‌شان.
+    هر نفر در تراکنش جدا ثبت می‌شود؛ خطای یک نفر بقیه را متوقف نمی‌کند. شهریه/روش پرداخت از ثبت‌نام خاکستری قبلی حفظ می‌شود
+    (کیف پول دوباره کسر نمی‌شود).
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        if not can_edit_menu(request.user, 'class-management'):
+            return Response({'error': 'دسترسی ویرایش ندارید'}, status=status.HTTP_403_FORBIDDEN)
+        from .models import ClassSlot
+        from .carryover import register_student_in_slot, gray_enrollments
+        from .disciplinary import disciplinary_guard
+        from leads.models import UnregisteredStudent
+        from leads.views import _slot_gender_ok
+        try:
+            saved = DropoutExtractList.objects.select_related('term').get(pk=int(request.data.get('list_id')))
+        except (DropoutExtractList.DoesNotExist, TypeError, ValueError):
+            return Response({'error': 'لیست پیدا نشد'}, status=status.HTTP_404_NOT_FOUND)
+        items = request.data.get('items')
+        if not isinstance(items, list) or not items:
+            return Response({'error': 'موردی برای ثبت انتخاب نشده است'}, status=status.HTTP_400_BAD_REQUEST)
+        done, failed = [], []
+        for item in items:
+            key = str((item or {}).get('key') or '')
+            label = key
+            try:
+                with transaction.atomic():
+                    row, student, adapter = _list_row_context(saved, key, create=True)
+                    if not row:
+                        raise ValueError('این فرد در لیست پیدا نشد')
+                    label = f"{row.get('first_name') or ''} {row.get('last_name') or ''}".strip() or key
+                    if not student:
+                        raise ValueError('ساخت/پیدا کردن پرونده‌ی دانش‌آموز ممکن نشد')
+                    slot = ClassSlot.objects.select_for_update().filter(pk=(item or {}).get('class_slot_id'), term_id=saved.term_id).first()
+                    if not slot:
+                        raise ValueError('کلاس انتخاب‌شده در این ترم پیدا نشد')
+                    existing = ClassSlotEnrollment.objects.filter(student=student, class_slot=slot).first()
+                    already_here = bool(existing and existing.payment_verified and (not existing.is_carryover or existing.carryover_confirmed))
+                    warning = disciplinary_guard(request, [student], skip_unregistered=True)
+                    if warning:
+                        raise ValueError('هشدار انضباطی/بدهی دارد؛ این فرد را تکی و با تأیید هشدار ثبت کنید')
+                    if not _slot_gender_ok(slot, student.gender):
+                        raise ValueError('جنسیت فرد با کلاس انتخاب‌شده مغایرت دارد')
+                    gray = next(iter(gray_enrollments(student, saved.term_id)), None)
+                    method = gray.payment_method if gray else ClassSlotEnrollment.PaymentMethod.CASH
+                    amount = gray.tuition_amount if gray else 0
+                    discount = gray.discount_percent if gray else 0
+                    if method == ClassSlotEnrollment.PaymentMethod.WALLET:
+                        method, amount = ClassSlotEnrollment.PaymentMethod.CASH, 0  # کسر دوباره از کیف پول انجام نشود
+                    _enrollment, error = register_student_in_slot(
+                        student, slot, payment_method=method, tuition_amount=amount, discount_percent=discount,
+                        pos_reference_code=(gray.pos_reference_code if gray else '') or '',
+                    )
+                    if error:
+                        raise ValueError(error)
+                    conditions = Q()
+                    if adapter.national_code:
+                        conditions |= Q(national_code=adapter.national_code)
+                    if adapter.phone:
+                        conditions |= Q(phone=adapter.phone)
+                    if conditions:
+                        UnregisteredStudent.objects.filter(term=saved.term, status=UnregisteredStudent.Status.TRACKING).filter(conditions).update(
+                            status=UnregisteredStudent.Status.REGISTERED, registered_at=timezone.now(),
+                        )
+                    done.append({'key': key, 'name': label, 'class_number': slot.number})
+            except ValueError as exc:
+                failed.append({'key': key, 'name': label, 'error': str(exc)})
+            except Exception:  # یک نفر خراب، بقیه را متوقف نکند
+                import logging
+                logging.getLogger(__name__).exception('bulk dropout register failed for %s', key)
+                failed.append({'key': key, 'name': label, 'error': 'خطای پیش‌بینی‌نشده؛ این فرد را تکی ثبت کنید'})
+        return Response({'registered_count': len(done), 'failed_count': len(failed), 'registered': done, 'failed': failed})

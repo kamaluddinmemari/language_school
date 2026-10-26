@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from .models import Book, BookSale, BookStockAddition, BookShortcut
+from .models import Book, BookSale, BookStockAddition, BookShortcut, LevelShortcut
 from . import forecast as fc
 
 
@@ -156,11 +156,54 @@ class BookShortcutSerializer(serializers.ModelSerializer):
         if not value:
             return ''
         part = r'(Alt\+)?(Shift\+)?(Key[A-Z]|Digit[0-9]|Numpad[0-9]|F([1-4]|[6-9]|10))'
-        if not re.fullmatch(part + '(,' + part + ')?', value):
+        if not re.fullmatch(part + '(,' + part + '){0,2}', value):
             raise serializers.ValidationError('کلید میانبر نامعتبر است')
         clash = BookShortcut.objects.filter(hotkey=value)
+        from .models import LevelShortcut
+        level_clash = LevelShortcut.objects.filter(hotkey=value)
         if self.instance:
             clash = clash.exclude(pk=self.instance.pk)
-        if clash.exists():
+        if self.instance:
+            level_clash = level_clash.exclude(pk=self.instance.pk) if isinstance(self.instance, LevelShortcut) else level_clash
+        if clash.exists() or level_clash.exists():
+            raise serializers.ValidationError('این کلید برای میانبر دیگری استفاده شده است')
+        return value
+
+
+class LevelShortcutSerializer(serializers.ModelSerializer):
+    book_title = serializers.CharField(source='book.title', read_only=True)
+    book_category = serializers.CharField(source='book.category', read_only=True)
+    book_unit_price = serializers.IntegerField(source='book.unit_price', read_only=True)
+    book_current_stock = serializers.IntegerField(source='book.current_stock', read_only=True)
+
+    class Meta:
+        model = LevelShortcut
+        fields = ['id', 'level', 'book', 'book_title', 'book_category', 'book_unit_price', 'book_current_stock', 'label', 'terms_covered', 'hotkey', 'order']
+
+    def validate_level(self, value):
+        value = ' '.join(str(value or '').strip().split())
+        if not value:
+            raise serializers.ValidationError('سطح را وارد کنید')
+        return value
+
+    def validate_terms_covered(self, value):
+        if value < 1:
+            raise serializers.ValidationError('تعداد ترم باید حداقل ۱ باشد')
+        return value
+
+    def validate_hotkey(self, value):
+        import re
+        value = (value or '').strip()
+        if not value:
+            return ''
+        part = r'(Alt\+)?(Shift\+)?(Key[A-Z]|Digit[0-9]|Numpad[0-9]|F([1-4]|[6-9]|10))'
+        if not re.fullmatch(part + '(,' + part + '){0,2}', value):
+            raise serializers.ValidationError('کلید میانبر نامعتبر است')
+        from .models import BookShortcut
+        clash = LevelShortcut.objects.filter(hotkey=value)
+        book_clash = BookShortcut.objects.filter(hotkey=value)
+        if self.instance:
+            clash = clash.exclude(pk=self.instance.pk)
+        if clash.exists() or book_clash.exists():
             raise serializers.ValidationError('این کلید برای میانبر دیگری استفاده شده است')
         return value

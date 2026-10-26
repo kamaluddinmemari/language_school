@@ -74,8 +74,9 @@ def build_ranking(include_history=True, term_id=None):
     # ترتیب سال/شماره یا تاریخ پایان هرگز نمی‌تواند ترم آینده را جاری جلو بیندازد.
     today = timezone.localdate()
     terms = list(Term.objects.filter(start_date__isnull=False).order_by('-start_date', '-id'))
-    started_terms = [term for term in terms if term.start_date <= today]
-    current_term = started_terms[0] if started_terms else None
+    from class_management.models import get_current_term
+    resolved_current = get_current_term(today)
+    current_term = next((term for term in terms if resolved_current and term.id == resolved_current.id), None)
     if term_id not in (None, ''):
         try:
             requested_id = int(term_id)
@@ -179,6 +180,7 @@ def build_ranking(include_history=True, term_id=None):
             'start_date': term.start_date.isoformat() if term.start_date else None,
             'start_date_jalali': term.start_date_jalali,
             'is_started': bool(term.start_date and term.start_date <= today),
+            'is_current': bool(current_term and term.id == current_term.id),
         }
     return {
         'config': cfg_obj.payload(),

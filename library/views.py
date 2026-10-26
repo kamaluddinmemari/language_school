@@ -6,8 +6,8 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 import jdatetime
-from .models import Book, BookSale, BookStockAddition, BookShortcut
-from .serializers import BookShortcutSerializer, BookSerializer, BookSaleSerializer, SellBookSerializer, AddBookStockSerializer, BookStockAdditionSerializer
+from .models import Book, BookSale, BookStockAddition, BookShortcut, LevelShortcut
+from .serializers import BookShortcutSerializer, BookSerializer, BookSaleSerializer, SellBookSerializer, AddBookStockSerializer, BookStockAdditionSerializer, LevelShortcutSerializer
 from accounts.menu_permissions import can_edit_menu
 from . import forecast as fc
 
@@ -282,6 +282,45 @@ class BookShortcutDetailView(generics.RetrieveUpdateDestroyAPIView):
     permission_classes = [IsAuthenticated]
     serializer_class = BookShortcutSerializer
     queryset = BookShortcut.objects.select_related('book').all()
+
+    def _denied(self, request):
+        return not can_edit_menu(request.user, 'library')
+
+    def update(self, request, *args, **kwargs):
+        if self._denied(request):
+            return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
+        return super().update(request, *args, **kwargs)
+
+    def destroy(self, request, *args, **kwargs):
+        if self._denied(request):
+            return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
+        return super().destroy(request, *args, **kwargs)
+
+
+class LevelShortcutListView(generics.ListCreateAPIView):
+    """میانبرهای فروش بر اساس سطح؛ سطح و کتاب در یک رکورد قابل تغییرند."""
+    permission_classes = [IsAuthenticated]
+    serializer_class = LevelShortcutSerializer
+
+    def get_queryset(self):
+        if not can_edit_menu(self.request.user, 'library'):
+            return LevelShortcut.objects.none()
+        return LevelShortcut.objects.select_related('book').all()
+
+    def create(self, request, *args, **kwargs):
+        if not can_edit_menu(request.user, 'library'):
+            return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
+        return super().create(request, *args, **kwargs)
+
+    def perform_create(self, serializer):
+        last = LevelShortcut.objects.order_by('-order').first()
+        serializer.save(order=(last.order + 1) if last else 0)
+
+
+class LevelShortcutDetailView(generics.RetrieveUpdateDestroyAPIView):
+    permission_classes = [IsAuthenticated]
+    serializer_class = LevelShortcutSerializer
+    queryset = LevelShortcut.objects.select_related('book').all()
 
     def _denied(self, request):
         return not can_edit_menu(request.user, 'library')

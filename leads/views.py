@@ -1599,7 +1599,8 @@ class EmployeeFollowupTermListView(APIView):
     def get(self, request):
         if not (can_edit_menu(request.user, 'followups') or can_edit_menu(request.user, 'new-leads')):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
-        from class_management.models import Term
+        from class_management.models import Term, get_current_term
+        current = get_current_term()
         return Response([
             {
                 'id': term.id, 'year': term.year, 'term_number': term.term_number,
@@ -1607,6 +1608,7 @@ class EmployeeFollowupTermListView(APIView):
                 'end_date': term.end_date.isoformat(),
                 'start_date_jalali': term.start_date_jalali,
                 'end_date_jalali': term.end_date_jalali,
+                'is_current': bool(current and term.id == current.id),
             }
             for term in Term.objects.all().order_by('-start_date', '-id')
         ])

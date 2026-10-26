@@ -1,12 +1,16 @@
 """پیش‌بینی خودکار تعداد زبان‌آموز ترم بعد برای هر کتاب، از روی ثبت‌نام‌های ترم ملاک.
 
-- ترم ملاک: پیش‌فرض آخرین ترم؛ با پارامتر ?forecast_term=<id> قابل تغییر است.
+ - ترم ملاک: پیش‌فرض ترم جاریِ کتابخانه بر اساس تاریخ شروع ترم؛ با پارامتر ?forecast_term=<id> قابل تغییر است.
+  پیش‌ثبت‌نام در این بخش ملاک جابه‌جایی ترم نیست و تا هفت روز پس از شروع ترم بعد، ترم قبلی حفظ می‌شود.
 - فقط زبان‌آموزان ثبت‌نام‌شده‌ی قطعی (پرداخت‌تأییدشده و نه «منتظر ثبت‌نام» خاکستری) در کلاس‌های
   زوج، فرد و یک‌روز در هفته شمرده می‌شوند. هر زبان‌آموز برای هر کتاب فقط یک‌بار.
 - سطح‌های هر کتاب: اگر در فیلد forecast_levels کتاب چیزی نوشته شده همان؛ وگرنه جدول پیش‌فرض
   زیر که از روی عنوان کتاب تشخیص داده می‌شود.
 """
 import re
+from datetime import timedelta
+
+from django.utils import timezone
 
 ONE_AND_TWO_DAY_TYPES = (
     'even', 'odd',
@@ -94,6 +98,26 @@ def ordered_terms():
     return sorted(Term.objects.all(), key=lambda t: (t.start_date, t.id))
 
 
+def library_current_term(terms, today=None):
+    """ترم ملاک اختصاصی کتابخانه را بر اساس تاریخ شروع ترم برمی‌گرداند.
+
+    این منطق عمداً از ``class_management.models.get_current_term`` جداست:
+    پیش‌ثبت‌نام ترم بعد باعث تغییر ملاک کتابخانه نمی‌شود و از روز شروع ترم
+    بعد تا پایان هفت روز اول، شمارش کتاب همچنان برای ترم قبلی انجام می‌شود.
+    """
+    if not terms:
+        return None
+    today = today or timezone.localdate()
+    started = [term for term in terms if term.start_date and term.start_date <= today]
+    if not started:
+        return terms[0]
+    latest_started = started[-1]
+    previous = started[-2] if len(started) > 1 else None
+    if previous and latest_started.start_date <= today <= latest_started.start_date + timedelta(days=7):
+        return previous
+    return latest_started
+
+
 def resolve_term(term_id=None):
     terms = ordered_terms()
     if not terms:
@@ -106,9 +130,7 @@ def resolve_term(term_id=None):
                     return t, terms
         except (TypeError, ValueError):
             pass
-    from leads.models import get_current_term
-    current = get_current_term()
-    return current, terms
+    return library_current_term(terms), terms
 
 
 def current_mode():

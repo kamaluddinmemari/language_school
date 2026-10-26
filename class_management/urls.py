@@ -1,12 +1,12 @@
 from django.urls import path
-from .dropout_extract import DropoutExtractParseView, DropoutExtractComputeView, DropoutExtractCommitView, DropoutExtractFollowUpView, DropoutExtractListView, DropoutExtractListRefreshPreviewView, DropoutExtractListRefreshConfirmView, DropoutExtractRegisterOptionsView, DropoutExtractRegisterView, DropoutStatsView
+from .dropout_extract import DropoutExtractParseView, DropoutExtractComputeView, DropoutExtractCommitView, DropoutExtractFollowUpView, DropoutExtractListView, DropoutExtractListRefreshPreviewView, DropoutExtractListRefreshConfirmView, DropoutExtractRegisterOptionsView, DropoutExtractRegisterView, DropoutExtractBulkRegisterPreviewView, DropoutExtractBulkRegisterView, DropoutStatsView
 from .views import (
     ClassSlotListView, ClassSlotDetailView, SwapClassLocationView, TransferClassLocationView, AllocateClassesView,
     ConfirmOverflowView, EnrollmentPulseView, StudentClassSearchView, TransferSurplusView, SpinOffSurplusView, ClassStatsView,
-    BulkCreatePhysicalClassesView, ClassSlotEnrollView, ClassSlotExcelImportView, ClassSlotUnenrollView, ClassSlotRosterView,
+    BulkCreatePhysicalClassesView, ClassSlotEnrollView, ClassSlotExcelImportView, ClassSlotUnenrollView, ClassSlotRosterView, TermRegisteredPeopleView,
     TuitionSuggestionView, TuitionSettingListView, TuitionSettingDetailView, DiscountedPersonListView, DiscountedPersonDetailView,
     TermOverviewView, AttendanceStatusView, RefundEnrollmentView, TransferEnrollmentOptionsView, TransferEnrollmentView, CreditToWalletView,
-    ConfirmCarryoverEnrollmentView, MarkCarryoverEnrollmentView, GraduatedStudentsView, GraduatedStudentLookupView,
+    TermSettingView, ConfirmCarryoverEnrollmentView, MarkCarryoverEnrollmentView, GraduatedStudentsView, GraduatedStudentLookupView,
     StudentFinancialHistoryView, EnrollmentReportView, EnrollmentTermChartView, SplitClassView, DirectEnrollSuggestionsView,
     MyDirectEnrollSuggestionsView, SelfEnrollView, VerifyEnrollmentPaymentView, MyEnrollmentsView,
     LevelRenewalApprovalListView, LevelRenewalApprovalDecideView,
@@ -48,6 +48,7 @@ urlpatterns = [
     path('class-management/slots/<int:pk>/enroll/<int:student_id>/confirm-carryover/', ConfirmCarryoverEnrollmentView.as_view(), name='class_slot_confirm_carryover'),
     path('class-management/slots/<int:pk>/enroll/<int:student_id>/mark-carryover/', MarkCarryoverEnrollmentView.as_view(), name='class_slot_mark_carryover'),
     path('class-management/slots/<int:pk>/enroll/<int:student_id>/to-wallet/', CreditToWalletView.as_view(), name='class_slot_to_wallet'),
+    path('class-management/registered-people/', TermRegisteredPeopleView.as_view(), name='term_registered_people'),
     path('class-management/slots/<int:pk>/roster/', ClassSlotRosterView.as_view(), name='class_slot_roster'),
     path('class-management/slots/<int:pk>/tuition-suggestion/', TuitionSuggestionView.as_view(), name='class_tuition_suggestion'),
     path('class-management/bulk-create/', BulkCreatePhysicalClassesView.as_view(), name='class_bulk_create'),
@@ -86,6 +87,8 @@ urlpatterns = [
     path('class-management/dropout-extract/lists/refresh-confirm/', DropoutExtractListRefreshConfirmView.as_view(), name='dropout_extract_list_refresh_confirm'),
     path('class-management/dropout-extract/register-options/', DropoutExtractRegisterOptionsView.as_view(), name='dropout_extract_register_options'),
     path('class-management/dropout-extract/register/', DropoutExtractRegisterView.as_view(), name='dropout_extract_register'),
+    path('class-management/dropout-extract/bulk-register-preview/', DropoutExtractBulkRegisterPreviewView.as_view(), name='dropout_extract_bulk_register_preview'),
+    path('class-management/dropout-extract/bulk-register/', DropoutExtractBulkRegisterView.as_view(), name='dropout_extract_bulk_register'),
     path('class-management/dropout-extract/followups/', DropoutExtractFollowUpView.as_view(), name='dropout_extract_followups'),
     path('class-management/dropout-extract/stats/', DropoutStatsView.as_view(), name='dropout_extract_stats'),
     path('class-management/surveys/', SurveyListView.as_view(), name='class_survey_lists'),
@@ -105,6 +108,7 @@ urlpatterns = [
     path('class-management/terms/carry-classes/', CarryClassesToNextTermView.as_view(), name='carry_classes_to_next_term'),
     path('class-management/terms/update-carryover-students/', UpdateCarryoverStudentsView.as_view(), name='update_carryover_students'),
     path('class-management/teachers/<int:teacher_id>/education-history/', TeacherEducationHistoryView.as_view(), name='teacher_education_history'),
+    path('class-management/term-settings/', TermSettingView.as_view(), name='term_settings'),
     path('class-management/my-survey-results/', TeacherSurveyResultsView.as_view(), name='my_survey_results'),
     path('class-management/my-term-classes/', TeacherTermClassesView.as_view(), name='my_term_classes'),
     path('class-management/teacher-term-report/', TeacherTermReportView.as_view(), name='teacher_term_report'),

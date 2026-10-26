@@ -203,6 +203,32 @@ class TermListView(generics.ListCreateAPIView):
         return super().create(request, *args, **kwargs)
 
 
+class TermSettingView(APIView):
+    """GET/POST تیک سراسری «آخرین ترم موجود را ترم جاری حساب کن» + ترم جاریِ فعلی."""
+    permission_classes = [IsAuthenticated]
+
+    def _payload(self):
+        from .models import TermSetting, get_current_term
+        current = get_current_term()
+        return {
+            'force_latest_term': TermSetting.get().force_latest_term,
+            'current_term_id': current.id if current else None,
+            'current_term_title': current.title if current else '',
+        }
+
+    def get(self, request):
+        return Response(self._payload())
+
+    def post(self, request):
+        if not can_edit_menu(request.user, 'class-management'):
+            return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
+        from .models import TermSetting
+        setting = TermSetting.get()
+        setting.force_latest_term = str(request.data.get('force_latest_term', '')).lower() in ('1', 'true', 'yes', 'on')
+        setting.save()
+        return Response(self._payload())
+
+
 class CarryClassesToNextTermView(APIView):
     """انتقال انتخابی کلاس‌های یک ترم به ترم مقصد.
 
@@ -1484,7 +1510,9 @@ class ClassSlotEnrollView(APIView):
         # باشد؛ وگرنه ثبت‌نام مسدود می‌شود (مگر با تایید صریح force_level_mismatch)
         current_info = _compute_level_suggestion(student)
         current_level = current_info['level']
-        if slot.assigned_level and current_level and _normalize_level(slot.assigned_level) != _normalize_level(current_level) \
+        # سطح بعدی و بالاتر (و ردهٔ سنی بالاتر) و خودِ سطح فعلی مجازند؛ فقط سطح پایین‌تر/نامرتبط نیاز به تایید دارد
+        allowed_levels = set(_suggestion_plan(current_level)) if current_level else set()
+        if slot.assigned_level and current_level and _normalize_level(slot.assigned_level) not in (allowed_levels | {_normalize_level(current_level)}) \
                 and not data.get('force_level_mismatch'):
             return Response({
                 'error': f"سطح فعلی این دانش‌آموز «{current_level}» است، ولی این کلاس سطح «{slot.assigned_level}» دارد — این ثبت‌نام با سطح دانش‌آموز همخوانی ندارد",
@@ -3134,6 +3162,67 @@ def _classes_matching_level(level, gender=None):
     return qs
 
 
+_AGE_RANK = {'kids': 0, 'teen': 1, 'adult': 2}
+
+
+def _suggestion_plan(level, as_target=False):
+    """
+    برنامهٔ پیشنهاد کلاس برای ثبت‌نام ترم بعد، بر اساس ترتیب «سطوح استاندارد» (StandardLevel.order):
+    - سطح فعلی فرد (as_target=False): پیشنهاد اصلی = سطح بعدیِ همان رده سنی؛ سپس خودِ سطح فعلی،
+      سطوح بالاترِ همان رده و تمام سطوح ردهٔ سنی بالاتر به‌عنوان گزینه‌های عادی.
+    - فردِ بدون سطح فعلی که مدیر سطح را انتخاب کرده (as_target=True): پیشنهاد اصلی = همان سطح انتخابی؛
+      سطوح بالاتر گزینهٔ عادی.
+    خروجی: {سطح نرمال‌شده: (relation, sort_key)} — relation یکی از primary / same / higher / higher_age.
+    """
+    from level_tests.models import StandardLevel
+    rows = list(StandardLevel.objects.all().order_by('age_group', 'order', 'code'))
+    target = _normalize_level(level)
+    current = next((row for row in rows if _normalize_level(row.code) == target), None)
+    if not current:
+        return {target: ('primary' if as_target else 'same', (0, 0))} if target else {}
+    cur_age = _AGE_RANK.get(current.age_group, 9)
+
+    def key(row):
+        return (_AGE_RANK.get(row.age_group, 9), row.order)
+
+    plan = {}
+    higher_in_age = [r for r in rows if r.age_group == current.age_group and r.order > current.order]
+    higher_age = [r for r in rows if _AGE_RANK.get(r.age_group, 9) > cur_age]
+    if as_target:
+        plan[target] = ('primary', key(current))
+        primaries = set()
+    else:
+        next_order = min((r.order for r in higher_in_age), default=None)
+        primaries = {r.code for r in higher_in_age if r.order == next_order} if next_order is not None else set()
+        plan[target] = ('same', key(current))
+    for row in higher_in_age:
+        plan[_normalize_level(row.code)] = ('primary' if row.code in primaries else 'higher', key(row))
+    for row in higher_age:
+        plan[_normalize_level(row.code)] = ('higher_age', key(row))
+    return plan
+
+
+def _suggested_classes(level, gender=None, term_id=None, as_target=False):
+    """کلاس‌های قابل پیشنهاد (هم‌جنس یا مختلط) با برچسب relation؛ پیشنهاد اصلی اول لیست می‌آید."""
+    plan = _suggestion_plan(level, as_target=as_target)
+    if not plan:
+        return []
+    qs = ClassSlot.objects.select_related('term')
+    if term_id:
+        qs = qs.filter(term_id=term_id)
+    if gender:
+        class_gender = {'male': ClassSlot.Gender.BOYS, 'female': ClassSlot.Gender.GIRLS}.get(gender, gender)
+        qs = qs.filter(Q(gender=class_gender) | Q(gender=ClassSlot.Gender.MIXED))
+    result = []
+    for slot in qs:
+        entry = plan.get(_normalize_level(slot.assigned_level))
+        if entry:
+            result.append((slot, entry[0], entry[1]))
+    rank = {'primary': 0, 'same': 1, 'higher': 2, 'higher_age': 3}
+    result.sort(key=lambda item: (rank[item[1]], item[2], item[0].number or 0, item[0].id))
+    return result
+
+
 def _compute_level_suggestion(student):
     """
     منطق مشترکِ حدس سطح دانش‌آموز برای «ثبت‌نام مستقیم» (هم پنل ادمین هم اپ):
@@ -3231,8 +3320,15 @@ class DirectEnrollSuggestionsView(APIView):
 
         # خواسته‌ی ۲: اگه سطح پیشنهادی درست نبود، مدیر می‌تونه دستی سطح رو بزنه — کلاس‌های
         # همون سطح (در همه‌ی ساعت‌ها، هم‌جنسیت) دوباره لیست می‌شن، بدون چک انقضا/سطح‌پایانی
+        has_current_level = bool(info['level'])
+        current_level = info['level']
+        term_id = request.query_params.get('term_id') or None
+        # سطح فعلی فرد → پیشنهاد اصلی «سطح بعدی»؛ بدون سطح فعلی → پیشنهاد اصلی همان سطحی که مدیر انتخاب کرده
+        plan_level = manual_level or current_level
+        as_target = bool(manual_level) and not has_current_level
+        suggested = _suggested_classes(plan_level, student.gender, term_id, as_target=as_target) if plan_level else []
+        info['eligible'] = [slot for slot, _rel, _key in suggested]
         if manual_level:
-            info['eligible'] = _classes_matching_level(manual_level, student.gender)
             info['level'] = manual_level
             info['age_group'] = infer_age_group_from_level(manual_level)
             setting = TuitionSetting.objects.filter(level=manual_level, age_group=info['age_group']).first()
@@ -3240,6 +3336,10 @@ class DirectEnrollSuggestionsView(APIView):
             info['needs_retest'] = False
             info['retest_reason'] = ''
             info['source'] = 'manual'
+
+        relations = {slot.id: rel for slot, rel, _key in suggested}
+        eligible_payload = ClassSlotSerializer(info['eligible'], many=True).data
+        eligible_payload = [{**item, 'suggestion': relations.get(item['id'], 'higher')} for item in eligible_payload]
 
         return Response({
             'student_id': student.id,
@@ -3254,7 +3354,10 @@ class DirectEnrollSuggestionsView(APIView):
             'needs_retest': info['needs_retest'],
             'retest_reason': info['retest_reason'],
             'renewal_status': info['renewal_status'],
-            'eligible_classes': ClassSlotSerializer(info['eligible'], many=True).data,
+            'eligible_classes': eligible_payload,
+            'level_role': 'target' if as_target else 'current',
+            'current_level': current_level,
+            'primary_levels': sorted({item['assigned_level'] for item in eligible_payload if item['suggestion'] == 'primary'}),
             'base_tuition': info['base_tuition'],
             'wallet_balance': student.wallet_balance,
             'previous_discount_percent': info['discount_percent'],
@@ -5758,3 +5861,144 @@ class AttendanceStatusView(APIView):
                 'recorded': marked.get(slot.id, 0) > 0, 'marked_count': marked.get(slot.id, 0),
             })
         return Response({'date': day.isoformat(), 'term': term.id, 'term_title': term.title, 'classes': out})
+
+
+def _registered_person_key(national_code='', phone='', first_name='', last_name=''):
+    """کلید یکتای فرد برای ادغام ردیف‌های یک نفر از منابع مختلف: کد ملی ← موبایل+نام ← نام."""
+    national = re.sub(r'\D', '', str(national_code or ''))
+    if national:
+        return f'nc:{national}'
+    name = ' '.join(f'{first_name or ""} {last_name or ""}'.split()).casefold()
+    phone_digits = re.sub(r'\D', '', str(phone or ''))
+    if phone_digits and name:
+        return f'ph:{phone_digits}|{name}'
+    return f'nm:{name}' if name else ''
+
+
+class TermRegisteredPeopleView(APIView):
+    """
+    GET ?term=<id>: فهرست یکپارچهٔ «همهٔ افرادی که در این ترم، از هر مسیری، ثبت‌نام کرده‌اند».
+    منابع (هر فرد فقط یک ردیف دارد و برچسب منابعش جمع می‌شود):
+      ۱) ثبت‌نام در کلاس (دستی/اکسل/اپ دانش‌آموز/انتقالی/پیگیری ثبت‌نام‌نشده‌ها/ورودی‌های جدید/ریزشی‌ها)
+      ۲) پیگیری افراد ثبت‌نام‌نشده با وضعیت «ثبت‌نام شد» در همین ترم
+      ۳) لیست انتظار ورودی‌های جدید با وضعیت «ثبت‌نام شد» در همین ترم
+      ۴) تعیین سطحِ تکمیل‌شده‌ای که فرد را در کلاسی از همین ترم جایابی کرده است
+    ردیف‌هایی که کلاس مشخص ندارند با class_number خالی و has_class=False برگردانده می‌شوند.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        if not (can_view_menu(request.user, 'class-management') or can_edit_menu(request.user, 'class-management')):
+            return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
+        term_id = request.query_params.get('term')
+        term = Term.objects.filter(pk=term_id).first() if term_id else None
+        if not term:
+            return Response({'error': 'ترم پیدا نشد'}, status=status.HTTP_404_NOT_FOUND)
+
+        from leads.models import UnregisteredStudent, NewLead
+
+        rows = {}
+        order = []
+
+        def slot_fields(slot):
+            if not slot:
+                return {
+                    'slot_id': None, 'level': '', 'class_number': None, 'day': '', 'day_type': '', 'time': '', 'teacher': '', 'has_class': False,
+                }
+            return {
+                'slot_id': slot.id, 'level': slot.assigned_level or '', 'class_number': slot.number,
+                'day': slot.day_type_display or slot.day_type or '', 'day_type': slot.day_type or '', 'time': slot.time_slot or '',
+                'teacher': slot.teacher_name or 'بدون استاد', 'has_class': True,
+            }
+
+        def add(key, source, base, slot=None, fallback_level=''):
+            if not key:
+                key = f'row:{len(order)}'
+            row = rows.get(key)
+            if row is None:
+                row = {
+                    'student_id': None, 'student_name': '', 'national_code': '', 'phone': '',
+                    'payment_verified': True, 'is_carryover': False, 'carryover_confirmed': False,
+                    'sources': [], 'has_enrollment': False, 'is_confirmed': False, 'registered_at': '', 'level': '', 'slot_id': None, 'class_number': None,
+                    'day': '', 'day_type': '', 'time': '', 'teacher': '', 'has_class': False,
+                }
+                rows[key] = row
+                order.append(key)
+            for field, value in base.items():
+                if value not in (None, '') and (row.get(field) in (None, '') or field in ('payment_verified', 'is_carryover', 'carryover_confirmed')):
+                    row[field] = value
+            if source not in row['sources']:
+                row['sources'].append(source)
+            # اطلاعات کلاس فقط وقتی پر می‌شود که ردیف هنوز کلاسی نداشته باشد (ثبت‌نام واقعی اولویت دارد)
+            if slot and not row['has_class']:
+                row.update(slot_fields(slot))
+            if not row['level'] and fallback_level:
+                row['level'] = fallback_level
+            return row
+
+        # ۱) ثبت‌نام‌های واقعی در کلاس‌های این ترم (تاییدشده و در انتظار تایید پرداخت)
+        enrollments = ClassSlotEnrollment.objects.filter(class_slot__term_id=term.id).select_related('student', 'class_slot').order_by('created_at', 'id')
+        for en in enrollments:
+            st = en.student
+            if en.is_carryover and not en.carryover_confirmed:
+                source = 'منتقل‌شده از ترم قبل (منتظر ثبت‌نام)'
+            elif not en.payment_verified:
+                source = 'ثبت‌نام اپ (در انتظار تأیید پرداخت)'
+            elif en.self_enrolled:
+                source = 'ثبت‌نام از اپ دانش‌آموز'
+            else:
+                source = 'ثبت‌نام در کلاس'
+            key = _registered_person_key(st.national_code, st.phone, st.first_name, st.last_name)
+            row = add(key, source, {
+                'student_id': st.id, 'student_name': f'{st.first_name or ""} {st.last_name or ""}'.strip(),
+                'national_code': st.national_code or '', 'phone': st.phone or '',
+                'registered_at': en.created_at_jalali or '',
+            }, slot=en.class_slot)
+            row['has_enrollment'] = True
+            # اگر فرد چند ثبت‌نام دارد، ثبت‌نام قطعی/تأییدشده بر ثبت‌نام در انتظار یا منتقل‌نشده اولویت دارد
+            is_final = en.payment_verified and (not en.is_carryover or en.carryover_confirmed)
+            if is_final:
+                row.update(slot_fields(en.class_slot))
+                row.update(payment_verified=True, is_carryover=en.is_carryover, carryover_confirmed=en.carryover_confirmed, _confirmed=True, is_confirmed=True)
+            elif not row.get('_confirmed'):
+                row.update(slot_fields(en.class_slot))
+                row.update(payment_verified=en.payment_verified, is_carryover=en.is_carryover, carryover_confirmed=en.carryover_confirmed)
+
+        # ۲) پیگیری ثبت‌نام‌نشده‌ها که «ثبت‌نام شد» خورده‌اند
+        for u in UnregisteredStudent.objects.filter(term_id=term.id, status=UnregisteredStudent.Status.REGISTERED).select_related('reported_slot'):
+            key = _registered_person_key(u.national_code, u.phone, u.first_name, u.last_name)
+            add(key, 'پیگیری ثبت‌نام‌نشده‌ها', {
+                'student_name': f'{u.first_name} {u.last_name}'.strip(), 'national_code': u.national_code or '', 'phone': u.phone or '',
+                'registered_at': u.registered_at_jalali or '',
+            }, slot=u.reported_slot, fallback_level=u.class_level or '')
+
+        # ۳) ورودی‌های جدید (لیست انتظار) که ثبت‌نام شده‌اند
+        for lead in NewLead.objects.filter(term_id=term.id, status=NewLead.Status.REGISTERED):
+            key = _registered_person_key(lead.national_code, lead.phone, lead.first_name, lead.last_name)
+            add(key, 'ورودی‌های جدید', {
+                'student_name': f'{lead.first_name} {lead.last_name}'.strip(), 'national_code': lead.national_code or '', 'phone': lead.phone or '',
+                'registered_at': lead.registered_at_jalali or '',
+            }, fallback_level=lead.requested_level or '')
+
+        # ۴) تعیین سطح‌های تکمیل‌شده‌ای که فرد را در کلاس همین ترم جایابی کرده‌اند
+        tests = LevelTest.objects.filter(
+            status=LevelTest.Status.COMPLETED, assigned_class_slot__term_id=term.id,
+        ).select_related('assigned_class_slot', 'student').order_by('updated_at', 'id')
+        for t in tests:
+            key = _registered_person_key(t.national_code, t.phone, t.first_name, t.last_name)
+            add(key, 'تعیین سطح', {
+                'student_id': t.student_id, 'student_name': f'{t.first_name} {t.last_name}'.strip(),
+                'national_code': t.national_code or '', 'phone': t.phone or '',
+                'registered_at': jdatetime.datetime.fromgregorian(datetime=timezone.localtime(t.updated_at)).strftime('%Y/%m/%d') if t.updated_at else '',
+            }, slot=t.assigned_class_slot, fallback_level=t.level or '')
+
+        result = []
+        for key in order:
+            row = rows[key]
+            row.pop('_confirmed', None)
+            row['key'] = key
+            row['level'] = row['level'] or '—'
+            row['sources_text'] = '، '.join(row['sources'])
+            result.append(row)
+        result.sort(key=lambda r: (r['class_number'] is None, r['class_number'] or 0, r['student_name']))
+        return Response({'term': term.id, 'count': len(result), 'rows': result})

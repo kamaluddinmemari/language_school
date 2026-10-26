@@ -159,6 +159,23 @@ class BookShortcut(models.Model):
         return self.label or self.book.title
 
 
+class LevelShortcut(models.Model):
+    """میانبر فروش بر اساس سطح زبان‌آموز؛ هر سطح به یک کتاب وصل می‌شود."""
+    level = models.CharField(max_length=80, unique=True, help_text='نام سطح، مثل teen1 یا 103')
+    book = models.ForeignKey(Book, on_delete=models.CASCADE, related_name='level_shortcuts')
+    label = models.CharField(max_length=80, blank=True, help_text='عنوان نمایشی میانبر')
+    terms_covered = models.PositiveIntegerField(default=1, help_text='این کتاب چند ترم این سطح را پوشش می‌دهد')
+    hotkey = models.CharField(max_length=40, blank=True, help_text='کلید میانبر سطح')
+    order = models.PositiveIntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['order', 'id']
+
+    def __str__(self):
+        return self.label or self.level
+
+
 class LibrarySetting(models.Model):
     """تنظیمات مشترک کتابخانه (یک ردیف): روش محاسبه‌ی تعداد زبان‌آموز ترم بعد برای سفارش کتاب و مبلغ پیش‌فرض بیعانه."""
 

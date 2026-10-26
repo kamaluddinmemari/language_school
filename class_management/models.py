@@ -72,13 +72,40 @@ class Term(models.Model):
     term_number = models.PositiveSmallIntegerField(help_text='شماره‌ی ترم، از ۱ تا ۸')
     start_date = models.DateField(help_text='تاریخ شروع ترم (میلادی ذخیره می‌شود؛ در پنل به‌صورت شمسی وارد/نمایش می‌شود)')
     end_date = models.DateField(help_text='تاریخ پایان ترم (میلادی ذخیره می‌شود؛ در پنل به‌صورت شمسی وارد/نمایش می‌شود)')
+    pre_registration_start = models.DateField(
+        null=True, blank=True,
+        help_text='تاریخ شروع پیش‌ثبت‌نام این ترم؛ از همین تاریخ و به‌مدت یک هفته، این ترم «ترم جاری» حساب می‌شود (معیار اصلی انتخاب ترم)',
+    )
     created_at = models.DateTimeField(auto_now_add=True)
+
+    PRE_REGISTRATION_DAYS = 7
 
     class Meta:
         ordering = ['-year', 'term_number']
         constraints = [
             models.UniqueConstraint(fields=['year', 'term_number'], name='unique_term_per_year')
         ]
+
+    @property
+    def pre_registration_end(self):
+        if not self.pre_registration_start:
+            return None
+        from datetime import timedelta
+        return self.pre_registration_start + timedelta(days=self.PRE_REGISTRATION_DAYS - 1)
+
+    @property
+    def pre_registration_start_jalali(self):
+        if not self.pre_registration_start:
+            return None
+        return jdatetime.date.fromgregorian(date=self.pre_registration_start).strftime('%Y/%m/%d')
+
+    @property
+    def pre_registration_end_jalali(self):
+        end = self.pre_registration_end
+        return jdatetime.date.fromgregorian(date=end).strftime('%Y/%m/%d') if end else None
+
+    def in_pre_registration(self, today):
+        return bool(self.pre_registration_start and self.pre_registration_start <= today <= self.pre_registration_end)
 
     @property
     def start_date_jalali(self):
@@ -98,6 +125,40 @@ class Term(models.Model):
 
     def __str__(self):
         return self.title
+
+
+class TermSetting(models.Model):
+    """تنظیم سراسری (تک‌ردیفی) ترم جاری.
+
+    force_latest_term: اگر روشن باشد، حتی وقتی تاریخ شروع (یا پیش‌ثبت‌نام) ترم بعد نرسیده، «آخرین ترم تعریف‌شده»
+    ترم جاری حساب می‌شود. این تیک مستقل از تاریخ پیش‌ثبت‌نام است و فقط بیرون از بازهٔ پیش‌ثبت‌نام اثر دارد.
+    """
+    force_latest_term = models.BooleanField(default=False)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    @classmethod
+    def get(cls):
+        obj = cls.objects.first()
+        return obj or cls.objects.create()
+
+
+def get_current_term(today=None):
+    """
+    ترم جاری — منبع واحد برای همهٔ بخش‌ها:
+    ۱) معیار اصلی: ترمی که امروز داخل بازهٔ یک‌هفته‌ایِ «شروع پیش‌ثبت‌نام» آن است یا تاریخ شروعش رسیده؛ از بین این‌ها
+       آخرین (بر اساس تاریخ شروع) انتخاب می‌شود.
+    ۲) اگر بیرون از بازهٔ پیش‌ثبت‌نام باشیم و تیک «آخرین ترم موجود» فعال باشد: آخرین ترم تعریف‌شده، حتی اگر زمانش نرسیده.
+    """
+    today = today or timezone.localdate()
+    terms = list(Term.objects.filter(start_date__isnull=False))
+    if not terms:
+        return None
+    ordered = sorted(terms, key=lambda t: (t.start_date, t.id), reverse=True)
+    in_window = any(t.in_pre_registration(today) for t in terms)
+    if not in_window and TermSetting.get().force_latest_term:
+        return ordered[0]
+    candidates = [t for t in ordered if t.start_date <= today or t.in_pre_registration(today)]
+    return candidates[0] if candidates else None
 
 
 class TermHoliday(models.Model):

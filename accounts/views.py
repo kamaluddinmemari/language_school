@@ -412,7 +412,9 @@ class StudentListView(generics.ListCreateAPIView):
         from class_management.models import ClassSlotEnrollment, Term
         terms = list(Term.objects.order_by('year', 'term_number', 'id'))
         today = dj_tz.localdate()
-        started = [t for t in terms if t.start_date and t.start_date <= today] or terms
+        from class_management.models import get_current_term
+        current = get_current_term(today)
+        started = [t for t in terms if t.start_date and current and t.start_date <= current.start_date] or terms
         if not started:
             return set()
         recent_start = started[-2] if len(started) >= 2 else started[0]
