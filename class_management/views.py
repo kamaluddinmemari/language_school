@@ -1,10 +1,13 @@
+from django.contrib.auth import get_user_model
 from django.utils import timezone
+from django.utils.dateparse import parse_date
 import json
 import random
 import re
 import math
 import unicodedata
 from datetime import datetime, timedelta
+from decimal import Decimal, InvalidOperation
 from django.db import IntegrityError, models as django_models, transaction
 from django.db.models import Count, Exists, Max, OuterRef, Q
 from django.core.exceptions import ValidationError
@@ -16,7 +19,7 @@ from rest_framework.response import Response
 from rest_framework.parsers import MultiPartParser, FormParser
 from rest_framework.permissions import IsAuthenticated
 import jdatetime
-from .models import ClassSlot, ClassSlotEnrollment, TuitionSetting, DiscountedPerson, EnrollmentRefund, WalletTransaction, infer_age_group_from_level, _jalali, LevelRenewalApproval, Term, TermHoliday, TermRetentionFollowUp, OnlineCourse, OnlineCourseEnrollment, PaymentSettings, ClassAttendance, OnlineCourseActionRequest
+from .models import ClassSlot, ClassSlotEnrollment, TuitionSetting, DiscountedPerson, EnrollmentRefund, WalletTransaction, infer_age_group_from_level, _jalali, LevelRenewalApproval, Term, TermHoliday, TermRetentionFollowUp, OnlineCourse, OnlineCourseEnrollment, PaymentSettings, ClassAttendance, OnlineCourseActionRequest, GraduatedStudentInfo
 from .models import THREE_DAY_TIME_SLOTS, THURSDAY_MORNING_SLOT, THURSDAY_EVENING_SLOT, FRIDAY_SLOT, FRIDAY_MORNING_SLOT, FRIDAY_EVENING_SLOT
 
 # QR و جلسات استادان فعلاً غیرفعال هستند؛ نبودن مدل‌های این بخش‌ها نباید مانع اجرای ترم و کلاس شود.
@@ -1063,6 +1066,82 @@ def _english_name(value):
     return ' '.join(words).strip().title()
 
 
+_GRADUATE_INFO_TEXT_FIELDS = (
+    'first_name', 'last_name', 'full_name_en', 'national_code', 'phone',
+    'level', 'teacher', 'email', 'gender', 'age_group',
+)
+_GRADUATE_GRADE_FIELDS = (
+    'previous_term_grade_1', 'previous_term_grade_2', 'previous_term_grade_3',
+)
+
+
+def _graduate_record_data(record):
+    data = {field: getattr(record, field) or '' for field in _GRADUATE_INFO_TEXT_FIELDS}
+    data.update({
+        'graduation_date': record.graduation_date.isoformat() if record.graduation_date else '',
+        'average_grade': str(record.average_grade) if record.average_grade is not None else '',
+        'sent_to_center': record.sent_to_center,
+        'next_term': record.next_term,
+        'manual': record.manual,
+        'student_id': record.student_id or '',
+    })
+    data.update({field: str(getattr(record, field)) if getattr(record, field) is not None else '' for field in _GRADUATE_GRADE_FIELDS})
+    return data
+
+
+def _save_graduate_record(term, row, preserve_existing=False):
+    from django.contrib.auth import get_user_model
+
+    manual = row.get('manual') is True
+    raw_id = row.get('id')
+    student = None
+    if manual:
+        record_key = str(raw_id or '').strip()
+        if not record_key.startswith('manual-'):
+            raise ValueError('شناسهٔ ردیف دستی معتبر نیست.')
+        student_id = row.get('student_id')
+        if student_id:
+            student = get_user_model().objects.filter(pk=student_id, role='student').first()
+    else:
+        try:
+            student_id = int(raw_id)
+        except (TypeError, ValueError):
+            raise ValueError('شناسهٔ زبان‌آموز معتبر نیست.')
+        student = get_user_model().objects.filter(pk=student_id, role='student').first()
+        if not student:
+            raise ValueError('زبان‌آموز در سامانه پیدا نشد.')
+        record_key = f'student:{student.pk}'
+
+    record, created = GraduatedStudentInfo.objects.get_or_create(
+        term=term, record_key=record_key,
+        defaults={'student': student, 'manual': manual},
+    )
+    if preserve_existing and not created:
+        return record
+    record.student = student
+    record.manual = manual
+    record.excluded = False
+    for field in _GRADUATE_INFO_TEXT_FIELDS:
+        setattr(record, field, str(row.get(field) or '').strip())
+    record.next_term = row.get('next_term') is True
+    record.sent_to_center = row.get('sent_to_center') is True
+    raw_date = str(row.get('graduation_date') or '').strip()
+    record.graduation_date = parse_date(raw_date) if raw_date else None
+    if raw_date and record.graduation_date is None:
+        raise ValueError('تاریخ میلادی فارغ‌التحصیلی معتبر نیست.')
+    for field in _GRADUATE_GRADE_FIELDS:
+        raw_grade = str(row.get(field) or '').strip()
+        try:
+            value = Decimal(raw_grade) if raw_grade else None
+        except InvalidOperation:
+            raise ValueError('نمره باید عددی باشد.')
+        if value is not None and (not value.is_finite() or value < 0 or value > Decimal('9999.99')):
+            raise ValueError('مقدار نمره معتبر نیست.')
+        setattr(record, field, value)
+    record.save()
+    return record
+
+
 class GraduatedStudentsView(APIView):
     """دانش‌آموزان ثبت‌نام‌شده در سطح پایانی هر ردهٔ سنیِ یک ترم."""
     permission_classes = [IsAuthenticated]
@@ -1110,6 +1189,7 @@ class GraduatedStudentsView(APIView):
                 'first_name_en': _english_name(student.first_name), 'last_name_en': _english_name(student.last_name),
                 'father_name': student.father_name or '', 'national_code': student.national_code or '',
                 'phone': student.phone or '', 'level': level, 'teacher': slot.teacher_name or '',
+                'email': getattr(student, 'email', '') or '',
                 'gender': student.gender or '', 'age_group': age_group, 'next_term': next_term,
             }
         # بررسی می‌کنیم فرد در سه ترم آخر تا سطح فعلی، مسیر سطح‌ها را به‌ترتیب طی کرده باشد.
@@ -1147,14 +1227,39 @@ class GraduatedStudentsView(APIView):
             )
             row['sequence_warning'] = not has_valid_sequence
             row['sequence_warning_text'] = 'هشدار مهم: توالی سه‌ترمی سطح‌ها کامل یا به‌ترتیب نیست.' if row['sequence_warning'] else ''
+        saved_records = list(GraduatedStudentInfo.objects.filter(term=term).select_related('student'))
+        saved_by_key = {item.record_key: item for item in saved_records if not item.excluded}
+        excluded_keys = {item.record_key for item in saved_records if item.excluded}
+        empty_extra = {
+            'graduation_date': '', 'previous_term_grade_1': '', 'previous_term_grade_2': '',
+            'previous_term_grade_3': '', 'average_grade': '', 'sent_to_center': False,
+        }
+        for row in rows_by_student.values():
+            record = saved_by_key.get(f"student:{row['id']}")
+            if record:
+                row.update(_graduate_record_data(record))
+            else:
+                row.update(empty_extra)
+                row['manual'] = False
+        manual_rows = []
+        for record in saved_records:
+            if not record.manual or record.excluded:
+                continue
+            manual_row = _graduate_record_data(record)
+            manual_row.update({
+                'id': record.record_key, 'sequence_warning': False, 'sequence_warning_text': '',
+                'first_name_en': _english_name(record.first_name), 'last_name_en': _english_name(record.last_name),
+            })
+            manual_rows.append(manual_row)
         # ترتیب: بزرگسال، نوجوان، کودک؛ داخل هر ردهٔ سنی افراد همسطح کنار هم می‌مانند.
         age_rank = {'adult': 0, 'teen': 1, 'kids': 2}
         level_rank = {code: index for index, code in enumerate(
             ('406', '606', '405', '605', 'teen15', 'teen14', 'i5', 'u5', 'i4', 'u4')
         )}
-        rows = sorted(rows_by_student.values(), key=lambda row: (
+        visible_student_rows = [row for row in rows_by_student.values() if f"student:{row['id']}" not in excluded_keys]
+        rows = sorted([*visible_student_rows, *manual_rows], key=lambda row: (
             age_rank.get(row['age_group'], 9), int(row.get('next_term', False)), level_rank.get(row['level'].casefold(), 99),
-            gender_rank.get(row['gender'], 9), row['last_name'], row['first_name'], row['id'],
+            gender_rank.get(row['gender'], 9), row['last_name'], row['first_name'], str(row['id']),
         ))
         from django.contrib.auth import get_user_model
         User = get_user_model()
@@ -1164,6 +1269,63 @@ class GraduatedStudentsView(APIView):
             if f"{teacher.first_name or ''} {teacher.last_name or ''}".strip()
         })
         return Response({'term_id': term.id, 'term_title': term.title, 'rows': rows, 'count': len(rows), 'teachers': teachers})
+
+    def post(self, request):
+        if not can_edit_menu(request.user, 'class-management'):
+            return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
+        term_id = request.data.get('term_id')
+        term = Term.objects.filter(pk=term_id).first() if term_id else None
+        if not term:
+            return Response({'error': 'ترم معتبر انتخاب نشده است.'}, status=status.HTTP_400_BAD_REQUEST)
+        action = request.data.get('action', 'save')
+        if action == 'delete':
+            raw_id = str(request.data.get('row_id') or '').strip()
+            is_manual = request.data.get('manual') is True
+            if is_manual:
+                if not raw_id.startswith('manual-'):
+                    return Response({'error': 'شناسهٔ ردیف دستی معتبر نیست.'}, status=status.HTTP_400_BAD_REQUEST)
+                deleted, _ = GraduatedStudentInfo.objects.filter(term=term, record_key=raw_id, manual=True).delete()
+                if not deleted:
+                    return Response({'error': 'ردیف دستی پیدا نشد.'}, status=status.HTTP_404_NOT_FOUND)
+                return Response({'deleted': True, 'manual': True})
+            try:
+                student_id = int(raw_id)
+            except (TypeError, ValueError):
+                return Response({'error': 'شناسهٔ زبان‌آموز معتبر نیست.'}, status=status.HTTP_400_BAD_REQUEST)
+            if not get_user_model().objects.filter(pk=student_id, role='student').exists():
+                return Response({'error': 'زبان‌آموز در سامانه پیدا نشد.'}, status=status.HTTP_404_NOT_FOUND)
+            record, _ = GraduatedStudentInfo.objects.get_or_create(
+                term=term, record_key=f'student:{student_id}',
+                defaults={'student_id': student_id, 'manual': False},
+            )
+            record.excluded = True
+            record.save(update_fields=['excluded', 'updated_at'])
+            return Response({'deleted': True, 'manual': False})
+        if action == 'legacy_import':
+            rows = request.data.get('rows')
+            if not isinstance(rows, list) or len(rows) > 5000:
+                return Response({'error': 'اطلاعات انتقالی معتبر نیست.'}, status=status.HTTP_400_BAD_REQUEST)
+            try:
+                with transaction.atomic():
+                    saved = [_save_graduate_record(term, row, preserve_existing=True) for row in rows if isinstance(row, dict)]
+            except ValueError as exc:
+                return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({'migrated': len(saved)})
+        if action != 'save' or not isinstance(request.data.get('row'), dict):
+            return Response({'error': 'درخواست ذخیره‌سازی معتبر نیست.'}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            record = _save_graduate_record(term, request.data['row'])
+        except ValueError as exc:
+            return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        response_row = _graduate_record_data(record)
+        response_row.update({
+            'id': record.record_key if record.manual else record.student_id,
+            'sequence_warning': False,
+            'sequence_warning_text': '',
+            'first_name_en': _english_name(record.first_name),
+            'last_name_en': _english_name(record.last_name),
+        })
+        return Response({'row': response_row}, status=status.HTTP_200_OK)
 
 
 class GraduatedStudentLookupView(APIView):
@@ -2491,6 +2653,64 @@ class EnrollmentTermChartView(APIView):
             'group_by': group_by,
             'bars': bars,
             'total': len({sid for ids in buckets.values() for sid in ids}),
+        })
+
+
+class TermEnrollmentComparisonView(APIView):
+    """یک تصویر تجمیعی از تعداد زبان‌آموزان یکتا در همهٔ ترم‌ها برای مقایسهٔ پیوسته."""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        if not can_view_menu(request.user, 'class-management'):
+            return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
+
+        ordered_terms = list(Term.objects.all().order_by('start_date', 'id'))
+        term_ids = {term.id for term in ordered_terms}
+        slots = {
+            slot.id: slot
+            for slot in ClassSlot.objects.filter(term_id__in=term_ids).only(
+                'id', 'term_id', 'assigned_level', 'day_type'
+            )
+        }
+        sets = {
+            term.id: {'all': set(), 'levels': {}, 'genders': {}, 'days': {}}
+            for term in ordered_terms
+        }
+        enrollments = ClassSlotEnrollment.objects.filter(
+            class_slot_id__in=slots.keys(), student__role='student', payment_verified=True
+        ).filter(Q(is_carryover=False) | Q(carryover_confirmed=True)).values_list(
+            'class_slot_id', 'student_id', 'student__gender'
+        )
+        for slot_id, student_id, student_gender in enrollments.iterator(chunk_size=2000):
+            slot = slots.get(slot_id)
+            if not slot or slot.term_id not in sets:
+                continue
+            bucket = sets[slot.term_id]
+            bucket['all'].add(student_id)
+            level = (slot.assigned_level or '').strip() or 'بدون سطح'
+            gender = student_gender if student_gender in ('female', 'male') else 'unknown'
+            day = slot.get_day_type_display() or 'نامشخص'
+            bucket['levels'].setdefault(level, set()).add(student_id)
+            bucket['genders'].setdefault(gender, set()).add(student_id)
+            bucket['days'].setdefault(day, set()).add(student_id)
+
+        levels = sorted({key for item in sets.values() for key in item['levels']}, key=str.casefold)
+        days = sorted({key for item in sets.values() for key in item['days']}, key=str.casefold)
+        terms_payload = [{
+            'id': term.id,
+            'title': term.title,
+            'start_date': term.start_date.isoformat() if term.start_date else None,
+            'total': len(sets[term.id]['all']),
+            'levels': {level: len(sets[term.id]['levels'].get(level, set())) for level in levels},
+            'genders': {gender: len(sets[term.id]['genders'].get(gender, set())) for gender in ('female', 'male', 'unknown')},
+            'days': {day: len(sets[term.id]['days'].get(day, set())) for day in days},
+        } for term in ordered_terms]
+        return Response({
+            'terms': terms_payload,
+            'levels': levels,
+            'days': days,
+            'latest_term_id': ordered_terms[-1].id if ordered_terms else None,
+            'generated_at': timezone.now().isoformat(),
         })
 
 

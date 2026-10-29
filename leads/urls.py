@@ -9,9 +9,12 @@ from .views import (
     DiscountedPersonListView, DiscountedPersonDetailView, FollowupStaffListView, EmployeeFollowupDeadlineView,
     EmployeeFollowupTermListView, EmployeeFollowupProgressView,
     UnregisteredMoveOptionsView, UnregisteredMoveView,
+    StudentStatusRegisterOptionsView, StudentStatusRegisterView,
 )
 
 urlpatterns = [
+    path('leads/students/<int:student_id>/register-options/', StudentStatusRegisterOptionsView.as_view(), name='student_status_register_options'),
+    path('leads/students/<int:student_id>/register/', StudentStatusRegisterView.as_view(), name='student_status_register'),
     path('leads/new-lead-register/<int:pk>/', NewLeadRegisterView.as_view(), name='new_lead_register'),
     path('leads/new-lead-register-options/<int:pk>/', NewLeadRegisterOptionsView.as_view(), name='new_lead_register_options'),
     path('leads/new-leads/', NewLeadListView.as_view(), name='new_lead_list'),

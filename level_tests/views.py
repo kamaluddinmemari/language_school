@@ -124,8 +124,9 @@ class LevelChoicesView(APIView):
 
 class AvailableClassSlotsForLevelView(APIView):
     """
-    خواسته: برای فرم «ثبت نتیجه‌ی تعیین سطح» — همه‌ی کلاس‌های ترمِ جاری (آخرین ترم تعریف‌شده)
-    که با جنسیتِ داوطلب سازگارند (همان جنسیت + کلاس‌های مختلط) را برمی‌گرداند. از این یک
+    خواسته: برای فرم «ثبت نتیجه‌ی تعیین سطح» — کلاس‌های ترمِ جاری (آخرین ترم تعریف‌شده)
+    را برمی‌گرداند؛ آرشیو می‌تواند با term_id ترمِ موردنظرش را صریحاً انتخاب کند. کلاس‌ها
+    با جنسیتِ داوطلب سازگارند (همان جنسیت + کلاس‌های مختلط). از این یک
     پاسخ هم برای رنگ‌آمیزیِ سطوحِ موجود/ناموجود (بر اساس اینکه سطح در نتیجه حضور دارد یا نه)
     و هم برای پیشنهاد کلاسِ متناسب با سطحِ انتخابی، در فرانت استفاده می‌شود.
 
@@ -140,8 +141,11 @@ class AvailableClassSlotsForLevelView(APIView):
     def get(self, request):
         from class_management.models import ClassSlot
         from leads.models import get_current_term
+        from class_management.models import Term
         gender = (request.query_params.get('gender') or '').strip()
-        latest_term = get_current_term()
+        term_param = request.query_params.get('term_id')
+        selected_term = Term.objects.filter(pk=term_param).first() if str(term_param or '').isdigit() else None
+        latest_term = selected_term or get_current_term()
         if not latest_term:
             return Response([])
         qs = ClassSlot.objects.filter(term=latest_term).exclude(assigned_level='').annotate(
@@ -156,6 +160,7 @@ class AvailableClassSlotsForLevelView(APIView):
             'term_number': latest_term.term_number,
             'term_year': latest_term.year,
             'term_title': latest_term.title,
+            'term_id': latest_term.id,
             'level': c.assigned_level,
             'day_display': c.get_day_type_display(),
             'time_slot': c.time_slot,

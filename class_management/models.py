@@ -1,6 +1,7 @@
 from django.db import models
 from django.conf import settings
 from django.utils import timezone
+from decimal import Decimal
 import jdatetime
 from accounts.archive import keep_current_term_records
 from level_tests.levels import get_all_level_choices
@@ -125,6 +126,48 @@ class Term(models.Model):
 
     def __str__(self):
         return self.title
+
+
+class GraduatedStudentInfo(models.Model):
+    """اطلاعات فارغ‌التحصیلیِ واردشده در پنل؛ روی سرور و به تفکیک ترم نگه‌داری می‌شود."""
+    term = models.ForeignKey(Term, on_delete=models.CASCADE, related_name='graduated_student_records')
+    student = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='graduated_student_records', limit_choices_to={'role': 'student'},
+    )
+    record_key = models.CharField(max_length=100)
+    manual = models.BooleanField(default=False)
+    first_name = models.CharField(max_length=150, blank=True)
+    last_name = models.CharField(max_length=150, blank=True)
+    full_name_en = models.CharField(max_length=200, blank=True)
+    national_code = models.CharField(max_length=32, blank=True)
+    phone = models.CharField(max_length=32, blank=True)
+    level = models.CharField(max_length=80, blank=True)
+    teacher = models.CharField(max_length=200, blank=True)
+    email = models.EmailField(blank=True)
+    gender = models.CharField(max_length=20, blank=True)
+    age_group = models.CharField(max_length=20, blank=True)
+    next_term = models.BooleanField(default=False)
+    graduation_date = models.DateField(null=True, blank=True)
+    previous_term_grade_1 = models.DecimalField(max_digits=6, decimal_places=2, null=True, blank=True)
+    previous_term_grade_2 = models.DecimalField(max_digits=6, decimal_places=2, null=True, blank=True)
+    previous_term_grade_3 = models.DecimalField(max_digits=6, decimal_places=2, null=True, blank=True)
+    average_grade = models.DecimalField(max_digits=6, decimal_places=2, null=True, blank=True)
+    sent_to_center = models.BooleanField(default=False)
+    excluded = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['last_name', 'first_name', 'id']
+        constraints = [
+            models.UniqueConstraint(fields=['term', 'record_key'], name='unique_graduate_record_per_term_key'),
+        ]
+
+    def save(self, *args, **kwargs):
+        grades = [self.previous_term_grade_1, self.previous_term_grade_2, self.previous_term_grade_3]
+        self.average_grade = (sum(grades) / 3).quantize(Decimal('0.01')) if all(value is not None for value in grades) else None
+        super().save(*args, **kwargs)
 
 
 class TermSetting(models.Model):

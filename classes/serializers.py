@@ -25,15 +25,18 @@ def validate_active_identity(attrs, *, student=None):
     first_name = normalize_identity(attrs.get('first_name') or getattr(student, 'first_name', ''))
     last_name = normalize_identity(attrs.get('last_name') or getattr(student, 'last_name', ''))
     national_code = normalize_identity(attrs.get('national_code') or getattr(student, 'national_code', ''))
+    phone = normalize_identity(attrs.get('phone') or getattr(student, 'phone', ''))
     class_type = attrs.get('class_type')
     full_name = normalize_identity(f'{first_name}{last_name}')
-    if not full_name or not national_code or not class_type:
+    if not full_name or not class_type:
         return
     qs = ClassRequest.objects.filter(status__in=ACTIVE_IDENTITY_STATUSES, class_type=class_type).select_related('student')
     for existing in qs:
         existing_name = normalize_identity(existing.student.first_name + existing.student.last_name)
         existing_national = normalize_identity(existing.student.national_code)
-        if full_name == existing_name and national_code == existing_national:
+        existing_phone = normalize_identity(existing.student.phone)
+        same_identity = national_code == existing_national if national_code and existing_national else bool(phone and phone == existing_phone)
+        if full_name == existing_name and same_identity:
             raise serializers.ValidationError({'error': 'برای این دانش‌آموز با این نوع کلاس، یک کلاس فعال وجود دارد و هنوز مختومه نشده است.'})
 
 
@@ -113,7 +116,14 @@ class ClassRequestAdminSerializer(serializers.ModelSerializer):
         payment_method = attrs.get('payment_method', getattr(self.instance, 'payment_method', ''))
         payment_confirmed_at = attrs.get('payment_confirmed_at', getattr(self.instance, 'payment_confirmed_at', None))
         payment_reference = attrs.get('payment_reference', getattr(self.instance, 'payment_reference', ''))
-        if payment_status == ClassRequest.PaymentStatus.PAID:
+        # هنگام ترکیب کلاس‌های جدا، PATCH فقط group_key/group_size را عوض می‌کند.
+        # جزئیات پرداختِ عضوها نباید در این عملیات دست‌کاری یا دوباره اعتبارسنجی
+        # شوند؛ در غیر این صورت رکوردهای قدیمیِ پرداخت‌شده با اطلاعات ناقص، مانع
+        # ترکیب همه‌ی افراد (از جمله افراد پرداخت‌نشده) می‌شوند.
+        payment_fields_changed = any(field in attrs for field in (
+            'payment_status', 'payment_method', 'payment_reference', 'payment_confirmed_at',
+        ))
+        if payment_status == ClassRequest.PaymentStatus.PAID and (self.instance is None or payment_fields_changed):
             if not payment_method or not payment_confirmed_at:
                 raise serializers.ValidationError({'payment_status': 'برای پرداخت‌شده، نوع پرداخت و تاریخ و ساعت پرداخت الزامی است.'})
             # فقط پرداخت کارت‌به‌کارت شناسه‌ی پرداخت می‌خواهد؛ نقدی و پوز نیازی به شناسه ندارند
@@ -196,7 +206,7 @@ class ClassRequestAdminCreateSerializer(serializers.Serializer):
     """
     first_name = serializers.CharField(max_length=150, validators=[persian_only_validator])
     last_name = serializers.CharField(max_length=150, validators=[persian_only_validator])
-    national_code = serializers.CharField(max_length=10)
+    national_code = serializers.CharField(max_length=10, required=False, allow_blank=True)
     phone = serializers.CharField(max_length=11)
     class_type = serializers.ChoiceField(choices=ClassRequest.ClassType.choices, default=ClassRequest.ClassType.PRIVATE)
     custom_class_type = serializers.CharField(max_length=100, required=False, allow_blank=True)
@@ -228,6 +238,8 @@ class ClassRequestAdminCreateSerializer(serializers.Serializer):
     password = serializers.CharField(max_length=128, required=False, allow_blank=True, validators=[password_validator])
 
     def validate(self, attrs):
+        # کد ملی در ثبت دستی کلاس اختیاری است؛ اگر وارد شود، برای اتصال/جستجوی
+        # پرونده استفاده می‌شود، اما خالی‌بودنش نباید ثبت را متوقف کند.
         validate_active_identity(attrs)
         if attrs.get('payment_status') == ClassRequest.PaymentStatus.PAID:
             if not attrs.get('payment_method') or not attrs.get('payment_confirmed_at'):

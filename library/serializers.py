@@ -9,6 +9,7 @@ class BookSerializer(serializers.ModelSerializer):
     predicted_students = serializers.SerializerMethodField()
     predicted_need = serializers.SerializerMethodField()
     forecast_auto = serializers.SerializerMethodField()
+    forecast_breakdown = serializers.SerializerMethodField()
     forecast_levels_effective = serializers.SerializerMethodField()
     forecast_levels_default = serializers.SerializerMethodField()
     forecast_term_id = serializers.SerializerMethodField()
@@ -31,7 +32,7 @@ class BookSerializer(serializers.ModelSerializer):
             'id', 'title', 'category', 'category_display',
             'initial_stock', 'current_stock', 'predicted_students', 'predicted_need',
             'predicted_override', 'extra_copies', 'forecast_levels', 'forecast_levels_effective', 'forecast_levels_default',
-            'forecast_auto', 'forecast_term_id', 'forecast_term_title', 'forecast_text',
+            'forecast_auto', 'forecast_breakdown', 'forecast_term_id', 'forecast_term_title', 'forecast_text',
             'predicted_is_manual', 'order_needed', 'sort_order',
             'unit_price', 'purchase_price', 'stock_value',
             'total_sales_quantity', 'total_sales_revenue',
@@ -71,6 +72,15 @@ class BookSerializer(serializers.ModelSerializer):
 
     def get_forecast_auto(self, obj):
         return self._fc(obj)[1]
+
+    def get_forecast_breakdown(self, obj):
+        """تعداد یکتای زبان‌آموزان برای هر سطح مؤثر این کتاب در ترم ملاک."""
+        ctx, auto, levels = self._fc(obj)
+        index = ctx.get('index', {})
+        return [
+            {'level': level, 'count': len(index.get(level, set()))}
+            for level in levels
+        ]
 
     def get_forecast_levels_effective(self, obj):
         return self._fc(obj)[2]

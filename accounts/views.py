@@ -921,11 +921,33 @@ class StudentStatusCheckView(APIView):
             phone = _form_archive_phone(phone)
             return f'n{name}|{phone}'
 
+        def same_identity(person, item):
+            if _form_archive_label(f'{person.first_name} {person.last_name}') != _form_archive_label(f'{item.first_name} {item.last_name}'):
+                return False
+            person_code = _form_archive_digits(getattr(person, 'national_code', ''))
+            item_code = _form_archive_digits(item.national_code)
+            if person_code and item_code:
+                return person_code == item_code
+            person_phones = {_form_archive_phone(getattr(person, field, '')) for field in ('phone', 'phone2')}
+            person_phones.discard('')
+            item_phone = _form_archive_phone(item.phone)
+            if person_phones and item_phone:
+                return item_phone in person_phones
+            return not person_code and not item_code and not person_phones and not item_phone
+
+        def attach_unregistered_record(entry, item):
+            if item.status != UnregisteredStudent.Status.TRACKING:
+                return
+            records = entry.setdefault('unregistered_records', [])
+            if not any(record.id == item.id for record in records):
+                records.append(item)
+            entry['sources'].add('unregistered')
+
         def add(person, source):
             key = key_of(person.first_name, person.last_name, person.national_code, person.phone)
             entry = people.get(key)
             if entry is None:
-                people[key] = {'person': person, 'sources': {source}}
+                people[key] = {'person': person, 'sources': {source}, 'unregistered_records': []}
             else:
                 entry['sources'].add(source)
                 if getattr(person, 'id', None) and not getattr(entry['person'], 'id', None):
@@ -934,11 +956,11 @@ class StudentStatusCheckView(APIView):
         if is_number:
             students = User.objects.filter(role='student').filter(Q(national_code__contains=compact) | Q(phone__contains=compact) | Q(phone2__contains=compact))
             debtors = Debtor.objects.filter(phone__contains=compact)
-            unregistered = UnregisteredStudent.objects.filter(Q(national_code__contains=compact) | Q(phone__contains=compact))
+            unregistered = UnregisteredStudent.objects.filter(Q(national_code__contains=compact) | Q(phone__contains=compact)).select_related('term')
         else:
             students = User.objects.filter(role='student').filter(text_q('first_name', 'last_name'))
             debtors = Debtor.objects.filter(text_q('first_name', 'last_name'))
-            unregistered = UnregisteredStudent.objects.filter(text_q('first_name', 'last_name'))
+            unregistered = UnregisteredStudent.objects.filter(text_q('first_name', 'last_name')).select_related('term')
         student_names = set()
         for student in students.order_by('last_name', 'first_name')[:self.MAX_RESULTS]:
             add(student, 'student')
@@ -949,35 +971,86 @@ class StudentStatusCheckView(APIView):
                 continue
             add(pseudo_person(debtor.first_name, debtor.last_name, '', debtor.phone, getattr(debtor, 'student_id', None)), 'debtor')
         for item in unregistered[:self.MAX_RESULTS]:
+            item_key = key_of(item.first_name, item.last_name, item.national_code, item.phone)
+            matching_entry = people.get(item_key)
+            if matching_entry is None:
+                matching_entry = next((entry for entry in people.values() if same_identity(entry['person'], item)), None)
+            if matching_entry is not None:
+                attach_unregistered_record(matching_entry, item)
+                continue
             if _form_archive_label(f'{item.first_name} {item.last_name}') in student_names:
                 continue
             add(pseudo_person(item.first_name, item.last_name, item.national_code, item.phone), 'unregistered')
+            attach_unregistered_record(people[item_key], item)
 
-        # کلاس‌های ترم جاری برای دانش‌آموزان پیداشده (سطح، شماره کلاس، روز، ساعت، استاد)
-        from class_management.models import ClassSlotEnrollment
-        from leads.models import get_current_term
-        term = get_current_term()
+        # وضعیت ترم جاری با تقویم تعیین می‌شود؛ ترم بعد نیز تا پیش از شروع تقویمی‌اش
+        # همیشه نمایش داده می‌شود، حتی اگر پیش‌ثبت‌نام هنوز آغاز نشده یا فرد ثبت‌نام نکرده باشد.
+        from class_management.models import ClassSlotEnrollment, Term
+        today = timezone.localdate()
+        term = Term.objects.filter(start_date__isnull=False, start_date__lte=today).order_by('-start_date', '-id').first()
+        next_term = None
+        if term:
+            next_term = Term.objects.filter(start_date__gt=term.start_date).order_by('start_date', 'id').first()
         classes_by_student = {}
+        enrollment_state_by_student = {}
+        next_classes_by_student = {}
         student_ids = [getattr(e['person'], 'id', None) for e in people.values() if getattr(e['person'], 'role', None) == 'student']
+        ever_enrolled_student_ids = set(ClassSlotEnrollment.objects.filter(student_id__in=student_ids).values_list('student_id', flat=True).distinct()) if student_ids else set()
         if term and student_ids:
-            for enrollment in ClassSlotEnrollment.objects.filter(class_slot__term=term, student_id__in=student_ids).select_related('class_slot').order_by('class_slot__number'):
+            enrollments = ClassSlotEnrollment.objects.filter(
+                class_slot__term=term, student_id__in=student_ids,
+            ).select_related('class_slot').order_by('class_slot__number')
+            for enrollment in enrollments:
                 slot = enrollment.class_slot
                 classes_by_student.setdefault(enrollment.student_id, []).append({
+                    'class_number': slot.number, 'level': slot.assigned_level or '', 'day': slot.day_type_display,
+                    'time': slot.time_slot or '', 'teacher': slot.teacher_name or '',
+                })
+                # انتقالِ خودکار از ترم قبل تا وقتی قطعی نشود، ثبت‌نام‌شده محسوب نمی‌شود.
+                pending_carryover = bool(
+                    enrollment.is_carryover and enrollment.payment_verified and not enrollment.carryover_confirmed
+                )
+                previous_state = enrollment_state_by_student.get(enrollment.student_id)
+                if previous_state == 'registered' or not pending_carryover:
+                    enrollment_state_by_student[enrollment.student_id] = 'registered'
+                else:
+                    enrollment_state_by_student[enrollment.student_id] = 'pending_carryover'
+        if next_term and student_ids:
+            next_enrollments = ClassSlotEnrollment.objects.filter(
+                class_slot__term=next_term, student_id__in=student_ids,
+            ).filter(Q(is_carryover=False) | Q(carryover_confirmed=True)).select_related('class_slot').order_by('class_slot__number')
+            for enrollment in next_enrollments:
+                slot = enrollment.class_slot
+                next_classes_by_student.setdefault(enrollment.student_id, []).append({
                     'class_number': slot.number, 'level': slot.assigned_level or '', 'day': slot.day_type_display,
                     'time': slot.time_slot or '', 'teacher': slot.teacher_name or '',
                 })
         results = []
         for entry in list(people.values())[:self.MAX_RESULTS]:
             person = entry['person']
-            reasons, _count = person_reasons(person)
+            reasons, disciplinary_count = person_reasons(person)
             is_student = getattr(person, 'role', None) == 'student'
+            student_id = getattr(person, 'id', None)
             results.append({
+                'student_id': student_id if is_student else None,
+                'has_ever_enrolled': student_id in ever_enrolled_student_ids if is_student else False,
+                'can_register_unregistered': can_edit_menu(request.user, 'followups'),
+                'unregistered_records': [
+                    {'id': item.id, 'term_id': item.term_id, 'term_title': item.term.title if item.term else '', 'level': item.class_level, 'gender': item.gender or ''}
+                    for item in entry.get('unregistered_records', [])
+                ],
                 'term_title': term.title if term else '',
-                'classes': classes_by_student.get(getattr(person, 'id', None), []) if is_student else [],
+                'classes': classes_by_student.get(student_id, []) if is_student else [],
+                'next_term_title': next_term.title if next_term and is_student else '',
+                'next_classes': next_classes_by_student.get(student_id, []) if is_student else [],
+                'enrollment_state': enrollment_state_by_student.get(student_id, 'none') if is_student else 'none',
+                'enrollment_pending_label': 'هنوز ثبت‌نام نکرده' if enrollment_state_by_student.get(student_id) == 'pending_carryover' else '',
                 'name': f'{person.first_name} {person.last_name}'.strip(),
                 'national_code': person.national_code or '',
                 'phone': person.phone or '',
                 'is_student': 'student' in entry['sources'],
+                'disciplinary_count': disciplinary_count,
+                'disciplinary_warning': disciplinary_count >= 2,
                 'approved': not reasons,
                 'verdict': 'approved' if not reasons else 'rejected',
                 'reasons': [r['text'] for r in reasons],
