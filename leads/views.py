@@ -1587,7 +1587,7 @@ class PersonFinanceStatusView(APIView):
 
 
 class EmployeeFollowupDeadlineView(APIView):
-    """تنظیم اختیاریِ موعد جداگانه برای هر یک از پنج نوع پیگیری در یک ترم."""
+    """تنظیم موعد و مسئولان هر عنوان پیگیری در یک ترم."""
     permission_classes = [IsAuthenticated]
 
     def _allowed(self, user):
@@ -1619,6 +1619,7 @@ class EmployeeFollowupDeadlineView(APIView):
             'week_count': self._week_count(term),
             'due_at': due.isoformat() if due else '', 'due_at_jalali': due_jalali or '',
             'is_overdue': bool(due and due <= timezone.now()),
+            'assigned_employee_ids': list(rule.assigned_employees.order_by('first_name', 'last_name').values_list('id', flat=True)) if rule else [],
         }
 
     def get(self, request):
@@ -1651,6 +1652,21 @@ class EmployeeFollowupDeadlineView(APIView):
         followup_type = str(request.data.get('followup_type') or '')
         if followup_type not in self._types():
             return Response({'error': 'نوع پیگیری را مشخص کنید'}, status=status.HTTP_400_BAD_REQUEST)
+        assigned_employee_ids = None
+        if followup_type == EmployeeFollowupDeadlineRule.FollowupType.GRADUATE_INFORMATION and 'assigned_employee_ids' in request.data:
+            raw_employee_ids = request.data.get('assigned_employee_ids')
+            if not isinstance(raw_employee_ids, list):
+                return Response({'error': 'فهرست کارمندان مسئول نامعتبر است'}, status=status.HTTP_400_BAD_REQUEST)
+            try:
+                assigned_employee_ids = list(dict.fromkeys(int(value) for value in raw_employee_ids))
+            except (TypeError, ValueError):
+                return Response({'error': 'شناسهٔ یکی از کارمندان نامعتبر است'}, status=status.HTTP_400_BAD_REQUEST)
+            from accounts.models import User
+            valid_ids = set(User.objects.filter(
+                id__in=assigned_employee_ids, role__in=('admin', 'office', 'employee'), is_active=True,
+            ).values_list('id', flat=True))
+            if valid_ids != set(assigned_employee_ids):
+                return Response({'error': 'یکی از کارمندان انتخاب‌شده فعال یا مجاز نیست'}, status=status.HTTP_400_BAD_REQUEST)
         enabled = str(request.data.get('enabled', '')).lower() in ('1', 'true', 'yes', 'on')
         mode = str(request.data.get('mode') or EmployeeFollowupDeadlineRule.Mode.DATE)
         if mode not in (EmployeeFollowupDeadlineRule.Mode.DATE, EmployeeFollowupDeadlineRule.Mode.TERM_WEEK):
@@ -1685,11 +1701,13 @@ class EmployeeFollowupDeadlineView(APIView):
         rule.deadline_week = due_week
         rule.updated_by = request.user
         rule.save()
+        if assigned_employee_ids is not None:
+            rule.assigned_employees.set(assigned_employee_ids)
         return Response(self._serialize(rule, term, followup_type))
 
 
 class EmployeeFollowupProgressView(APIView):
-    """تعداد کل و انجام‌شده‌ی پنج نوع پیگیری برای یک کارمند و ترم."""
+    """تعداد کل و انجام‌شدهٔ پیگیری‌های قابل‌شمارش برای یک کارمند و ترم."""
     permission_classes = [IsAuthenticated]
 
     def get(self, request):

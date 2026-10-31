@@ -128,6 +128,63 @@ class Term(models.Model):
         return self.title
 
 
+class GraduateSafirArchiveFolder(models.Model):
+    """پوشه‌های تودرتوی آرشیو فارغ‌التحصیلان، به تفکیک ترم و نوع بایگانی."""
+    FOLDER_TYPES = [('safir', 'فرم استاندارد سفیر'), ('not_eligible', 'عدم احراز شرایط')]
+    term = models.ForeignKey(Term, on_delete=models.CASCADE, related_name='graduate_safir_archive_folders')
+    folder_type = models.CharField(max_length=20, choices=FOLDER_TYPES, default='safir')
+    name = models.CharField(max_length=120)
+    parent = models.ForeignKey(
+        'self', on_delete=models.CASCADE, null=True, blank=True, related_name='children',
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['name', 'id']
+        constraints = [
+            models.UniqueConstraint(fields=['term', 'folder_type', 'parent', 'name'], name='unique_graduate_archive_folder_name_by_type'),
+        ]
+
+    def __str__(self):
+        return self.name
+
+
+class GraduateSafirArchive(models.Model):
+    """فایل تجمیعی هر پوشهٔ فرم سفیر؛ ردیف‌های تازه به همان پوشه و فایل افزوده می‌شوند."""
+    term = models.ForeignKey(Term, on_delete=models.CASCADE, related_name='graduate_safir_archives')
+    term_title = models.CharField(max_length=200, blank=True)
+    filename = models.CharField(max_length=300)
+    row_count = models.PositiveIntegerField(default=0)
+    rows = models.JSONField(default=list)
+    created_at = models.DateTimeField(auto_now_add=True)
+    sent_to_center = models.BooleanField(default=False)
+    sent_at = models.DateTimeField(null=True, blank=True)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name='+',
+    )
+    folder = models.ForeignKey(
+        GraduateSafirArchiveFolder, on_delete=models.SET_NULL, null=True, blank=True, related_name='archives',
+    )
+
+    class Meta:
+        ordering = ['-created_at', '-id']
+
+    def __str__(self):
+        return self.filename
+
+
+class GraduatedStudentClassSelection(models.Model):
+    """ثبت کلاس‌های انتخاب‌شده در نسخهٔ پیشین؛ برای سازگاری migration نگه‌داری می‌شود."""
+    term = models.ForeignKey(Term, on_delete=models.CASCADE, related_name='graduated_student_class_selections')
+    class_slot = models.ForeignKey('ClassSlot', on_delete=models.CASCADE, related_name='graduated_student_class_selections')
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=['term', 'class_slot'], name='unique_graduate_class_selection')
+        ]
+
+
 class GraduatedStudentInfo(models.Model):
     """اطلاعات فارغ‌التحصیلیِ واردشده در پنل؛ روی سرور و به تفکیک ترم نگه‌داری می‌شود."""
     term = models.ForeignKey(Term, on_delete=models.CASCADE, related_name='graduated_student_records')
@@ -155,6 +212,14 @@ class GraduatedStudentInfo(models.Model):
     average_grade = models.DecimalField(max_digits=6, decimal_places=2, null=True, blank=True)
     sent_to_center = models.BooleanField(default=False)
     excluded = models.BooleanField(default=False)
+    not_eligible = models.BooleanField(default=False)
+    not_eligible_archived = models.BooleanField(default=False)
+    not_eligible_folder = models.ForeignKey(
+        GraduateSafirArchiveFolder, on_delete=models.SET_NULL, null=True, blank=True, related_name='not_eligible_records',
+    )
+    archive = models.ForeignKey(
+        GraduateSafirArchive, on_delete=models.SET_NULL, null=True, blank=True, related_name='records',
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -165,8 +230,13 @@ class GraduatedStudentInfo(models.Model):
         ]
 
     def save(self, *args, **kwargs):
-        grades = [self.previous_term_grade_1, self.previous_term_grade_2, self.previous_term_grade_3]
-        self.average_grade = (sum(grades) / 3).quantize(Decimal('0.01')) if all(value is not None for value in grades) else None
+        grades = [value for value in (
+            self.previous_term_grade_1, self.previous_term_grade_2, self.previous_term_grade_3,
+        ) if value is not None]
+        # با وجود یک یا دو نمره هم میانگینِ نمره‌های ثبت‌شده محاسبه می‌شود.
+        # اگر هیچ نمره‌ای نباشد، average_grade مستقل (واردشده در فرم دستی) حفظ می‌شود.
+        if grades:
+            self.average_grade = (sum(grades) / len(grades)).quantize(Decimal('0.01'))
         super().save(*args, **kwargs)
 
 

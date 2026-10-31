@@ -176,6 +176,7 @@ class ClassSlotEnrollmentSerializer(serializers.ModelSerializer):
     student_father_name = serializers.CharField(source='student.father_name', read_only=True)
     student_national_code = serializers.CharField(source='student.national_code', read_only=True)
     student_phone = serializers.CharField(source='student.phone', read_only=True)
+    student_email = serializers.EmailField(source='student.email', read_only=True)
     student_birth_date = serializers.DateField(source='student.birth_date', read_only=True)
     student_gender = serializers.CharField(source='student.gender', read_only=True)
     payment_method_display = serializers.CharField(source='get_payment_method_display', read_only=True)
@@ -206,7 +207,7 @@ class ClassSlotEnrollmentSerializer(serializers.ModelSerializer):
         model = ClassSlotEnrollment
         fields = [
             'id', 'class_slot', 'student', 'student_first_name', 'student_last_name',
-            'student_father_name', 'student_national_code', 'student_phone',
+            'student_father_name', 'student_national_code', 'student_phone', 'student_email',
             'student_birth_date', 'student_gender', 'payment_method', 'payment_method_display',
             'tuition_amount', 'discount_percent', 'pos_reference_code', 'receipt_image',
             'self_enrolled', 'payment_verified', 'is_carryover', 'carryover_confirmed',

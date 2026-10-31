@@ -71,15 +71,35 @@ class EmployeeFollowupDeadlineAndArchiveTests(TestCase):
         self.call(EmployeeFollowupDeadlineView, method='POST', path=url, data={
             'term_id': self.term2.id, 'followup_type': 'class-survey', 'enabled': True, 'mode': 'term_week', 'deadline_week': 3,
         })
+        graduate_deadline = self.call(EmployeeFollowupDeadlineView, method='POST', path=url, data={
+            'term_id': self.term2.id, 'followup_type': 'graduate-information', 'enabled': True, 'mode': 'date',
+            'deadline_date': '2020-01-01', 'deadline_time': '00:01',
+        })
+        self.assertEqual(graduate_deadline.status_code, 200)
+        self.assertTrue(graduate_deadline.data['is_overdue'])
         missing = self.call(EmployeeFollowupDeadlineView, method='POST', path=url, data={'term_id': self.term2.id, 'enabled': True})
         self.assertEqual(missing.status_code, 400)
         overview = self.call(EmployeeFollowupDeadlineView, path=url, query={'term_id': self.term2.id})
         items = overview.data['items']
-        self.assertEqual(set(items), {'unregistered', 'debtors', 'waiting-list', 'consecutive-dropouts', 'class-survey'})
+        self.assertEqual(set(items), {'unregistered', 'debtors', 'waiting-list', 'consecutive-dropouts', 'class-survey', 'graduate-information'})
         self.assertTrue(items['debtors']['due_at'].startswith('2026-10-30T17:15:00'))
         self.assertTrue(items['class-survey']['due_at'].startswith('2026-10-21T23:59:00'))
         self.assertFalse(items['unregistered']['enabled'])
         self.assertFalse(items['waiting-list']['enabled'])
+        self.assertTrue(items['graduate-information']['is_overdue'])
+
+    def test_graduate_information_deadline_supports_multiple_assignees(self):
+        User = get_user_model()
+        staff1 = User.objects.create_user(username='graduate_staff_1', password='test-password', role='employee', first_name='کارمند', last_name='یک')
+        staff2 = User.objects.create_user(username='graduate_staff_2', password='test-password', role='office', first_name='کارمند', last_name='دو')
+        response = self.call(EmployeeFollowupDeadlineView, method='POST', path='/api/leads/employee-followup-deadline/', data={
+            'term_id': self.term2.id, 'followup_type': 'graduate-information', 'enabled': False,
+            'mode': 'date', 'assigned_employee_ids': [staff1.id, staff2.id],
+        })
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(set(response.data['assigned_employee_ids']), {staff1.id, staff2.id})
+        rule = EmployeeFollowupDeadlineRule.objects.get(term=self.term2, followup_type='graduate-information')
+        self.assertEqual(set(rule.assigned_employees.values_list('id', flat=True)), {staff1.id, staff2.id})
 
     def test_archives_are_exact_by_term_and_resolved_rows_are_retained(self):
         old_lead = NewLead.objects.create(first_name='آرشیو', last_name='ترم یک', phone='09120009011', term=self.term1, status='registered')

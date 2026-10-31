@@ -524,7 +524,7 @@ class ExcelDropout(models.Model):
 
 
 class EmployeeFollowupDeadlineRule(models.Model):
-    """موعد پیگیری‌های کارمندان برای یک ترم؛ برای هر نوع پیگیری جداگانه، با تاریخ ثابت یا پایان هفتهٔ N ترم."""
+    """موعد شش عنوان پیگیری کارمندان برای یک ترم؛ هر عنوان تاریخ ثابت یا پایان هفتهٔ ترم دارد."""
     class Mode(models.TextChoices):
         DATE = 'date', 'تاریخ مشخص'
         TERM_WEEK = 'term_week', 'هفتهٔ ترم'
@@ -535,6 +535,7 @@ class EmployeeFollowupDeadlineRule(models.Model):
         WAITING_LIST = 'waiting-list', 'پیگیری لیست انتظار'
         CONSECUTIVE_DROPOUTS = 'consecutive-dropouts', 'پیگیری ریزشی‌های دو ترم متوالی'
         CLASS_SURVEY = 'class-survey', 'پیگیری نظرسنجی کلاس‌ها'
+        GRADUATE_INFORMATION = 'graduate-information', 'ارسال و دریافت اطلاعات فارغ‌التحصیلان'
 
     term = models.ForeignKey(
         'class_management.Term', on_delete=models.CASCADE,
@@ -546,6 +547,9 @@ class EmployeeFollowupDeadlineRule(models.Model):
     deadline_date = models.DateField(null=True, blank=True)
     deadline_time = models.TimeField(default=datetime_time(23, 59))
     deadline_week = models.PositiveSmallIntegerField(null=True, blank=True)
+    assigned_employees = models.ManyToManyField(
+        User, blank=True, related_name='employee_followup_deadline_rules',
+    )
     updated_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

@@ -19,7 +19,7 @@ from rest_framework.response import Response
 from rest_framework.parsers import MultiPartParser, FormParser
 from rest_framework.permissions import IsAuthenticated
 import jdatetime
-from .models import ClassSlot, ClassSlotEnrollment, TuitionSetting, DiscountedPerson, EnrollmentRefund, WalletTransaction, infer_age_group_from_level, _jalali, LevelRenewalApproval, Term, TermHoliday, TermRetentionFollowUp, OnlineCourse, OnlineCourseEnrollment, PaymentSettings, ClassAttendance, OnlineCourseActionRequest, GraduatedStudentInfo
+from .models import ClassSlot, ClassSlotEnrollment, TuitionSetting, DiscountedPerson, EnrollmentRefund, WalletTransaction, infer_age_group_from_level, _jalali, LevelRenewalApproval, Term, TermHoliday, TermRetentionFollowUp, OnlineCourse, OnlineCourseEnrollment, PaymentSettings, ClassAttendance, OnlineCourseActionRequest, GraduatedStudentInfo, GraduateSafirArchive, GraduateSafirArchiveFolder
 from .models import THREE_DAY_TIME_SLOTS, THURSDAY_MORNING_SLOT, THURSDAY_EVENING_SLOT, FRIDAY_SLOT, FRIDAY_MORNING_SLOT, FRIDAY_EVENING_SLOT
 
 # QR و جلسات استادان فعلاً غیرفعال هستند؛ نبودن مدل‌های این بخش‌ها نباید مانع اجرای ترم و کلاس شود.
@@ -1081,6 +1081,9 @@ def _graduate_record_data(record):
         'graduation_date': record.graduation_date.isoformat() if record.graduation_date else '',
         'average_grade': str(record.average_grade) if record.average_grade is not None else '',
         'sent_to_center': record.sent_to_center,
+        'not_eligible': record.not_eligible,
+        'not_eligible_archived': record.not_eligible_archived,
+        'not_eligible_folder_id': record.not_eligible_folder_id,
         'next_term': record.next_term,
         'manual': record.manual,
         'student_id': record.student_id or '',
@@ -1125,6 +1128,7 @@ def _save_graduate_record(term, row, preserve_existing=False):
         setattr(record, field, str(row.get(field) or '').strip())
     record.next_term = row.get('next_term') is True
     record.sent_to_center = row.get('sent_to_center') is True
+    record.not_eligible = row.get('not_eligible') is True
     raw_date = str(row.get('graduation_date') or '').strip()
     record.graduation_date = parse_date(raw_date) if raw_date else None
     if raw_date and record.graduation_date is None:
@@ -1138,6 +1142,14 @@ def _save_graduate_record(term, row, preserve_existing=False):
         if value is not None and (not value.is_finite() or value < 0 or value > Decimal('9999.99')):
             raise ValueError('مقدار نمره معتبر نیست.')
         setattr(record, field, value)
+    raw_average = str(row.get('average_grade') or '').strip()
+    try:
+        average = Decimal(raw_average) if raw_average else None
+    except InvalidOperation:
+        raise ValueError('میانگین باید عددی باشد.')
+    if average is not None and (not average.is_finite() or average < 0 or average > Decimal('9999.99')):
+        raise ValueError('مقدار میانگین معتبر نیست.')
+    record.average_grade = average
     record.save()
     return record
 
@@ -1157,7 +1169,7 @@ class GraduatedStudentsView(APIView):
         if not term:
             return Response({'term_id': None, 'term_title': '', 'rows': []})
         level_groups = {
-            'kids': {'current': ('i5', 'u5'), 'next': ('i4', 'u4')},
+            'kids': {'current': ('i5',), 'next': ('i4',)},
             'teen': {'current': ('teen15',), 'next': ('teen14',)},
             'adult': {'current': ('606', '406'), 'next': ('605', '405')},
         }
@@ -1165,12 +1177,14 @@ class GraduatedStudentsView(APIView):
         age_rank = {'kids': 0, 'teen': 1, 'adult': 2}
         gender_rank = {'female': 0, 'male': 1}
         rows_by_student = {}
+        eligible_level_filter = Q()
+        for level_code in all_levels:
+            eligible_level_filter |= Q(class_slot__assigned_level__iexact=level_code)
         enrollments = ClassSlotEnrollment.objects.filter(
             class_slot__term=term,
             student__role='student',
             payment_verified=True,
-            class_slot__assigned_level__in=all_levels,
-        ).select_related('student', 'class_slot').order_by(
+        ).filter(eligible_level_filter).select_related('student', 'class_slot').order_by(
             'student__first_name', 'student__last_name', 'class_slot__number', 'class_slot__id'
         )
         for enrollment in enrollments:
@@ -1186,11 +1200,12 @@ class GraduatedStudentsView(APIView):
             rows_by_student[student.id] = {
                 'id': student.id,
                 'first_name': student.first_name or '', 'last_name': student.last_name or '',
-                'first_name_en': _english_name(student.first_name), 'last_name_en': _english_name(student.last_name),
+                'first_name_en': '', 'last_name_en': '',  # نام انگلیسی پیشنهاد/حدس زده نمی‌شود؛ فقط دستی وارد می‌شود
                 'father_name': student.father_name or '', 'national_code': student.national_code or '',
                 'phone': student.phone or '', 'level': level, 'teacher': slot.teacher_name or '',
                 'email': getattr(student, 'email', '') or '',
                 'gender': student.gender or '', 'age_group': age_group, 'next_term': next_term,
+                'class_gender': slot.gender or '',
             }
         # بررسی می‌کنیم فرد در سه ترم آخر تا سطح فعلی، مسیر سطح‌ها را به‌ترتیب طی کرده باشد.
         history_terms = list(Term.objects.filter(
@@ -1228,11 +1243,12 @@ class GraduatedStudentsView(APIView):
             row['sequence_warning'] = not has_valid_sequence
             row['sequence_warning_text'] = 'هشدار مهم: توالی سه‌ترمی سطح‌ها کامل یا به‌ترتیب نیست.' if row['sequence_warning'] else ''
         saved_records = list(GraduatedStudentInfo.objects.filter(term=term).select_related('student'))
-        saved_by_key = {item.record_key: item for item in saved_records if not item.excluded}
-        excluded_keys = {item.record_key for item in saved_records if item.excluded}
+        saved_by_key = {item.record_key: item for item in saved_records if not item.excluded and not item.archive_id and not item.not_eligible_archived}
+        # ردیف‌های حذف‌شده و ردیف‌های بایگانی‌شدهٔ سفیر دیگر در فهرست اصلی نمایش داده نمی‌شوند.
+        excluded_keys = {item.record_key for item in saved_records if item.excluded or item.archive_id}
         empty_extra = {
             'graduation_date': '', 'previous_term_grade_1': '', 'previous_term_grade_2': '',
-            'previous_term_grade_3': '', 'average_grade': '', 'sent_to_center': False,
+            'previous_term_grade_3': '', 'average_grade': '', 'sent_to_center': False, 'not_eligible': False,
         }
         for row in rows_by_student.values():
             record = saved_by_key.get(f"student:{row['id']}")
@@ -1243,12 +1259,12 @@ class GraduatedStudentsView(APIView):
                 row['manual'] = False
         manual_rows = []
         for record in saved_records:
-            if not record.manual or record.excluded:
+            if not record.manual or record.excluded or record.archive_id or record.not_eligible_archived:
                 continue
             manual_row = _graduate_record_data(record)
             manual_row.update({
                 'id': record.record_key, 'sequence_warning': False, 'sequence_warning_text': '',
-                'first_name_en': _english_name(record.first_name), 'last_name_en': _english_name(record.last_name),
+                'first_name_en': '', 'last_name_en': '',
             })
             manual_rows.append(manual_row)
         # ترتیب: بزرگسال، نوجوان، کودک؛ داخل هر ردهٔ سنی افراد همسطح کنار هم می‌مانند.
@@ -1256,19 +1272,42 @@ class GraduatedStudentsView(APIView):
         level_rank = {code: index for index, code in enumerate(
             ('406', '606', '405', '605', 'teen15', 'teen14', 'i5', 'u5', 'i4', 'u4')
         )}
-        visible_student_rows = [row for row in rows_by_student.values() if f"student:{row['id']}" not in excluded_keys]
+        visible_student_rows = [row for row in rows_by_student.values() if f"student:{row['id']}" not in excluded_keys and not row.get('not_eligible_archived')]
+        # افراد مربوط به ترم بعد (خاکستری‌ها) همیشه انتهای فهرست‌اند؛ با شروع ترم جدید و ثبت‌نامشان، در فهرست همان ترم به‌صورت عادی بالا می‌آیند.
         rows = sorted([*visible_student_rows, *manual_rows], key=lambda row: (
-            age_rank.get(row['age_group'], 9), int(row.get('next_term', False)), level_rank.get(row['level'].casefold(), 99),
+            int(bool(row.get('next_term', False))), age_rank.get(row['age_group'], 9), level_rank.get(row['level'].casefold(), 99),
             gender_rank.get(row['gender'], 9), row['last_name'], row['first_name'], str(row['id']),
         ))
         from django.contrib.auth import get_user_model
         User = get_user_model()
-        teachers = sorted({
+        # نام استاد ممکن است فقط روی کلاس ثبت شده باشد و حساب کاربری او نقشِ
+        # teacher-like نداشته باشد؛ هر دو منبع را برای فهرست دستی جمع می‌کنیم.
+        teachers = {
             f"{teacher.first_name or ''} {teacher.last_name or ''}".strip()
             for teacher in User.objects.filter(role__in=User.TEACHER_LIKE_ROLES)
             if f"{teacher.first_name or ''} {teacher.last_name or ''}".strip()
-        })
-        return Response({'term_id': term.id, 'term_title': term.title, 'rows': rows, 'count': len(rows), 'teachers': teachers})
+        }
+        teachers.update(
+            name.strip() for name in ClassSlot.objects.all()
+            .exclude(teacher_name__isnull=True).exclude(teacher_name__exact='')
+            .values_list('teacher_name', flat=True) if name and name.strip()
+        )
+        teachers = sorted(teachers, key=str.casefold)
+        not_eligible_archive = []
+        for record in saved_records:
+            if not record.not_eligible_archived:
+                continue
+            archived_row = _graduate_record_data(record)
+            archived_row.update({
+                'id': record.record_key if record.manual else (record.student_id or record.record_key.removeprefix('student:')),
+                'manual': record.manual, 'not_eligible': True, 'not_eligible_archived': True,
+            })
+            not_eligible_archive.append(archived_row)
+        excluded_ids = [
+            (item.record_key if item.manual else (item.student_id or item.record_key.removeprefix('student:')))
+            for item in saved_records if item.excluded or item.archive_id or item.not_eligible_archived
+        ]
+        return Response({'term_id': term.id, 'term_title': term.title, 'rows': rows, 'count': len(rows), 'teachers': teachers, 'not_eligible_archive': not_eligible_archive, 'excluded_ids': excluded_ids})
 
     def post(self, request):
         if not can_edit_menu(request.user, 'class-management'):
@@ -1278,6 +1317,60 @@ class GraduatedStudentsView(APIView):
         if not term:
             return Response({'error': 'ترم معتبر انتخاب نشده است.'}, status=status.HTTP_400_BAD_REQUEST)
         action = request.data.get('action', 'save')
+        if action in ('archive_not_eligible', 'restore_not_eligible', 'move_not_eligible'):
+            row_refs = request.data.get('rows')
+            if not isinstance(row_refs, list) or len(row_refs) > 5000:
+                return Response({'error': 'فهرست ردیف‌ها معتبر نیست.'}, status=status.HTTP_400_BAD_REQUEST)
+            archived = 0
+            restoring = action == 'restore_not_eligible'
+            moving = action == 'move_not_eligible'
+            folder = None
+            folder_id = request.data.get('folder_id')
+            if not restoring and folder_id:
+                folder = GraduateSafirArchiveFolder.objects.filter(
+                    pk=folder_id, term=term, folder_type='not_eligible',
+                ).first()
+                if not folder:
+                    return Response({'error': 'پوشهٔ عدم احراز در همین ترم پیدا نشد.'}, status=status.HTTP_400_BAD_REQUEST)
+            with transaction.atomic():
+                for item in row_refs:
+                    if not isinstance(item, dict):
+                        continue
+                    raw_id = str(item.get('id') or '').strip()
+                    is_manual = item.get('manual') is True or raw_id.startswith('manual-')
+                    if is_manual:
+                        if not raw_id.startswith('manual-'):
+                            continue
+                        record_key = raw_id
+                    else:
+                        try:
+                            record_key = f"student:{int(raw_id)}"
+                        except (TypeError, ValueError):
+                            continue
+                    record = GraduatedStudentInfo.objects.filter(term=term, record_key=record_key, manual=is_manual).first()
+                    if not record:
+                        continue
+                    if restoring:
+                        if not record.not_eligible_archived:
+                            continue
+                        record.not_eligible_archived = False
+                        record.excluded = False
+                        record.not_eligible_folder = None
+                        record.save(update_fields=['not_eligible_archived', 'excluded', 'not_eligible_folder', 'updated_at'])
+                    elif moving:
+                        if not record.not_eligible_archived:
+                            continue
+                        record.not_eligible_folder = folder
+                        record.save(update_fields=['not_eligible_folder', 'updated_at'])
+                    else:
+                        if not record.not_eligible:
+                            continue
+                        record.not_eligible_archived = True
+                        record.excluded = True
+                        record.not_eligible_folder = folder
+                        record.save(update_fields=['not_eligible_archived', 'excluded', 'not_eligible_folder', 'updated_at'])
+                    archived += 1
+            return Response({'updated': archived, 'restored': restoring, 'moved': moving})
         if action == 'delete':
             raw_id = str(request.data.get('row_id') or '').strip()
             is_manual = request.data.get('manual') is True
@@ -1322,10 +1415,245 @@ class GraduatedStudentsView(APIView):
             'id': record.record_key if record.manual else record.student_id,
             'sequence_warning': False,
             'sequence_warning_text': '',
-            'first_name_en': _english_name(record.first_name),
-            'last_name_en': _english_name(record.last_name),
+            'first_name_en': '',
+            'last_name_en': '',
         })
         return Response({'row': response_row}, status=status.HTTP_200_OK)
+
+
+def _safir_archive_meta(archive, with_rows=False):
+    creator = archive.created_by
+    creator_name = f"{creator.first_name or ''} {creator.last_name or ''}".strip() if creator else ''
+    rows = archive.rows if isinstance(archive.rows, list) else []
+    data = {
+        'id': archive.id, 'term_id': archive.term_id, 'term_title': archive.term_title or archive.term.title,
+        'filename': archive.filename, 'row_count': archive.row_count,
+        'created_at': archive.created_at.isoformat(), 'created_by': creator_name or (creator.get_username() if creator else ''),
+        'sent_to_center': archive.sent_to_center, 'sent_at': archive.sent_at.isoformat() if archive.sent_at else None,
+        'folder_id': archive.folder_id,
+        'folder_name': archive.folder.name if archive.folder_id else '',
+        # برای هشدار نام تکراری در ثبت مجدد، فقط مشخصات شناسایی هر فرد همراه فهرست بایگانی‌ها می‌آید.
+        'people': [
+            {key: row.get(key, '') for key in ('first_name', 'last_name', 'national_code')}
+            for row in rows if isinstance(row, dict)
+        ],
+    }
+    if with_rows:
+        data['rows'] = rows
+    return data
+
+
+class GraduateSafirArchiveView(APIView):
+    """بایگانی فایل‌های «فرم استاندارد سفیر» فارغ‌التحصیلان.
+
+    GET [?term_id=][&id=]  : فهرست بایگانی‌ها (با id، ردیف‌های همان بایگانی هم برمی‌گردد)
+    POST action=create     : ثبت بایگانی جدید؛ ردیف‌ها از فهرست اصلی کنار می‌روند.
+    POST action=restore    : بازگرداندن ردیف‌های یک بایگانی به فهرست اصلی و حذف آن بایگانی.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        if not can_edit_menu(request.user, 'class-management'):
+            return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
+        queryset = GraduateSafirArchive.objects.select_related('term', 'created_by')
+        archive_id = request.query_params.get('id')
+        if archive_id:
+            archive = queryset.filter(pk=archive_id).first() if str(archive_id).isdigit() else None
+            if not archive:
+                return Response({'error': 'بایگانی پیدا نشد.'}, status=status.HTTP_404_NOT_FOUND)
+            return Response(_safir_archive_meta(archive, with_rows=True))
+        term_id = request.query_params.get('term_id')
+        folders = GraduateSafirArchiveFolder.objects.select_related('parent')
+        if term_id and str(term_id).isdigit():
+            queryset = queryset.filter(term_id=term_id)
+            folders = folders.filter(term_id=term_id)
+        safir_folders = folders.filter(folder_type='safir')
+        not_eligible_folders = folders.filter(folder_type='not_eligible')
+        folder_data = lambda folder: {
+            'id': folder.id, 'term_id': folder.term_id, 'name': folder.name,
+            'parent_id': folder.parent_id, 'folder_type': folder.folder_type,
+            'created_at': folder.created_at.isoformat(),
+        }
+        return Response({
+            'archives': [_safir_archive_meta(item) for item in queryset[:500]],
+            'folders': [folder_data(folder) for folder in safir_folders[:2000]],
+            'not_eligible_folders': [folder_data(folder) for folder in not_eligible_folders[:2000]],
+        })
+
+    def post(self, request):
+        if not can_edit_menu(request.user, 'class-management'):
+            return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
+        action = request.data.get('action', 'create')
+        if action == 'create_folder':
+            term_id = request.data.get('term_id')
+            term = Term.objects.filter(pk=term_id).first() if term_id else None
+            name = str(request.data.get('name') or '').strip()
+            folder_type = str(request.data.get('folder_type') or 'safir').strip()
+            if folder_type not in ('safir', 'not_eligible'):
+                return Response({'error': 'نوع بایگانی برای پوشه معتبر نیست.'}, status=status.HTTP_400_BAD_REQUEST)
+            parent_id = request.data.get('parent_id')
+            parent = GraduateSafirArchiveFolder.objects.filter(pk=parent_id, term=term, folder_type=folder_type).first() if parent_id else None
+            if not term:
+                return Response({'error': 'ترم معتبر انتخاب نشده است.'}, status=status.HTTP_400_BAD_REQUEST)
+            if not name or len(name) > 120:
+                return Response({'error': 'نام پوشه باید بین ۱ تا ۱۲۰ نویسه باشد.'}, status=status.HTTP_400_BAD_REQUEST)
+            if parent_id and not parent:
+                return Response({'error': 'پوشهٔ والد در همین ترم پیدا نشد.'}, status=status.HTTP_400_BAD_REQUEST)
+            folder, created = GraduateSafirArchiveFolder.objects.get_or_create(
+                term=term, folder_type=folder_type, parent=parent, name=name,
+            )
+            return Response(
+                {'id': folder.id, 'term_id': folder.term_id, 'name': folder.name,
+                 'parent_id': folder.parent_id, 'folder_type': folder.folder_type, 'created_at': folder.created_at.isoformat()},
+                status=status.HTTP_201_CREATED if created else status.HTTP_200_OK,
+            )
+        if action == 'rename_folder':
+            raw_id = request.data.get('folder_id')
+            folder = GraduateSafirArchiveFolder.objects.filter(pk=raw_id).first() if str(raw_id or '').isdigit() else None
+            name = str(request.data.get('name') or '').strip()
+            if not folder:
+                return Response({'error': 'پوشه پیدا نشد.'}, status=status.HTTP_404_NOT_FOUND)
+            if not name or len(name) > 120:
+                return Response({'error': 'نام پوشه باید بین ۱ تا ۱۲۰ نویسه باشد.'}, status=status.HTTP_400_BAD_REQUEST)
+            if GraduateSafirArchiveFolder.objects.filter(term=folder.term, folder_type=folder.folder_type, parent=folder.parent, name=name).exclude(pk=folder.pk).exists():
+                return Response({'error': 'در این پوشهٔ والد، پوشه‌ای با همین نام وجود دارد.'}, status=status.HTTP_409_CONFLICT)
+            folder.name = name
+            folder.save(update_fields=['name'])
+            return Response({'id': folder.id, 'term_id': folder.term_id, 'name': folder.name, 'parent_id': folder.parent_id, 'folder_type': folder.folder_type})
+        if action == 'mark_sent':
+            raw_id = request.data.get('archive_id')
+            archive = GraduateSafirArchive.objects.filter(pk=raw_id).first() if str(raw_id or '').isdigit() else None
+            if not archive:
+                return Response({'error': 'بایگانی پیدا نشد.'}, status=status.HTTP_404_NOT_FOUND)
+            sent = request.data.get('sent_to_center') is True
+            archive.sent_to_center = sent
+            archive.sent_at = timezone.now() if sent else None
+            archive.save(update_fields=['sent_to_center', 'sent_at'])
+            return Response(_safir_archive_meta(archive))
+        if action == 'restore':
+            raw_id = request.data.get('archive_id')
+            archive = GraduateSafirArchive.objects.filter(pk=raw_id).first() if str(raw_id or '').isdigit() else None
+            if not archive:
+                return Response({'error': 'بایگانی پیدا نشد.'}, status=status.HTTP_404_NOT_FOUND)
+            with transaction.atomic():
+                restored = GraduatedStudentInfo.objects.filter(archive=archive).update(archive=None)
+                archive.delete()
+            return Response({'restored': restored})
+        if action in ('update_row', 'delete_row', 'delete_archive'):
+            raw_archive_id = request.data.get('archive_id')
+            archive = GraduateSafirArchive.objects.select_related('term').filter(pk=raw_archive_id).first() if str(raw_archive_id or '').isdigit() else None
+            if not archive:
+                return Response({'error': 'بایگانی پیدا نشد.'}, status=status.HTTP_404_NOT_FOUND)
+            if action == 'delete_archive':
+                with transaction.atomic():
+                    GraduatedStudentInfo.objects.filter(archive=archive).update(archive=None, excluded=True)
+                    archive.delete()
+                return Response({'deleted': True})
+            row = request.data.get('row')
+            if not isinstance(row, dict):
+                return Response({'error': 'ردیف بایگانی معتبر نیست.'}, status=status.HTTP_400_BAD_REQUEST)
+            raw_id = str(row.get('id') or '').strip()
+            is_manual = row.get('manual') is True or raw_id.startswith('manual-')
+            record_key = raw_id if is_manual else (f'student:{raw_id}' if raw_id.isdigit() else '')
+            record = GraduatedStudentInfo.objects.filter(term=archive.term, record_key=record_key, archive=archive).first() if record_key else None
+            if not record:
+                return Response({'error': 'ردیف در این بایگانی پیدا نشد.'}, status=status.HTTP_404_NOT_FOUND)
+            snapshot = list(archive.rows) if isinstance(archive.rows, list) else []
+            row_index = next((index for index, item in enumerate(snapshot) if isinstance(item, dict) and str(item.get('id')) == raw_id and bool(item.get('manual')) == is_manual), None)
+            if row_index is None:
+                return Response({'error': 'محتوای ردیف در فایل بایگانی پیدا نشد.'}, status=status.HTTP_404_NOT_FOUND)
+            if action == 'delete_row':
+                with transaction.atomic():
+                    record.archive = None
+                    record.excluded = True
+                    record.save(update_fields=['archive', 'excluded', 'updated_at'])
+                    snapshot.pop(row_index)
+                    archive.rows = snapshot
+                    archive.row_count = len(snapshot)
+                    archive.save(update_fields=['rows', 'row_count'])
+                return Response({'deleted': True, 'row_count': archive.row_count})
+            try:
+                class_gender = str(snapshot[row_index].get('class_gender') or '')[:10]
+                record = _save_graduate_record(archive.term, row)
+                record.archive = archive
+                record.save(update_fields=['archive', 'updated_at'])
+                updated_row = _graduate_record_data(record)
+                updated_row['id'] = record.record_key if record.manual else record.student_id
+                updated_row['class_gender'] = class_gender
+                snapshot[row_index] = updated_row
+                archive.rows = snapshot
+                archive.row_count = len(snapshot)
+                archive.save(update_fields=['rows', 'row_count'])
+            except ValueError as exc:
+                return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({'row': updated_row, 'row_count': archive.row_count})
+        if action != 'create':
+            return Response({'error': 'درخواست نامعتبر است.'}, status=status.HTTP_400_BAD_REQUEST)
+        term_id = request.data.get('term_id')
+        term = Term.objects.filter(pk=term_id).first() if term_id else None
+        if not term:
+            return Response({'error': 'ترم معتبر انتخاب نشده است.'}, status=status.HTTP_400_BAD_REQUEST)
+        rows = request.data.get('rows')
+        if not isinstance(rows, list) or not rows or len(rows) > 5000:
+            return Response({'error': 'هیچ ردیفی برای بایگانی ارسال نشده است.'}, status=status.HTTP_400_BAD_REQUEST)
+        filename = str(request.data.get('filename') or '').strip()[:300]
+        if not filename:
+            return Response({'error': 'نام فایل بایگانی مشخص نیست.'}, status=status.HTTP_400_BAD_REQUEST)
+        folder_id = request.data.get('folder_id')
+        folder = GraduateSafirArchiveFolder.objects.filter(pk=folder_id, term=term, folder_type='safir').first() if folder_id else None
+        if folder_id and not folder:
+            return Response({'error': 'پوشهٔ سفیرِ انتخاب‌شده در همین ترم پیدا نشد.'}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            with transaction.atomic():
+                archive = GraduateSafirArchive.objects.filter(term=term, folder=folder).order_by('-created_at', '-id').first()
+                created = archive is None
+                if created:
+                    archive = GraduateSafirArchive.objects.create(
+                        term=term, term_title=term.title, filename=filename, created_by=request.user, folder=folder,
+                    )
+                else:
+                    archive.filename = filename
+                    archive.term_title = term.title
+                    archive.created_by = request.user
+                    archive.sent_to_center = False
+                    archive.sent_at = None
+                snapshot = list(archive.rows) if isinstance(archive.rows, list) else []
+                snapshot_by_key = {}
+                for index, item in enumerate(snapshot):
+                    if not isinstance(item, dict):
+                        continue
+                    key = item.get('_record_key')
+                    if not key:
+                        raw_id = str(item.get('id') or '')
+                        key = raw_id if item.get('manual') else (f'student:{raw_id}' if raw_id else '')
+                    if key:
+                        snapshot_by_key[str(key)] = index
+                for row in rows:
+                    if not isinstance(row, dict):
+                        continue
+                    record = _save_graduate_record(term, row)
+                    record.archive = archive
+                    record.save(update_fields=['archive', 'updated_at'])
+                    item = _graduate_record_data(record)
+                    item['id'] = record.record_key if record.manual else record.student_id
+                    item['class_gender'] = str(row.get('class_gender') or '')[:10]
+                    item['_record_key'] = record.record_key
+                    previous_index = snapshot_by_key.get(record.record_key)
+                    if previous_index is None:
+                        snapshot_by_key[record.record_key] = len(snapshot)
+                        snapshot.append(item)
+                    else:
+                        snapshot[previous_index] = item
+                # کلید داخلی فقط برای یکتاسازی ذخیره می‌شود و در پاسخ/خروجی اکسل لازم نیست.
+                for item in snapshot:
+                    if isinstance(item, dict):
+                        item.pop('_record_key', None)
+                archive.rows = snapshot
+                archive.row_count = len(snapshot)
+                archive.save(update_fields=['filename', 'term_title', 'created_by', 'sent_to_center', 'sent_at', 'rows', 'row_count'])
+        except ValueError as exc:
+            return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(_safir_archive_meta(archive), status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
 
 
 class GraduatedStudentLookupView(APIView):
@@ -1346,7 +1674,7 @@ class GraduatedStudentLookupView(APIView):
         last = ' '.join(str(request.query_params.get('last_name', '')).split())
         national_code = ''.join(ch for ch in digits(request.query_params.get('national_code', '')) if ch.isdigit())
         phone = ''.join(ch for ch in digits(request.query_params.get('phone', '')) if ch.isdigit())
-        first_en, last_en = _english_name(first), _english_name(last)
+        first_en, last_en = '', ''  # نام انگلیسی خودکار ساخته نمی‌شود
         result = {
             'first_name_en': first_en, 'last_name_en': last_en,
             'full_name_en': f'{first_en} {last_en}'.strip(), 'matches': [],
@@ -1366,7 +1694,7 @@ class GraduatedStudentLookupView(APIView):
         if len(phone) >= 4:
             students = students.filter(phone__contains=phone)
         for student in students.order_by('last_name', 'first_name', 'id')[:self.MAX_ROWS]:
-            fe, le = _english_name(student.first_name), _english_name(student.last_name)
+            fe, le = '', ''
             result['matches'].append({
                 'id': student.id, 'first_name': student.first_name or '', 'last_name': student.last_name or '',
                 'national_code': student.national_code or '', 'phone': student.phone or '',

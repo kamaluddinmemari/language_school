@@ -5,6 +5,21 @@ from .models import LevelTest, LevelTestPriceSetting
 from .levels import LEVELS_BY_AGE_GROUP
 
 
+NATIONAL_CODE_ERROR = 'لطفاً از کد ملی صحیح استفاده کنید'
+
+
+def validate_iranian_national_code(value):
+    """۱۰ رقم انگلیسی، نه همهٔ ارقام یکسان، و رقم کنترلِ استاندارد کد ملی درست باشد."""
+    code = str(value or '').strip()
+    if not (len(code) == 10 and code.isascii() and code.isdigit()) or len(set(code)) == 1:
+        raise serializers.ValidationError(NATIONAL_CODE_ERROR)
+    total = sum(int(digit) * (10 - index) for index, digit in enumerate(code[:9]))
+    remainder = total % 11
+    if int(code[9]) != (remainder if remainder < 2 else 11 - remainder):
+        raise serializers.ValidationError(NATIONAL_CODE_ERROR)
+    return code
+
+
 def _ensure_slot_free(attrs, instance, force=False):
     """
     یک تایم در یک تاریخ فقط برای یک نفر: اگر همان تایم برای فرد دیگری رزرو یا مسدود باشد، خطا می‌دهد.
@@ -45,17 +60,25 @@ class LevelTestIntakeSerializer(serializers.ModelSerializer):
 
     # فقط برای عبور از بررسی تداخلِ تایم — با تأیید صریح کاربر در هشدارِ «این تایم آزاد نیست»؛ در دیتابیس ذخیره نمی‌شود
     force_time_override = serializers.BooleanField(write_only=True, required=False, default=False)
-    national_code = serializers.RegexField(r'^\d{10}$', required=False, allow_blank=True, max_length=10, error_messages={'invalid': 'کد ملی باید دقیقاً ۱۰ رقم انگلیسی باشد'})
+    # «فرد کد ملی خود را ندارد»: فقط برای همین حالت می‌توان کد ملی را خالی فرستاد (در دیتابیس ذخیره نمی‌شود)
+    no_national_code = serializers.BooleanField(write_only=True, required=False, default=False)
+    national_code = serializers.CharField(required=False, allow_blank=True, max_length=10, validators=[validate_iranian_national_code], error_messages={'null': NATIONAL_CODE_ERROR})
     # «فرد دانش‌آموز جدید نیست»: نام پدر و شماره همراه لازم نیست (در دیتابیس ذخیره نمی‌شود)
     not_new_student = serializers.BooleanField(write_only=True, required=False, default=False)
 
     class Meta:
         model = LevelTest
-        fields = ['id', 'first_name', 'last_name', 'father_name', 'birth_date', 'national_code', 'phone', 'gender', 'student', 'price', 'payment_status', 'test_date', 'sequence_warning', 'force_time_override', 'not_new_student']
+        fields = ['id', 'first_name', 'last_name', 'father_name', 'birth_date', 'national_code', 'phone', 'gender', 'student', 'price', 'payment_status', 'test_date', 'sequence_warning', 'force_time_override', 'not_new_student', 'no_national_code']
 
     def validate(self, attrs):
         not_new_student = attrs.pop('not_new_student', False)
-        required_fields = ['first_name', 'last_name', 'birth_date', 'gender'] if not_new_student else ['first_name', 'last_name', 'father_name', 'birth_date', 'phone', 'gender']
+        no_national_code = attrs.pop('no_national_code', False)
+        required_fields = ['first_name', 'last_name', 'birth_date', 'gender', 'national_code'] if not_new_student else ['first_name', 'last_name', 'father_name', 'birth_date', 'phone', 'gender', 'national_code']
+        if no_national_code:
+            attrs['national_code'] = ''
+            required_fields.remove('national_code')
+        elif not attrs.get('national_code'):
+            raise serializers.ValidationError({'national_code': NATIONAL_CODE_ERROR})
         for field in required_fields:
             if not attrs.get(field) and not (self.instance and getattr(self.instance, field, None)):
                 raise serializers.ValidationError({field: 'این فیلد لازم است'})
@@ -65,6 +88,7 @@ class LevelTestIntakeSerializer(serializers.ModelSerializer):
 
 class LevelTestSerializer(serializers.ModelSerializer):
     """نمایش کامل + ویرایش نتیجه (برای پنل مسئول آموزش و مدیر)"""
+    national_code = serializers.CharField(required=False, allow_blank=True, max_length=10, validators=[validate_iranian_national_code], error_messages={'null': NATIONAL_CODE_ERROR})
     test_date_jalali = serializers.ReadOnlyField()
     created_at_jalali = serializers.ReadOnlyField()
     birth_date_jalali = serializers.ReadOnlyField()
