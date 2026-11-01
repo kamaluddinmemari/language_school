@@ -21,13 +21,14 @@ class TermSerializer(serializers.ModelSerializer):
     pre_registration_end = serializers.ReadOnlyField()
     pre_registration_end_jalali = serializers.ReadOnlyField()
     is_current = serializers.SerializerMethodField()
+    is_pre_registration_default = serializers.SerializerMethodField()
 
     class Meta:
         model = Term
         fields = [
             'id', 'year', 'term_number', 'start_date', 'end_date',
             'pre_registration_start', 'pre_registration_start_jalali', 'pre_registration_end', 'pre_registration_end_jalali',
-            'start_date_jalali', 'end_date_jalali', 'title', 'class_count', 'is_current', 'holidays', 'created_at',
+            'start_date_jalali', 'end_date_jalali', 'title', 'class_count', 'is_current', 'is_pre_registration_default', 'holidays', 'created_at',
         ]
         read_only_fields = ['id', 'created_at']
 
@@ -39,6 +40,12 @@ class TermSerializer(serializers.ModelSerializer):
             self.context['_current_term_id'] = current.id if current else None
         return obj.id == self.context['_current_term_id']
 
+    def get_is_pre_registration_default(self, obj):
+        if '_pre_registration_default_term_id' not in self.context:
+            from .models import get_latest_term_for_pre_registration
+            default_term = get_latest_term_for_pre_registration()
+            self.context['_pre_registration_default_term_id'] = default_term.id if default_term else None
+        return obj.id == self.context['_pre_registration_default_term_id']
     def get_class_count(self, obj):
         return obj.class_slots.count()
 

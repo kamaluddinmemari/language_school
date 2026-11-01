@@ -14,17 +14,19 @@ def _jalali(dt):
 
 class GradeFieldSetting(models.Model):
     """
-    تنظیم عنوان/فعال‌بودن/سهم (از ۱۰۰) هر یک از ۵ فیلد نمره‌ی ترم، به تفکیک رده سنی
+    تنظیم عنوان/فعال‌بودن/سهم (از ۱۰۰) هر یک از فیلدهای نمره‌ی ترم، به تفکیک رده سنی
     (کودک/نوجوان/بزرگسال) — همان چیزی که در «تنظیم فیلدهای نمره» توسط مدیر آموزش/مدیر
     تعریف می‌شود. سهم هر فیلد آزادانه قابل تغییر است؛ جمع سهم فیلدهای فعال معمولاً باید
     ۱۰۰ باشد ولی این محدودیت به‌صورت سخت‌گیرانه در بک‌اند enforce نمی‌شود (فقط هشدار در پنل).
     """
 
     class FieldKey(models.TextChoices):
-        CP = 'cp', 'CP'
+        CP = 'cp', 'CP1'
+        CP2 = 'cp2', 'CP2'
         MIDTERM = 'midterm', 'میان‌ترم'
         WRITING1 = 'writing1', 'رایتینگ ۱'
         WRITING2 = 'writing2', 'رایتینگ ۲'
+        ORAL = 'oral', 'Oral'
         FINAL = 'final', 'پایان‌ترم'
 
     class AgeGroup(models.TextChoices):
@@ -66,21 +68,25 @@ class GradePassingSetting(models.Model):
         return f"حداقل قبولی {self.get_age_group_display()}: {self.passing_score}"
 
 
-FIELD_KEYS = ['cp', 'midterm', 'writing1', 'writing2', 'final']
+FIELD_KEYS = ['cp', 'writing1', 'midterm', 'writing2', 'oral', 'final', 'cp2']
 
 DEFAULT_FIELD_TITLES = {
-    'cp': 'CP',
+    'cp': 'CP1',
+    'cp2': 'CP2',
     'midterm': 'میان‌ترم',
     'writing1': 'رایتینگ ۱',
     'writing2': 'رایتینگ ۲',
+    'oral': 'Oral',
     'final': 'پایان‌ترم',
 }
 
 DEFAULT_MAX_SCORES = {
     'cp': 10,
+    'cp2': 0,
     'midterm': 20,
     'writing1': 15,
     'writing2': 15,
+    'oral': 0,
     'final': 40,
 }
 
@@ -93,15 +99,18 @@ def ensure_default_grade_settings():
     """
     for age_group, _ in GradeFieldSetting.AgeGroup.choices:
         for order, field_key in enumerate(FIELD_KEYS):
-            GradeFieldSetting.objects.get_or_create(
+            setting, _ = GradeFieldSetting.objects.get_or_create(
                 age_group=age_group, field_key=field_key,
                 defaults={
                     'title': DEFAULT_FIELD_TITLES[field_key],
-                    'is_active': True,
+                    'is_active': field_key != 'oral' and not (age_group == GradeFieldSetting.AgeGroup.KIDS and field_key in {'midterm', 'writing1', 'writing2'}),
                     'max_score': DEFAULT_MAX_SCORES[field_key],
                     'order': order,
                 },
             )
+            if age_group == GradeFieldSetting.AgeGroup.KIDS and field_key in {'midterm', 'writing1', 'writing2'} and setting.is_active:
+                setting.is_active = False
+                setting.save(update_fields=['is_active', 'updated_at'])
         GradePassingSetting.objects.get_or_create(
             age_group=age_group, defaults={'passing_score': 60},
         )
@@ -109,7 +118,7 @@ def ensure_default_grade_settings():
 
 class StudentGrade(models.Model):
     """
-    نمره‌ی یک دانش‌آموز مشخص در یک کلاس ترمیک مشخص (= یک درس در یک ترم). هر ۵ فیلد نمره
+    نمره‌ی یک دانش‌آموز مشخص در یک کلاس ترمیک مشخص (= یک درس در یک ترم). همه‌ی فیلدهای نمره
     جداگانه ذخیره می‌شود؛ نمره‌ی کل با جمع فیلدهای فعال (طبق GradeFieldSetting رده سنی
     همان کلاس) محاسبه و در total_score ذخیره می‌شود. بعد از «قطعی کردن» کل کلاس، رکوردهای
     قبول‌شده قفل می‌شوند؛ رکوردهای fail طبق تصمیم کارفرما همچنان توسط ادمین/اداری قابل
@@ -129,6 +138,8 @@ class StudentGrade(models.Model):
     age_group = models.CharField(max_length=10, blank=True, help_text='رده سنی محاسبه‌شده از روی سطح کلاس')
 
     cp_score = models.PositiveIntegerField(null=True, blank=True)
+    cp2_score = models.PositiveIntegerField(null=True, blank=True)
+    oral_score = models.PositiveIntegerField(null=True, blank=True)
     midterm_score = models.PositiveIntegerField(null=True, blank=True)
     writing1_score = models.PositiveIntegerField(null=True, blank=True)
     writing2_score = models.PositiveIntegerField(null=True, blank=True)
@@ -163,6 +174,8 @@ class StudentGrade(models.Model):
     def score_map(self):
         return {
             'cp': self.cp_score,
+            'cp2': self.cp2_score,
+            'oral': self.oral_score,
             'midterm': self.midterm_score,
             'writing1': self.writing1_score,
             'writing2': self.writing2_score,
@@ -187,7 +200,7 @@ class StudentGrade(models.Model):
         if not self.age_group:
             self.refresh_snapshot()
         active_keys = set(
-            GradeFieldSetting.objects.filter(age_group=self.age_group, is_active=True).values_list('field_key', flat=True)
+            GradeFieldSetting.objects.filter(age_group=self.age_group, is_active=True, max_score__gt=0).values_list('field_key', flat=True)
         ) if self.age_group else set(FIELD_KEYS)
         scores = self.score_map
         total = 0

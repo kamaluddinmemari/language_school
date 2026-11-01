@@ -5,7 +5,7 @@ import jdatetime
 from django.db.models import Q
 from django.utils import timezone
 
-from .models import ClassAttendance, ClassSlotEnrollment, TeacherSessionEvent
+from .models import ClassAttendance, ClassSlotEnrollment, TeacherSessionEvent, infer_age_group_from_level
 
 
 DEFAULT_SESSION_COUNT = 15
@@ -257,6 +257,7 @@ def roster_attendance_payload(slot, session_count=DEFAULT_SESSION_COUNT):
         'day_type_display': slot.get_day_type_display(),
         'time_slot': slot.time_slot,
         'level': slot.assigned_level,
+        'age_group': infer_age_group_from_level(slot.assigned_level),
         'teacher_name': slot.teacher_name,
         'gender': slot.gender,
         'gender_display': slot.get_gender_display(),

@@ -255,6 +255,18 @@ class TermSetting(models.Model):
         return obj or cls.objects.create()
 
 
+def get_latest_term_for_pre_registration(today=None):
+    """ترم ویژهٔ تعیین‌سطح و مدیریت کلاس‌ها.
+
+    از روز شروع پیش‌ثبت‌نامِ آخرین ترمی که واقعاً ایجاد شده، همان ترم در این دو بخش
+    پیش‌فرض است؛ سایر بخش‌ها همچنان از get_current_term استفاده می‌کنند.
+    """
+    today = today or timezone.localdate()
+    latest_defined = Term.objects.order_by('-created_at', '-id').first()
+    if latest_defined and latest_defined.pre_registration_start and latest_defined.pre_registration_start <= today:
+        return latest_defined
+    return get_current_term(today)
+
 def get_current_term(today=None):
     """
     ترم جاری — منبع واحد برای همهٔ بخش‌ها:

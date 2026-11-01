@@ -21,6 +21,8 @@ User = get_user_model()
 
 FIELD_SCORE_ATTR = {
     'cp': 'cp_score',
+    'cp2': 'cp2_score',
+    'oral': 'oral_score',
     'midterm': 'midterm_score',
     'writing1': 'writing1_score',
     'writing2': 'writing2_score',

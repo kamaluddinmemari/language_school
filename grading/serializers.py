@@ -40,7 +40,7 @@ class StudentGradeSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'class_slot', 'class_number', 'student_id', 'student_name', 'national_code',
             'term', 'term_title', 'level', 'age_group', 'age_group_display',
-            'cp_score', 'midterm_score', 'writing1_score', 'writing2_score', 'final_score',
+            'cp_score', 'cp2_score', 'midterm_score', 'writing1_score', 'writing2_score', 'oral_score', 'final_score',
             'total_score', 'is_finalized', 'is_fail', 'is_editable',
             'finalized_at_jalali', 'updated_at_jalali',
         ]
@@ -61,6 +61,8 @@ class StudentGradeUpsertItemSerializer(serializers.Serializer):
     """یک ردیف از درخواست ذخیره‌ی گروهی نمرات یک کلاس."""
     student_id = serializers.IntegerField()
     cp_score = serializers.IntegerField(required=False, allow_null=True, min_value=0)
+    cp2_score = serializers.IntegerField(required=False, allow_null=True, min_value=0)
+    oral_score = serializers.IntegerField(required=False, allow_null=True, min_value=0)
     midterm_score = serializers.IntegerField(required=False, allow_null=True, min_value=0)
     writing1_score = serializers.IntegerField(required=False, allow_null=True, min_value=0)
     writing2_score = serializers.IntegerField(required=False, allow_null=True, min_value=0)

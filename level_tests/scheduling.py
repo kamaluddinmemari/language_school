@@ -21,7 +21,7 @@ from rest_framework.views import APIView
 from .models import LevelTest, LevelTestManualSlotOverride
 
 # نام استادِ ارزیاب تعیین‌سطح — برای تغییر، فقط همین‌جا را عوض کنید (مقایسه بدون توجه به فاصله/نیم‌فاصله/ی-ك عربی).
-EVALUATOR_TEACHER_NAME = 'حسام الدین معماری'
+EVALUATOR_TEACHER_NAME = 'حسام الدین نعماری'
 
 SLOT_MINUTES = 5
 MORNING_RANGE = (9 * 60, 12 * 60)
@@ -40,7 +40,7 @@ def normalize_name(value):
 
 
 def is_evaluator_name(value):
-    # نام اساتید استاندارد است: تطبیق دقیق با «حسام الدین معماری» (بدون توجه به فاصله/نیم‌فاصله و ی/ي)
+    # نام استاد ارزیاب: تطبیق دقیق با «حسام الدین نعماری» (بدون توجه به فاصله/نیم‌فاصله و ی/ي)
     return normalize_name(value) == normalize_name(EVALUATOR_TEACHER_NAME)
 
 
@@ -92,17 +92,24 @@ def _is_priority(start):
 def teacher_busy_intervals(day):
     """[(شروع_دقیقه, پایان_دقیقه, دلیل)] — برنامه‌ی واقعی استاد ارزیاب در تاریخ میلادیِ day"""
     from class_management.attendance import _slot_weekdays
-    from class_management.models import ClassSlot, Term, TeacherSessionEvent
-    from leads.models import get_current_term
+    from class_management.models import ClassSlot, Term, TeacherSessionEvent, get_current_term
     from accounts.models import ClassRequest
     from group_classes.models import GroupSession
 
     busy = []
 
-    # ۱) کلاس‌های ترمی — همیشه «آخرین ترمِ موجود» (بزرگ‌ترین سال، بعد بزرگ‌ترین شماره‌ی ترم)،
-    # حتی اگر تاریخ انتخاب‌شده بیرون از بازه‌ی همان ترم باشد (الگوی هفتگی کلاس‌ها ملاک است)
-    latest_term = get_current_term()
-    slots = ClassSlot.objects.select_related('term').filter(term=latest_term).exclude(teacher_name='') if latest_term else []
+    # ۱) فقط برنامه‌ی ترم جاری و آخرین ترم تعریف‌شده مبناست.
+    # هر ترم فقط در بازه‌ی واقعی شروع تا پایان خودش فعال است؛ بنابراین در فاصله‌ی
+    # بین دو ترم، هیچ‌کدام از کلاس‌های ترمی تایم تعیین‌سطح را اشغال نمی‌کنند.
+    current_term = get_current_term(day)
+    latest_defined_term = Term.objects.order_by('-created_at', '-id').first()
+    candidate_term_ids = {
+        term.id for term in (current_term, latest_defined_term)
+        if term and term.start_date and term.end_date and term.start_date <= day <= term.end_date
+    }
+    slots = ClassSlot.objects.select_related('term').filter(
+        term_id__in=candidate_term_ids,
+    ).exclude(teacher_name='') if candidate_term_ids else []
     for slot in slots:
         if not is_evaluator_name(slot.teacher_name):
             continue

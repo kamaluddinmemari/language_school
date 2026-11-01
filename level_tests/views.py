@@ -140,12 +140,11 @@ class AvailableClassSlotsForLevelView(APIView):
 
     def get(self, request):
         from class_management.models import ClassSlot
-        from leads.models import get_current_term
-        from class_management.models import Term
+        from class_management.models import Term, get_latest_term_for_pre_registration
         gender = (request.query_params.get('gender') or '').strip()
         term_param = request.query_params.get('term_id')
         selected_term = Term.objects.filter(pk=term_param).first() if str(term_param or '').isdigit() else None
-        latest_term = selected_term or get_current_term()
+        latest_term = selected_term or get_latest_term_for_pre_registration()
         if not latest_term:
             return Response([])
         qs = ClassSlot.objects.filter(term=latest_term).exclude(assigned_level='').annotate(
