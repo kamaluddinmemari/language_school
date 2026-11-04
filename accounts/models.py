@@ -520,6 +520,7 @@ class FormArchive(models.Model):
         DISCIPLINARY = 'disciplinary', 'تعهد انضباطی'
         REFUND = 'refund', 'استرداد'
         CERTIFICATE = 'certificate', 'گواهی اشتغال به تحصیل'
+        EMPLOYEE_CERTIFICATE = 'employee_certificate', 'گواهی اشتغال به کار کارکنان'
 
     document_type = models.CharField(max_length=20, choices=DocumentType.choices)
     number = models.CharField(max_length=32)

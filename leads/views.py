@@ -143,6 +143,8 @@ class NewLeadActionView(APIView):
         elif action == 'followup2':
             lead.followup2_at = now
             lead.followup2_by = request.user
+        elif action == 'toggle_no_response':
+            lead.no_response = not lead.no_response
         elif action == 'register':
             lead.status = NewLead.Status.REGISTERED
             lead.registered_at = now
@@ -616,10 +618,10 @@ class NewLeadRegisterOptionsView(APIView):
             lead = NewLead.objects.select_related('term').get(pk=pk)
         except NewLead.DoesNotExist:
             return Response({'error': 'مورد پیدا نشد'}, status=status.HTTP_404_NOT_FOUND)
-        from class_management.models import Term
+        from class_management.models import Term, get_latest_term_for_pre_registration
         term_param = request.query_params.get('term_id')
         term = Term.objects.filter(pk=term_param).first() if str(term_param or '').isdigit() else None
-        term = term or get_current_term() or lead.term
+        term = term or get_latest_term_for_pre_registration() or get_current_term() or lead.term
         term_id = getattr(term, 'pk', None)
         student = _new_lead_student(lead, create=False)
         level, classes = _register_class_options(term_id, student, lead.requested_level, [], lead.gender)
@@ -1384,6 +1386,109 @@ class FollowupStaffListView(APIView):
         ])
 
 
+class AutoAssignWaitingListView(APIView):
+    """تخصیص خودکار موارد در انتظارِ تخصیص‌نیافته، بدون محدودیت ترم و با حفظ ارجاع‌های قبلی."""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        if not can_edit_menu(request.user, 'new-leads'):
+            return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
+        from accounts.models import User
+        from django.db import transaction
+        active_staff = User.objects.filter(
+            role__in=('admin', 'office', 'employee'), is_active=True,
+        )
+        level_assignments = request.data.get('level_assignments')
+        if level_assignments is not None:
+            if not isinstance(level_assignments, list) or not level_assignments:
+                return Response({'error': 'برای تخصیص سطحی، حداقل یک نگاشت سطح و کارمند وارد کنید'}, status=status.HTTP_400_BAD_REQUEST)
+            from level_tests.models import StandardLevel
+            valid_codes = set(StandardLevel.objects.values_list('code', flat=True))
+            active_ids = set(active_staff.values_list('id', flat=True))
+            mapping = {}
+            try:
+                for entry in level_assignments:
+                    code, employee_id = str(entry.get('level_code') or ''), int(entry.get('employee_id'))
+                    if code not in valid_codes or employee_id not in active_ids:
+                        raise ValueError
+                    mapping[code] = employee_id
+            except (AttributeError, TypeError, ValueError):
+                return Response({'error': 'سطح یا کارمند یکی از ردیف‌های تخصیص معتبر نیست'}, status=status.HTTP_400_BAD_REQUEST)
+            with transaction.atomic():
+                updated = 0
+                for code, employee_id in mapping.items():
+                    records = NewLead.objects.select_for_update().filter(
+                        status=NewLead.Status.PENDING, requested_level=code,
+                    ).exclude(assigned_to_id=employee_id)
+                    updated += records.update(assigned_to_id=employee_id)
+            return Response({'assigned': updated, 'level_assignments': mapping, 'scope': 'all_terms'})
+        if request.data.get('standard_only'):
+            raw_ids = request.data.get('employee_ids') or []
+            try:
+                staff_ids = list(dict.fromkeys(int(value) for value in raw_ids))
+            except (TypeError, ValueError):
+                return Response({'error': 'فهرست کارکنان نامعتبر است'}, status=status.HTTP_400_BAD_REQUEST)
+            valid_ids = set(active_staff.filter(id__in=staff_ids).values_list('id', flat=True))
+            if not staff_ids or valid_ids != set(staff_ids):
+                return Response({'error': 'یک یا چند کارمند انتخاب نشده یا فعال نیست'}, status=status.HTTP_400_BAD_REQUEST)
+            from level_tests.models import StandardLevel
+            standard_codes = list(StandardLevel.objects.values_list('code', flat=True))
+            if not standard_codes:
+                return Response({'error': 'سطح استانداردی در سامانه تعریف نشده است'}, status=status.HTTP_400_BAD_REQUEST)
+            with transaction.atomic():
+                counts = {staff_id: NewLead.objects.filter(
+                    assigned_to_id=staff_id, status=NewLead.Status.PENDING,
+                ).count() for staff_id in staff_ids}
+                eligible = list(NewLead.objects.select_for_update().filter(
+                    status=NewLead.Status.PENDING, assigned_to__isnull=True,
+                    requested_level__in=standard_codes,
+                ).order_by('created_at', 'id'))
+                for lead in eligible:
+                    target_id = min(staff_ids, key=lambda staff_id: (counts[staff_id], staff_ids.index(staff_id)))
+                    lead.assigned_to_id = target_id
+                    lead.save(update_fields=['assigned_to'])
+                    counts[target_id] += 1
+            return Response({'assigned': len(eligible), 'counts': counts, 'scope': 'all_terms', 'standard_only': True})
+        reset = bool(request.data.get('reset'))
+        with transaction.atomic():
+            # Lock the whole pending list so auto-assign/reset cannot race with another refresh.
+            if reset:
+                pending = list(NewLead.objects.select_for_update().filter(
+                    status=NewLead.Status.PENDING,
+                ).order_by('created_at', 'id'))
+                active_ids = set(active_staff.values_list('id', flat=True))
+                staff_ids = sorted({lead.assigned_to_id for lead in pending if lead.assigned_to_id in active_ids})
+                if not staff_ids:
+                    staff_ids = list(active_staff.order_by('id').values_list('id', flat=True))
+                for lead in pending:
+                    lead.assigned_to_id = None
+                NewLead.objects.bulk_update(pending, ['assigned_to'])
+                counts = {staff_id: 0 for staff_id in staff_ids}
+            else:
+                # Keep using the currently established allocation group where possible.
+                staff_ids = list(NewLead.objects.filter(
+                    status=NewLead.Status.PENDING, assigned_to__in=active_staff,
+                ).order_by().values_list('assigned_to_id', flat=True).distinct())
+                if not staff_ids:
+                    staff_ids = list(active_staff.order_by('id').values_list('id', flat=True))
+                else:
+                    staff_ids.sort()
+                if not staff_ids:
+                    return Response({'assigned': 0, 'unassigned': NewLead.objects.filter(status=NewLead.Status.PENDING, assigned_to__isnull=True).count()})
+                counts = {staff_id: NewLead.objects.filter(assigned_to_id=staff_id, status=NewLead.Status.PENDING).count() for staff_id in staff_ids}
+                pending = list(NewLead.objects.select_for_update().filter(
+                    status=NewLead.Status.PENDING, assigned_to__isnull=True,
+                ).order_by('created_at', 'id'))
+            if not staff_ids:
+                return Response({'assigned': 0, 'unassigned': len(pending)})
+            for lead in pending:
+                target_id = min(staff_ids, key=lambda staff_id: (counts[staff_id], staff_ids.index(staff_id)))
+                lead.assigned_to_id = target_id
+                lead.save(update_fields=['assigned_to'])
+                counts[target_id] += 1
+        return Response({'assigned': len(pending), 'counts': counts, 'scope': 'all_terms', 'reset': reset})
+
+
 def _misplaced_enrollment(item):
     """ثبت‌نامِ فعلیِ فردِ «در کلاس درست ثبت‌نام نشده» در همان کلاس اشتباه."""
     from django.db.models import Q
@@ -1725,7 +1830,8 @@ class EmployeeFollowupProgressView(APIView):
         def add(key, total, completed):
             total, completed = int(total), min(int(completed), int(total))
             items[key] = {'total': total, 'completed': completed, 'percent': round(completed * 100 / total) if total else 0}
-        waiting = NewLead.objects.filter(term_id=term_id, assigned_to_id=employee_id)
+        # Waiting-list follow-up is intentionally cross-term; its roster is the full active waiting list.
+        waiting = NewLead.objects.filter(assigned_to_id=employee_id)
         add('waiting-list', waiting.exclude(status=NewLead.Status.CANCELLED).count(), waiting.filter(Q(followup1_at__isnull=False) | Q(registered_at__isnull=False)).count())
         unregistered = UnregisteredStudent.objects.filter(term_id=term_id, assigned_to_id=employee_id)
         add('unregistered', unregistered.exclude(status=UnregisteredStudent.Status.REGISTERED).count(), unregistered.filter(followups__isnull=False).distinct().count())

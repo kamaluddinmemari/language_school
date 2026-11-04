@@ -133,6 +133,7 @@ class NewLead(models.Model):
     followup2_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
     registered_at = models.DateTimeField(null=True, blank=True)
     cancelled_at = models.DateTimeField(null=True, blank=True)
+    no_response = models.BooleanField(default=False, help_text='کارمند برای تماس با این فرد پاسخ دریافت نکرده است')
 
     deposit_amount = models.PositiveIntegerField(null=True, blank=True, help_text='مبلغ بیعانه (تومان)')
     deposit_paid_at = models.DateTimeField(null=True, blank=True)

@@ -87,7 +87,7 @@ class NewLeadSerializer(serializers.ModelSerializer):
             'status', 'status_display', 'term', 'term_title',
             'followup1_at', 'followup1_at_jalali', 'followup1_by_name',
             'followup2_at', 'followup2_at_jalali', 'followup2_by_name',
-            'registered_at', 'registered_at_jalali', 'cancelled_at', 'cancelled_at_jalali',
+            'registered_at', 'registered_at_jalali', 'cancelled_at', 'cancelled_at_jalali', 'no_response',
             'deposit_amount', 'deposit_paid_at', 'deposit_paid_at_jalali',
             'description', 'followups',
             'needs_level_test', 'needs_level_test_marked_at', 'needs_level_test_marked_at_jalali',

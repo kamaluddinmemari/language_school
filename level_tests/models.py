@@ -106,6 +106,7 @@ class LevelTest(models.Model):
     # این علامت برای افرادی است که به‌دلیل عدم رعایت توالی ترم، تعیین‌سطحشان الزامی است.
     # چنین افرادی حتی بعد از گذشت زمان رزرو، در صف «تایم از دست‌رفته» قرار نمی‌گیرند.
     sequence_warning = models.BooleanField(default=False, help_text='تعیین سطح برای این فرد به‌دلیل عدم توالی ترم الزامی است')
+    queue_priority_at = models.DateTimeField(null=True, blank=True, help_text='زمان انتقال دستی این فرد به ابتدای صف تعیین سطح')
     evaluator = models.ForeignKey(
         User, on_delete=models.SET_NULL, null=True, blank=True,
         related_name='level_tests_conducted', limit_choices_to={'role': 'evaluator'}

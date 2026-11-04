@@ -1341,7 +1341,7 @@ class StaffCredentialsDetailView(APIView):
 
 
 FORM_ARCHIVE_ROLES = {'admin', 'office', 'employee', 'evaluator'}
-FORM_ARCHIVE_TYPES = {'disciplinary', 'refund', 'certificate'}
+FORM_ARCHIVE_TYPES = {'disciplinary', 'refund', 'certificate', 'employee_certificate'}
 
 
 def _form_archive_payload(request, archive):

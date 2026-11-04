@@ -47,7 +47,7 @@ INSTALLED_APPS = [
     'staff_messages',
     'library',
     'leads',
-    'class_management',
+    'class_management.apps.ClassManagementConfig',
     'grading',
     'payroll',
     'reports',

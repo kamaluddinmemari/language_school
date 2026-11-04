@@ -368,7 +368,13 @@ class LevelTestActionView(APIView):
         try: obj = LevelTest.objects.get(pk=pk)
         except LevelTest.DoesNotExist: return Response({'error': 'پیدا نشد'}, status=status.HTTP_404_NOT_FOUND)
         now = timezone.now()
-        if action == 'natoos':
+        if action == 'prioritize':
+            if obj.status != LevelTest.Status.PENDING:
+                return Response({'error': 'فقط افراد در صف انتظار قابل انتقال به ابتدای صف هستند'}, status=status.HTTP_400_BAD_REQUEST)
+            obj.queue_priority_at = now
+            obj.save(update_fields=['queue_priority_at', 'updated_at'])
+            return Response(LevelTestSerializer(obj).data)
+        elif action == 'natoos':
             obj.natoos_registered = True
         elif action == 'reminder-24h':
             obj.reminder_24h_followed_at = now

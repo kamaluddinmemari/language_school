@@ -6,7 +6,7 @@ from .views import (
     UnregisteredStudentFollowupView, UnregisteredStudentRegisterView, UnregisteredStudentRegisterOptionsView, UnregisteredStudentStatsView,
     DropoutStudentListView, DropoutStudentFollowupView,
     DebtorListView, DebtorDetailView, DebtorFollowupView, DebtorSettleView, DebtorRegisterView, DebtorRegisterOptionsView, DebtorStatsView,
-    DiscountedPersonListView, DiscountedPersonDetailView, FollowupStaffListView, EmployeeFollowupDeadlineView,
+    DiscountedPersonListView, DiscountedPersonDetailView, FollowupStaffListView, AutoAssignWaitingListView, EmployeeFollowupDeadlineView,
     EmployeeFollowupTermListView, EmployeeFollowupProgressView,
     UnregisteredMoveOptionsView, UnregisteredMoveView,
     StudentStatusRegisterOptionsView, StudentStatusRegisterView,
@@ -42,6 +42,7 @@ urlpatterns = [
     path('leads/debtors/stats/', DebtorStatsView.as_view(), name='debtor_stats'),
 
     path('leads/followup-staff/', FollowupStaffListView.as_view(), name='followup_staff_list'),
+    path('leads/auto-assign-waiting-list/', AutoAssignWaitingListView.as_view(), name='auto_assign_waiting_list'),
     path('leads/employee-followup-deadline/', EmployeeFollowupDeadlineView.as_view(), name='employee_followup_deadline'),
     path('leads/employee-followup-progress/', EmployeeFollowupProgressView.as_view(), name='employee_followup_progress'),
     path('leads/employee-followup-terms/', EmployeeFollowupTermListView.as_view(), name='employee_followup_terms'),
