@@ -62,10 +62,12 @@ def default_levels_for_title(title):
             return []
         return [EVOLVE_LEVELS[n]] if n in EVOLVE_LEVELS else []
     if 'oxford' in compact:
+        # هر ۱۲ ترم یک کتاب آکسفورد: Elementary ← 101–206، Intermediate ← 301–406، Advanced ← 501–606.
+        # نیاز سفارش = افرادِ سطح مرزیِ قبل از شروع هر کتاب (Intermediate ← 206، Advanced ← 406).
         if re.search(r'elem', compact):
             return ['101']
         if re.search(r'inter', compact):
-            return ['306']
+            return ['206']
         if re.search(r'adv', compact):
             return ['406']
         return []
@@ -138,30 +140,48 @@ def current_mode():
     return LibrarySetting.get().forecast_mode
 
 
-def build_context(term_id=None, mode=None):
+def current_started_term(terms, today=None):
+    """ترم جاریِ واقعی بر اساس تاریخ: آخرین ترمی که تاریخ شروعش رسیده است.
+    تا رسیدن تاریخ شروعِ ترم جدید، ترم جاری همان ترم قبلی می‌ماند و ترم آتی (پیش‌ثبت‌نام) ملاک نیست؛
+    از روز شروع ترم جدید، همان ترم جدید ملاک می‌شود (بدون مهلت هفت‌روزه‌ی library_current_term)."""
+    if not terms:
+        return None
+    today = today or timezone.localdate()
+    started = [term for term in terms if term.start_date and term.start_date <= today]
+    return started[-1] if started else terms[0]
+
+
+def build_context(term_id=None, mode=None, term=None, all_day_types=False):
     """شمارش یکتای زبان‌آموزان هر سطح در ترم ملاک: {سطح_نرمال: {student_id,...}}
-    mode='registered': همه‌ی ثبت‌نام‌شده‌ها (روش قبلی)؛ mode='deposit': فقط افراد بیعانه‌داده."""
+    mode='registered': همه‌ی ثبت‌نام‌شده‌ها (روش قبلی)؛ mode='deposit': فقط افراد بیعانه‌داده.
+    term: خودِ ترم (اگر داده شود به‌جای term_id استفاده می‌شود).
+    all_day_types=True: کلاس‌های همهٔ نوع‌ها (زوج/فرد/یک‌روزه/دوروزه/چرخشی/آنلاین/ترکیبی) شمرده می‌شوند، نه فقط زوج/فرد/یک‌روزه.
+    gender_index: {سطح: {'girls': {...}, 'boys': {...}, 'mixed': {...}}} بر اساس جنسیت کلاس."""
     from class_management.models import ClassSlotEnrollment
     from .models import BookDeposit
-    term, terms = resolve_term(term_id)
+    terms = ordered_terms()
+    if term is None:
+        term, terms = resolve_term(term_id)
     mode = mode or current_mode()
     index = {}
+    gender_index = {}
     paid_ids = None
     if term and mode == 'deposit':
         paid_ids = set(BookDeposit.objects.filter(term_id=term.id, paid=True).values_list('student_id', flat=True))
     if term:
-        rows = ClassSlotEnrollment.objects.filter(
-            class_slot__term_id=term.id,
-            class_slot__day_type__in=ONE_AND_TWO_DAY_TYPES,
-            payment_verified=True,
-        ).exclude(is_carryover=True, carryover_confirmed=False).values_list('student_id', 'class_slot__assigned_level')
-        for student_id, level in rows:
+        queryset = ClassSlotEnrollment.objects.filter(class_slot__term_id=term.id, payment_verified=True)
+        if not all_day_types:
+            queryset = queryset.filter(class_slot__day_type__in=ONE_AND_TWO_DAY_TYPES)
+        rows = queryset.exclude(is_carryover=True, carryover_confirmed=False).values_list('student_id', 'class_slot__assigned_level', 'class_slot__gender')
+        for student_id, level, gender in rows:
             if paid_ids is not None and student_id not in paid_ids:
                 continue
             key = normalize_level(level)
             if key:
                 index.setdefault(key, set()).add(student_id)
-    return {'term': term, 'terms': terms, 'index': index, 'mode': mode}
+                bucket = gender if gender in ('girls', 'boys') else 'mixed'
+                gender_index.setdefault(key, {'girls': set(), 'boys': set(), 'mixed': set()})[bucket].add(student_id)
+    return {'term': term, 'terms': terms, 'index': index, 'gender_index': gender_index, 'mode': mode}
 
 
 def forecast_for_book(book, ctx):
@@ -188,3 +208,22 @@ def available_levels(term):
         key = normalize_level(lv.code)
         out.append({'key': key, 'label': lv.code, 'group': lv.age_group, 'group_label': group_labels.get(lv.age_group, lv.age_group), 'count': counts.get(key, 0)})
     return out
+
+
+def level_group(code):
+    """گروه کتابیِ یک سطح: همهٔ سطح‌های یک گروه یک کتاب مشترک دارند.
+      بزرگسال: 101..106 ← Evolve 1، 201..206 ← Evolve 2، … 601..606 ← Evolve 6 (گروه = رقم صدگان)
+      نوجوان:  Teen1..3، Teen4..6، … (هر سه سطح یک کتاب)
+      کودک:    E1..E5، S1..S5، … (هر پنج سطحِ یک حرف یک کتاب)
+    برای کدی که در این الگوها نباشد None برمی‌گردد (فقط خودش یک گروه است)."""
+    key = normalize_level(code)
+    match = re.fullmatch(r'([1-9])0\d', key)
+    if match:
+        return ('adult', match.group(1))
+    match = re.fullmatch(r'teen(\d+)', key)
+    if match:
+        return ('teen', str((int(match.group(1)) - 1) // 3))
+    match = re.fullmatch(r'([a-z])([1-9])', key)
+    if match:
+        return ('kids', match.group(1))
+    return None

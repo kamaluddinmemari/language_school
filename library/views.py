@@ -1,4 +1,4 @@
-from django.db.models import Sum, F, IntegerField
+from django.db.models import Sum, F, IntegerField, Max, Count
 from django.db.models.functions import Coalesce
 from django.utils import timezone
 from rest_framework import generics, status
@@ -8,7 +8,7 @@ from rest_framework.permissions import IsAuthenticated
 import jdatetime
 from .models import Book, BookSale, BookStockAddition, BookShortcut, LevelShortcut
 from .serializers import BookShortcutSerializer, BookSerializer, BookSaleSerializer, SellBookSerializer, AddBookStockSerializer, BookStockAdditionSerializer, LevelShortcutSerializer
-from accounts.menu_permissions import can_edit_menu
+from accounts.menu_permissions import can_edit_menu, can_view_menu
 from . import forecast as fc
 
 # منسوخ — از تنظیمات دسترسی (accounts.menu_permissions.can_edit_menu) جایگزین شد.
@@ -258,6 +258,21 @@ class LibraryStatsView(APIView):
         })
 
 
+class LibraryStockPulseView(APIView):
+    """GET: نبض سبک کسر/افزودن موجودی برای اعلان صوتی سراسری پنل."""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        if not (can_view_menu(request.user, 'library') or can_edit_menu(request.user, 'library')):
+            return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
+        sales = BookSale.objects.aggregate(max_id=Max('id'), count=Count('id'))
+        additions = BookStockAddition.objects.aggregate(max_id=Max('id'), count=Count('id'))
+        return Response({
+            'sell': {'max_id': sales['max_id'] or 0, 'count': sales['count'] or 0},
+            'add': {'max_id': additions['max_id'] or 0, 'count': additions['count'] or 0},
+        })
+
+
 class BookShortcutListView(generics.ListCreateAPIView):
     """میانبرهای فروش کتاب — برای همه‌ی کاربرانی که به منوی کتابخانه دسترسی دارند مشترک است"""
     permission_classes = [IsAuthenticated]
@@ -334,3 +349,124 @@ class LevelShortcutDetailView(generics.RetrieveUpdateDestroyAPIView):
         if self._denied(request):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         return super().destroy(request, *args, **kwargs)
+
+
+class BookOrderNeedsView(APIView):
+    """GET: جدول زندهٔ «کتاب‌های مورد نیاز برای سفارش» بر حسب سطوح استاندارد و کتاب‌های هر سطح.
+
+    هر ردیف = یک کتاب (یا یک سطحِ بدون کتاب): تعداد زبان‌آموزان ثبت‌نام‌شدهٔ همان سطح(ها) در ترم ملاک کتابخانه،
+    موجودی فعلی کتاب و کسری = max(0, نیاز − موجودی). چیزی ذخیره نمی‌شود؛ هر بار از ثبت‌نام‌ها و موجودی لحظه‌ای محاسبه می‌شود.
+    پارامتر اختیاری ?forecast_term=<id> همان ترم ملاک سایر بخش‌های کتابخانه است.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        if not can_edit_menu(request.user, 'library'):
+            return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
+        from level_tests.models import StandardLevel
+        # ترم جاریِ واقعی (تا شروع تاریخیِ ترم جدید، ترم قبلی)؛ همهٔ ثبت‌نام‌شده‌ها در همهٔ نوع کلاس‌ها
+        # (دخترانه، پسرانه و مختلط) شمرده می‌شوند، نه فقط بیعانه‌دارها یا فقط کلاس‌های زوج/فرد.
+        terms = fc.ordered_terms()
+        wanted = request.query_params.get('forecast_term')
+        term = next((t for t in terms if str(t.id) == str(wanted)), None) if wanted else None
+        term = term or fc.current_started_term(terms)
+        ctx = fc.build_context(term=term, mode='registered', all_day_types=True)
+        index = ctx['index']
+        gender_index = ctx['gender_index']
+        group_labels = dict(StandardLevel.AgeGroup.choices)
+        levels = list(StandardLevel.objects.all().order_by('age_group', 'order', 'code'))
+        position = {fc.normalize_level(lv.code): i for i, lv in enumerate(levels)}
+        info = {fc.normalize_level(lv.code): lv for lv in levels}
+
+        # منطق سفارش: کسی که الان در «آخرین سطحِ» یک گروه است ترم بعد وارد گروه بعدی می‌شود و کتاب آن گروه را لازم دارد.
+        # پس برای هر کتاب فقط افرادِ سطح مرزی (یک سطح قبل از شروع کتاب) شمرده می‌شوند، نه همهٔ سطوح گروه؛
+        # مثلاً Evolve 2 (سطوح 201–206) ← زبان‌آموزان 106. ستون «سطح» همان سطوح پوشش‌داده‌شدهٔ کتاب را نشان می‌دهد.
+        def group_of(key):
+            return fc.level_group(key) or ('single', key)
+
+        members = {}
+        for key in position:
+            members.setdefault(group_of(key), []).append(key)
+        group_order = sorted(members, key=lambda g: position[members[g][0]])
+
+        def next_group(group):
+            at = group_order.index(group)
+            if at + 1 < len(group_order) and group_order[at + 1][0] == group[0]:
+                return group_order[at + 1]
+            return None
+
+        def covered_keys(book, count_keys):
+            """سطوحی که کتاب پوشش می‌دهد (فقط برای نمایش)."""
+            if book.category == Book.Category.STORY:
+                return list(count_keys)
+            is_oxford = 'oxford' in str(book.title).lower()
+            covered = []
+            for key in count_keys:
+                group = group_of(key)
+                start = group
+                if key == members[group][-1] and next_group(group):
+                    start = next_group(group)
+                chosen = [start]
+                if is_oxford and next_group(start):
+                    chosen.append(next_group(start))
+                for g in chosen:
+                    if g not in covered:
+                        covered.append(g)
+            return [k for g in sorted(covered, key=lambda g: position[members[g][0]]) for k in members[g]]
+
+        def range_labels(keys):
+            """کلیدهای پشت‌سرهم یک بازه می‌شوند: ['201','202',…,'206'] → '201–206'"""
+            keys = sorted(set(keys), key=position.get)
+            runs, run = [], []
+            for key in keys:
+                if run and position[key] != position[run[-1]] + 1:
+                    runs.append(run)
+                    run = []
+                run.append(key)
+            if run:
+                runs.append(run)
+            return [info[r[0]].code if len(r) == 1 else f'{info[r[0]].code}–{info[r[-1]].code}' for r in runs]
+
+        def gender_counts(keys):
+            out = {}
+            for gender in ('girls', 'boys', 'mixed'):
+                people = set()
+                for key in keys:
+                    people |= gender_index.get(key, {}).get(gender, set())
+                out[gender] = len(people)
+            return out
+
+        rows, used_keys = [], set()
+        for book in Book.objects.all():
+            count_keys = sorted({k for k in fc.levels_for_book(book) if k in position}, key=position.get)
+            if not count_keys:
+                continue
+            students = set()
+            for key in count_keys:
+                students |= index.get(key, set())
+            used_keys.update(count_keys)
+            need = len(students)
+            stock = book.current_stock
+            shown = covered_keys(book, count_keys) or count_keys
+            first = info[shown[0]]
+            rows.append({
+                'sort': (position[shown[0]], book.sort_order, book.title),
+                'levels': range_labels(shown), 'count_levels': [info[k].code for k in count_keys],
+                'group': first.age_group, 'group_label': group_labels.get(first.age_group, first.age_group),
+                'students': need, 'book_id': book.id, 'book_title': book.title, 'stock': stock,
+                'shortage': max(0, need - max(stock, 0)), **gender_counts(count_keys),
+            })
+        rows.sort(key=lambda r: r['sort'])
+        for row in rows:
+            row.pop('sort')
+        all_students = set()
+        for key in used_keys:
+            all_students |= index.get(key, set())
+        return Response({
+            'term': {'id': term.id, 'title': term.title} if term else None,
+            'mode': ctx['mode'],
+            'rows': rows,
+            'total_students': len(all_students),
+            'total_shortage': sum(r['shortage'] for r in rows),
+            'generated_at': timezone.now().isoformat(),
+        })
