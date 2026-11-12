@@ -3,7 +3,7 @@ from .views import (
     LevelChoicesView, LevelTestListCreateView, LevelTestDetailView, LevelTestPriceSettingView,
     StudentRequestLevelTestView, MyLevelTestsView, LevelTestPaymentInfoView,
     StandardLevelListView, StandardLevelDetailView, LevelTestActionView,
-    AvailableClassSlotsForLevelView,
+    AvailableClassSlotsForLevelView, LevelTestQueueSettingView,
 )
 from .scheduling import LevelTestAvailableTimesView, LevelTestTeacherConflictsView, LevelTestManualSlotOverrideView
 
@@ -15,6 +15,7 @@ urlpatterns = [
     path('level-tests/available-times/', LevelTestAvailableTimesView.as_view(), name='level_test_available_times'),
     path('level-tests/teacher-conflicts/', LevelTestTeacherConflictsView.as_view(), name='level_test_teacher_conflicts'),
     path('level-tests/manual-overrides/', LevelTestManualSlotOverrideView.as_view(), name='level_test_manual_overrides'),
+    path('level-tests/queue-setting/', LevelTestQueueSettingView.as_view(), name='level_test_queue_setting'),
     path('level-tests/price-setting/', LevelTestPriceSettingView.as_view(), name='level_test_price_setting'),
     path('level-tests/payment-info/', LevelTestPaymentInfoView.as_view(), name='level_test_payment_info'),
     path('level-tests/request/', StudentRequestLevelTestView.as_view(), name='level_test_student_request'),

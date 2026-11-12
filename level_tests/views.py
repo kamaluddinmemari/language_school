@@ -359,6 +359,46 @@ class LevelTestPriceSettingView(APIView):
         return Response(serializer.data)
 
 
+DEFAULT_LATE_GRACE_MINUTES = 45
+
+
+def _queue_setting_row():
+    from accounts.models import AppearanceSettings
+    obj, _ = AppearanceSettings.objects.get_or_create(key='level_tests')
+    return obj
+
+
+def get_late_grace_minutes():
+    try:
+        value = int((_queue_setting_row().settings or {}).get('late_grace_minutes', DEFAULT_LATE_GRACE_MINUTES))
+    except Exception:
+        return DEFAULT_LATE_GRACE_MINUTES
+    return min(max(value, 1), 1440)
+
+
+class LevelTestQueueSettingView(APIView):
+    """مهلت ماندن فرد در صف انتظار بعد از زمان رزرو (دقیقه) — بعد از آن به «مراجعه نکرده‌ها» می‌رود. بدون ستون جدید در دیتابیس."""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        return Response({'late_grace_minutes': get_late_grace_minutes()})
+
+    def patch(self, request):
+        if not can_edit_menu(request.user, 'level-tests'):
+            return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
+        try:
+            minutes = int(request.data.get('late_grace_minutes'))
+        except (TypeError, ValueError):
+            return Response({'error': 'مهلت را به‌صورت عدد (دقیقه) وارد کنید'}, status=status.HTTP_400_BAD_REQUEST)
+        if not 1 <= minutes <= 1440:
+            return Response({'error': 'مهلت باید بین ۱ تا ۱۴۴۰ دقیقه باشد'}, status=status.HTTP_400_BAD_REQUEST)
+        row = _queue_setting_row()
+        row.settings = {**(row.settings or {}), 'late_grace_minutes': minutes}
+        row.updated_by = request.user
+        row.save()
+        return Response({'late_grace_minutes': minutes})
+
+
 class LevelTestActionView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -373,6 +413,18 @@ class LevelTestActionView(APIView):
                 return Response({'error': 'فقط افراد در صف انتظار قابل انتقال به ابتدای صف هستند'}, status=status.HTTP_400_BAD_REQUEST)
             obj.queue_priority_at = now
             obj.save(update_fields=['queue_priority_at', 'updated_at'])
+            return Response(LevelTestSerializer(obj).data)
+        elif action == 'requeue':
+            # وقت ازدست‌رفته را نگه می‌داریم، اما برای فرد وقت جدیدِ همین لحظه می‌سازیم.
+            if obj.status != LevelTest.Status.PENDING:
+                return Response({'error': 'فقط افراد در انتظار تعیین سطح قابل بازگشت به صف هستند'}, status=status.HTTP_400_BAD_REQUEST)
+            if obj.test_date:
+                obj.previous_missed_test_date = obj.test_date
+            obj.test_date = now
+            obj.queue_priority_at = now
+            obj.reminder_24h_followed_at = None
+            obj.reminder_2h_followed_at = None
+            obj.save(update_fields=['test_date', 'previous_missed_test_date', 'queue_priority_at', 'reminder_24h_followed_at', 'reminder_2h_followed_at', 'updated_at'])
             return Response(LevelTestSerializer(obj).data)
         elif action == 'natoos':
             obj.natoos_registered = True

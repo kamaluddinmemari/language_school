@@ -46,6 +46,17 @@ STORY_RULES = [
 ]
 
 
+def purchase_students(count, percent):
+    """تعداد افراد ملاک خرید: ceil(count × درصد / ۱۰۰)؛ درصد نامعتبر = ۱۰۰."""
+    try:
+        percent = int(percent)
+    except (TypeError, ValueError):
+        percent = 100
+    if not 1 <= percent <= 100:
+        percent = 100
+    return -(-int(count or 0) * percent // 100)
+
+
 def normalize_level(value):
     return re.sub(r'[\s\-_]+', '', str(value or '').strip().lower())
 

@@ -542,3 +542,16 @@ class FormArchive(models.Model):
         if self.signed_image:
             self.signed_image.delete(save=False)
         return super().delete(*args, **kwargs)
+
+
+class UserHotkeySetting(models.Model):
+    """کلیدهای میانبر صفحه‌کلید هر کاربر + روشن/خاموش بودن هشدار کوتاه هنگام استفاده.
+    روی سرور ذخیره می‌شود تا همیشگی بماند و در همهٔ سیستم‌ها/مرورگرهای همان کاربر یکسان باشد."""
+    user = models.OneToOneField('accounts.User', on_delete=models.CASCADE, related_name='hotkey_setting')
+    hotkeys = models.JSONField(default=list, blank=True)
+    toast_enabled = models.BooleanField(default=True)
+    sound_enabled = models.BooleanField(default=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f'میانبرهای {self.user_id}'

@@ -33,6 +33,8 @@ from .views import (
     FormArchiveUploadByNumberView,
 )
 
+from .hotkey_settings import HotkeySettingView
+
 urlpatterns = [
     path('register/', RegisterView.as_view(), name='register'),
     path('forgot-password/', ForgotPasswordView.as_view(), name='forgot_password'),
@@ -46,6 +48,7 @@ urlpatterns = [
     path('activity/ping/', ActivityPingView.as_view(), name='activity_ping'),
     path('activity/today/', ActivityTodayView.as_view(), name='activity_today'),
     path('appearance-settings/', AppearanceSettingsView.as_view(), name='appearance_settings'),
+    path('hotkey-settings/', HotkeySettingView.as_view(), name='hotkey_settings'),
     path('attendance-access-settings/', AttendanceAccessSettingsView.as_view(), name='attendance_access_settings'),
     path('app-access-settings/', AppAccessSettingsView.as_view(), name='app_access_settings'),
     path('mobile-menu-visibility/', MobileMenuVisibilityView.as_view(), name='mobile_menu_visibility'),

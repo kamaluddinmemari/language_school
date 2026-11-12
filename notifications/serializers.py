@@ -1,5 +1,6 @@
 from rest_framework import serializers
-from .models import Notification, ContactFeedback, DailyTask, DailyTaskCompletion
+from django.db import models
+from .models import Notification, ContactFeedback, DailyTask, DailyTaskCompletion, DailyTaskReply
 from accounts.models import User
 
 class NotificationSerializer(serializers.ModelSerializer):
@@ -42,7 +43,32 @@ class DailyTaskCompletionSerializer(serializers.ModelSerializer):
         read_only_fields = fields
     def get_employee_name(self, obj): return obj.employee.get_full_name() or obj.employee.username
 
+MANAGER_ROLES = ('admin', 'office', 'evaluator')
+
+
+class DailyTaskReplySerializer(serializers.ModelSerializer):
+    author_name = serializers.SerializerMethodField()
+    author_role = serializers.CharField(source='author.role', read_only=True)
+    created_at_jalali = serializers.ReadOnlyField()
+    parent_preview = serializers.SerializerMethodField()
+    mine = serializers.SerializerMethodField()
+    class Meta:
+        model = DailyTaskReply
+        fields = ['id', 'task', 'author', 'author_name', 'author_role', 'parent', 'parent_preview', 'body', 'created_on', 'created_at', 'created_at_jalali', 'mine']
+        read_only_fields = fields
+    def get_author_name(self, obj): return obj.author.get_full_name() or obj.author.username
+    def get_parent_preview(self, obj):
+        if not obj.parent_id: return None
+        p = obj.parent
+        return {'id': p.id, 'author_name': p.author.get_full_name() or p.author.username, 'body': (p.body or '')[:140]}
+    def get_mine(self, obj):
+        request = self.context.get('request')
+        return bool(request and obj.author_id == request.user.pk)
+
+
 class DailyTaskSerializer(serializers.ModelSerializer):
+    replies = serializers.SerializerMethodField()
+    repeat_daily = serializers.SerializerMethodField()
     assigned_employee_names = serializers.SerializerMethodField()
     completed = serializers.SerializerMethodField()
     completed_at_jalali = serializers.SerializerMethodField()
@@ -50,8 +76,25 @@ class DailyTaskSerializer(serializers.ModelSerializer):
     assigned_to_me = serializers.SerializerMethodField()
     class Meta:
         model = DailyTask
-        fields = ['id', 'title', 'body', 'link_label', 'link_url', 'start_date', 'start_time', 'end_date', 'end_time', 'assigned_to', 'assigned_employee_names', 'is_active', 'created_at', 'completed', 'completed_at_jalali', 'completion_details', 'assigned_to_me']
-        read_only_fields = ['created_at', 'assigned_employee_names', 'completed', 'completed_at_jalali', 'completion_details', 'assigned_to_me']
+        fields = ['id', 'title', 'body', 'link_label', 'link_url', 'start_date', 'start_time', 'end_date', 'end_time', 'repeat_daily', 'assigned_to', 'assigned_employee_names', 'is_active', 'created_at', 'completed', 'completed_at_jalali', 'completion_details', 'assigned_to_me', 'replies']
+        read_only_fields = ['created_at', 'assigned_employee_names', 'completed', 'completed_at_jalali', 'completion_details', 'assigned_to_me', 'replies']
+    def get_repeat_daily(self, obj):
+        from .models import REPEAT_FOREVER_DATE
+        return obj.end_date == REPEAT_FOREVER_DATE
+    def get_replies(self, obj):
+        try:
+            return self._replies(obj)
+        except Exception:  # اگر جدول پاسخ‌ها هنوز migrate نشده، ثبت و نمایش دستورها نباید خراب شود
+            return []
+    def _replies(self, obj):
+        from django.utils import timezone
+        request = self.context['request']
+        qs = obj.replies.select_related('author', 'parent', 'parent__author')
+        if self.get_repeat_daily(obj):
+            qs = qs.filter(created_on=timezone.localdate())  # دستور تکراری: هر روز گفتگو از نو
+        if request.user.role not in MANAGER_ROLES:
+            qs = qs.filter(models.Q(author=request.user) | models.Q(author__role__in=MANAGER_ROLES))
+        return DailyTaskReplySerializer(qs, many=True, context=self.context).data
     def get_assigned_employee_names(self, obj):
         return [u.get_full_name() or u.username for u in obj.assigned_to.all()]
     def get_assigned_to_me(self, obj):

@@ -1025,6 +1025,81 @@ class StudentStatusCheckView(APIView):
                     'class_number': slot.number, 'level': slot.assigned_level or '', 'day': slot.day_type_display,
                     'time': slot.time_slot or '', 'teacher': slot.teacher_name or '',
                 })
+        # کلاس‌های خصوصی/جبرانی در جریان و ورکشاپ/خصوصی‌گروهی فعال؛ اتصال با شناسهٔ دانش‌آموز است تا همنام‌ها اشتباه نشوند.
+        ongoing_classes_by_student = {}
+        if student_ids:
+            from .models import ClassRequest
+            active_requests = ClassRequest.objects.filter(
+                student_id__in=student_ids,
+                class_type__in=[ClassRequest.ClassType.PRIVATE, ClassRequest.ClassType.MAKEUP],
+                status__in=[ClassRequest.Status.PENDING, ClassRequest.Status.REFERRED, ClassRequest.Status.CONFIRMED],
+                is_completed=False,
+            ).select_related('teacher').order_by('class_type', 'class_date', 'id')
+            type_labels = {ClassRequest.ClassType.PRIVATE: 'کلاس خصوصی', ClassRequest.ClassType.MAKEUP: 'کلاس جبرانی'}
+            for class_request in active_requests:
+                ongoing_classes_by_student.setdefault(class_request.student_id, []).append({
+                    'kind': class_request.class_type,
+                    'label': type_labels.get(class_request.class_type, 'کلاس'),
+                    'level': class_request.language_level or '',
+                    'class_date': class_request.class_date_jalali or '',
+                    'session_duration': class_request.get_session_duration_display(),
+                    'session_count': class_request.session_count,
+                    'status': class_request.get_status_display(),
+                    'payment_status': class_request.get_payment_status_display(),
+                    'teacher': f'{class_request.teacher.first_name} {class_request.teacher.last_name}'.strip() if class_request.teacher_id else '',
+                })
+            from group_classes.models import GroupSessionParticipant
+            active_participants = GroupSessionParticipant.objects.filter(
+                student_id__in=student_ids,
+                group_session__session_type__in=['workshop', 'private_group'],
+                group_session__status__in=['open', 'assigning', 'confirmed'],
+                group_session__is_completed=False,
+            ).select_related('group_session__teacher').order_by('group_session__class_date', 'id')
+            for participant in active_participants:
+                session = participant.group_session
+                ongoing_classes_by_student.setdefault(participant.student_id, []).append({
+                    'kind': session.session_type,
+                    'label': 'ورکشاپ' if session.session_type == 'workshop' else 'کلاس خصوصی گروهی',
+                    'title': session.title or '',
+                    'level': session.language_level or '',
+                    'class_date': session.class_date_jalali or '',
+                    'session_duration': session.get_session_duration_display(),
+                    'session_count': session.session_count,
+                    'status': session.get_status_display(),
+                    'payment_status': participant.get_payment_status_display(),
+                    'price': session.get_price_per_person(),
+                    'teacher': f'{session.teacher.first_name} {session.teacher.last_name}'.strip() if session.teacher_id else '',
+                })
+        # تعیین سطحِ الزامی (عدم توالی ترم) که هنوز انجام نشده: یا وقتش نرسیده یا گذشته یا وقت نگرفته
+        from level_tests.models import LevelTest
+        pending_mandatory = list(LevelTest.objects.filter(sequence_warning=True, status=LevelTest.Status.PENDING).order_by('-id')[:500])
+
+        def mandatory_level_test_for(person):
+            person_name = _form_archive_label(f'{person.first_name} {person.last_name}')
+            person_code = _form_archive_digits(getattr(person, 'national_code', ''))
+            person_phone = _form_archive_phone(getattr(person, 'phone', ''))
+            person_id = getattr(person, 'id', None) if getattr(person, 'role', None) == 'student' else None
+            for test in pending_mandatory:
+                test_code = _form_archive_digits(test.national_code)
+                test_phone = _form_archive_phone(test.phone)
+                if (person_id and test.student_id == person_id) or (person_code and test_code and person_code == test_code) \
+                        or (person_phone and test_phone and person_phone == test_phone and _form_archive_label(f'{test.first_name} {test.last_name}') == person_name):
+                    return test
+            return None
+
+        def level_test_warning(person):
+            test = mandatory_level_test_for(person)
+            if not test:
+                return None
+            now = timezone.now()
+            if not test.test_date:
+                state, text = 'no_time', 'تعیین سطح الزامی دارد و هنوز وقتی برایش ثبت نشده است'
+            elif test.test_date > now:
+                state, text = 'upcoming', f'تعیین سطح الزامی دارد — وقت: {test.test_date_jalali} (هنوز نرسیده است)'
+            else:
+                state, text = 'missed', f'تعیین سطح الزامی دارد — وقت مقرر ({test.test_date_jalali}) گذشته و مراجعه نکرده است'
+            return {'state': state, 'text': text, 'test_id': test.id}
+
         results = []
         for entry in list(people.values())[:self.MAX_RESULTS]:
             person = entry['person']
@@ -1041,6 +1116,7 @@ class StudentStatusCheckView(APIView):
                 ],
                 'term_title': term.title if term else '',
                 'classes': classes_by_student.get(student_id, []) if is_student else [],
+                'ongoing_classes': ongoing_classes_by_student.get(student_id, []) if is_student else [],
                 'next_term_title': next_term.title if next_term and is_student else '',
                 'next_classes': next_classes_by_student.get(student_id, []) if is_student else [],
                 'enrollment_state': enrollment_state_by_student.get(student_id, 'none') if is_student else 'none',
@@ -1051,6 +1127,7 @@ class StudentStatusCheckView(APIView):
                 'is_student': 'student' in entry['sources'],
                 'disciplinary_count': disciplinary_count,
                 'disciplinary_warning': disciplinary_count >= 2,
+                'level_test_warning': level_test_warning(person),
                 'approved': not reasons,
                 'verdict': 'approved' if not reasons else 'rejected',
                 'reasons': [r['text'] for r in reasons],

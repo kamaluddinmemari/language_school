@@ -103,6 +103,7 @@ class LevelTest(models.Model):
     age_group = models.CharField(max_length=10, choices=AgeGroup.choices, blank=True)
     level = models.CharField(max_length=20, choices=get_all_level_choices, blank=True)
     test_date = models.DateTimeField(null=True, blank=True)
+    previous_missed_test_date = models.DateTimeField(null=True, blank=True, help_text='وقت قبلی که فرد مراجعه نکرد و سپس به صف تعیین سطح بازگشت')
     # این علامت برای افرادی است که به‌دلیل عدم رعایت توالی ترم، تعیین‌سطحشان الزامی است.
     # چنین افرادی حتی بعد از گذشت زمان رزرو، در صف «تایم از دست‌رفته» قرار نمی‌گیرند.
     sequence_warning = models.BooleanField(default=False, help_text='تعیین سطح برای این فرد به‌دلیل عدم توالی ترم الزامی است')
@@ -163,6 +164,13 @@ class LevelTest(models.Model):
         if not self.test_date:
             return None
         local_dt = timezone.localtime(self.test_date)
+        return jdatetime.datetime.fromgregorian(datetime=local_dt).strftime('%Y/%m/%d - %H:%M')
+
+    @property
+    def previous_missed_test_date_jalali(self):
+        if not self.previous_missed_test_date:
+            return None
+        local_dt = timezone.localtime(self.previous_missed_test_date)
         return jdatetime.datetime.fromgregorian(datetime=local_dt).strftime('%Y/%m/%d - %H:%M')
 
     @property

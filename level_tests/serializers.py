@@ -90,6 +90,7 @@ class LevelTestSerializer(serializers.ModelSerializer):
     """نمایش کامل + ویرایش نتیجه (برای پنل مسئول آموزش و مدیر)"""
     national_code = serializers.CharField(required=False, allow_blank=True, max_length=10, validators=[validate_iranian_national_code], error_messages={'null': NATIONAL_CODE_ERROR})
     test_date_jalali = serializers.ReadOnlyField()
+    previous_missed_test_date_jalali = serializers.ReadOnlyField()
     created_at_jalali = serializers.ReadOnlyField()
     birth_date_jalali = serializers.ReadOnlyField()
     age = serializers.ReadOnlyField()
@@ -123,7 +124,7 @@ class LevelTestSerializer(serializers.ModelSerializer):
             'national_code', 'phone', 'gender', 'student', 'status', 'status_display', 'price', 'payment_status',
             'payment_status_display', 'mode', 'mode_display', 'meeting_link', 'self_requested',
             'payment_method', 'payment_method_display', 'receipt_image',
-            'age_group', 'level', 'test_date', 'test_date_jalali', 'sequence_warning', 'queue_priority_at',
+            'age_group', 'level', 'test_date', 'test_date_jalali', 'previous_missed_test_date', 'previous_missed_test_date_jalali', 'sequence_warning', 'queue_priority_at',
             'assigned_class_slot', 'assigned_class_day', 'assigned_class_time',
             'assigned_class_teacher_name', 'assigned_class_display',
             'needs_private_class', 'private_sessions_needed',
@@ -134,7 +135,7 @@ class LevelTestSerializer(serializers.ModelSerializer):
             'reminder_24h_followed_at_jalali', 'reminder_2h_followed_at_jalali', 'followup_lead',
             'force_time_override',
         ]
-        read_only_fields = ['created_by', 'created_at', 'updated_at', 'status', 'self_requested', 'queue_priority_at']
+        read_only_fields = ['created_by', 'created_at', 'updated_at', 'status', 'self_requested', 'queue_priority_at', 'previous_missed_test_date']
 
     # فقط برای عبور از بررسی تداخلِ تایم — با تأیید صریح کاربر در هشدارِ «این تایم آزاد نیست»؛ در دیتابیس ذخیره نمی‌شود
     force_time_override = serializers.BooleanField(write_only=True, required=False, default=False)

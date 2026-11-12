@@ -445,7 +445,9 @@ class BookOrderNeedsView(APIView):
             for key in count_keys:
                 students |= index.get(key, set())
             used_keys.update(count_keys)
-            need = len(students)
+            total_people = len(students)
+            percent = int(book.purchase_percent or 100)
+            need = fc.purchase_students(total_people, percent)
             stock = book.current_stock
             shown = covered_keys(book, count_keys) or count_keys
             first = info[shown[0]]
@@ -453,7 +455,7 @@ class BookOrderNeedsView(APIView):
                 'sort': (position[shown[0]], book.sort_order, book.title),
                 'levels': range_labels(shown), 'count_levels': [info[k].code for k in count_keys],
                 'group': first.age_group, 'group_label': group_labels.get(first.age_group, first.age_group),
-                'students': need, 'book_id': book.id, 'book_title': book.title, 'stock': stock,
+                'students': total_people, 'purchase_percent': percent, 'purchase_students': need, 'book_id': book.id, 'book_title': book.title, 'stock': stock,
                 'shortage': max(0, need - max(stock, 0)), **gender_counts(count_keys),
             })
         rows.sort(key=lambda r: r['sort'])
@@ -469,4 +471,134 @@ class BookOrderNeedsView(APIView):
             'total_students': len(all_students),
             'total_shortage': sum(r['shortage'] for r in rows),
             'generated_at': timezone.now().isoformat(),
+        })
+
+
+class LibrarySalesReportView(APIView):
+    """GET: گزارش فروش کتاب (روزانه یا ترمی) به تفکیک عنوان کتاب یا سطح.
+
+    پارامترها:
+      period=daily|term (پیش‌فرض daily)
+      daily: date_from و date_to (YYYY-MM-DD؛ خالی = امروز) — فروش همین بازه، با جمع هر روز
+      term:  term=<id> (خالی = ترم جاریِ واقعی) — از تاریخ شروع تا پایان ترم (و حداکثر تا امروز)
+      group_by=book|level (پیش‌فرض book)
+    خروجی هر ردیف: تعداد فروش، درآمد، هزینهٔ خرید (قیمت خرید فعلی کتاب × تعداد) و سود.
+    «سطح» هر کتاب از سطح‌های ملاک همان کتاب می‌آید (کتابی که سطح ندارد زیر «بدون سطح» می‌رود؛
+    کتابی با چند سطح، با ترکیب همان سطوح یک ردیف می‌شود).
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        if not can_edit_menu(request.user, 'library'):
+            return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
+        import datetime
+        today = timezone.localdate()
+        period = 'term' if request.query_params.get('period') == 'term' else 'daily'
+        group_by = 'level' if request.query_params.get('group_by') == 'level' else 'book'
+        term_info = None
+        if period == 'term':
+            terms = fc.ordered_terms()
+            wanted = request.query_params.get('term')
+            term = next((t for t in terms if str(t.id) == str(wanted)), None) if wanted else None
+            term = term or fc.current_started_term(terms)
+            if not term:
+                return Response({'error': 'ترمی تعریف نشده است'}, status=status.HTTP_400_BAD_REQUEST)
+            date_from, date_to = term.start_date, term.end_date
+            term_info = {'id': term.id, 'title': term.title}
+        else:
+            def parse(value):
+                try:
+                    return datetime.date.fromisoformat(str(value)[:10])
+                except (TypeError, ValueError):
+                    return None
+            date_from = parse(request.query_params.get('date_from')) or today
+            date_to = parse(request.query_params.get('date_to')) or date_from
+            if date_to < date_from:
+                date_from, date_to = date_to, date_from
+
+        sales = BookSale.objects.filter(sold_at__date__gte=date_from, sold_at__date__lte=date_to).select_related('book')
+        # «افرادی که باید می‌خریدند» = تعداد ملاک خرید هر کتاب (پیش‌بینی/ثبت‌نام ترم ملاک × درصد خرید)؛
+        # «خریده‌اند» = فروش همان کتاب از ابتدای ترم تا پایان بازه؛ «هنوز نخریده‌اند» = اختلاف (حداقل صفر)
+        forecast_ctx = fc.build_context(request.query_params.get('forecast_term'))
+        ser_ctx = {'request': request, 'forecast': forecast_ctx}
+        all_books = list(Book.objects.all())
+        target_of = {b.id: int(BookSerializer(b, context=ser_ctx).data.get('purchase_students') or 0) for b in all_books}
+        base_term = term_info and next((t for t in fc.ordered_terms() if t.id == term_info['id']), None) or fc.current_started_term(fc.ordered_terms())
+        bought_from = base_term.start_date if base_term and base_term.start_date <= date_to else date_from
+        bought_of = {}
+        for sale in BookSale.objects.filter(sold_at__date__gte=bought_from, sold_at__date__lte=date_to):
+            bought_of[sale.book_id] = bought_of.get(sale.book_id, 0) + sale.quantity
+        groups, days = {}, {}
+        total = {'quantity': 0, 'revenue': 0, 'cost': 0, 'profit': 0}
+        for sale in sales:
+            book = sale.book
+            if group_by == 'level':
+                levels = fc.levels_for_book(book)
+                key = label = ' + '.join(levels) if levels else 'بدون سطح'
+            else:
+                key, label = book.id, book.title
+            revenue = sale.unit_price_at_sale * sale.quantity
+            cost = book.purchase_price * sale.quantity
+            row = groups.setdefault(key, {'label': label, 'quantity': 0, 'revenue': 0, 'cost': 0, 'profit': 0, 'books': set(), 'book_ids': set()})
+            row['book_ids'].add(book.id)
+            row['quantity'] += sale.quantity
+            row['revenue'] += revenue
+            row['cost'] += cost
+            row['profit'] += revenue - cost
+            row['books'].add(book.title)
+            day = timezone.localtime(sale.sold_at).date().isoformat()
+            d = days.setdefault(day, {'date': day, 'quantity': 0, 'revenue': 0, 'cost': 0, 'profit': 0})
+            d['quantity'] += sale.quantity
+            d['revenue'] += revenue
+            d['cost'] += cost
+            d['profit'] += revenue - cost
+            total['quantity'] += sale.quantity
+            total['revenue'] += revenue
+            total['cost'] += cost
+            total['profit'] += revenue - cost
+        # کتاب/سطح‌هایی که در این بازه فروشی نداشته‌اند ولی خریدار باید داشته باشند هم با فروش صفر می‌آیند
+        for book in all_books:
+            if not target_of.get(book.id):
+                continue
+            if group_by == 'level':
+                levels = fc.levels_for_book(book)
+                key = label = ' + '.join(levels) if levels else 'بدون سطح'
+            else:
+                key, label = book.id, book.title
+            row = groups.setdefault(key, {'label': label, 'quantity': 0, 'revenue': 0, 'cost': 0, 'profit': 0, 'books': set(), 'book_ids': set()})
+            row['books'].add(book.title)
+            row['book_ids'].add(book.id)
+        rows = []
+        total['target'] = total['bought'] = total['remaining'] = total['stock_remaining'] = 0
+        for row in sorted(groups.values(), key=lambda r: (-r['quantity'], r['label'])):
+            row['books'] = sorted(row['books'])
+            ids = row.pop('book_ids')
+            row['stock_remaining'] = sum(int(next((b.current_stock for b in all_books if b.id == i), 0) or 0) for i in ids)
+            row['target'] = sum(target_of.get(i, 0) for i in ids)
+            row['bought'] = sum(bought_of.get(i, 0) for i in ids)
+            row['remaining'] = max(0, row['target'] - row['bought'])
+            total['stock_remaining'] += row['stock_remaining']
+            total['target'] += row['target']
+            total['bought'] += row['bought']
+            total['remaining'] += row['remaining']
+            rows.append(row)
+        day_rows = []
+        for d in sorted(days.values(), key=lambda r: r['date']):
+            try:
+                d['date_jalali'] = jdatetime.date.fromgregorian(date=datetime.date.fromisoformat(d['date'])).strftime('%Y/%m/%d')
+            except Exception:
+                d['date_jalali'] = d['date']
+            day_rows.append(d)
+
+        def jalali(value):
+            try:
+                return jdatetime.date.fromgregorian(date=value).strftime('%Y/%m/%d')
+            except Exception:
+                return str(value)
+
+        return Response({
+            'period': period, 'group_by': group_by, 'term': term_info,
+            'date_from': date_from.isoformat(), 'date_to': date_to.isoformat(),
+            'date_from_jalali': jalali(date_from), 'date_to_jalali': jalali(date_to),
+            'rows': rows, 'days': day_rows, 'total': total,
         })

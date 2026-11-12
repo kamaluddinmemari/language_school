@@ -6,11 +6,11 @@ from django.utils import timezone
 from django.db import models
 from accounts.models import User
 from django.conf import settings
-from .models import Notification, ContactFeedback, WebPushSubscription, DailyTask, DailyTaskCompletion
+from .models import REPEAT_FOREVER_DATE, Notification, ContactFeedback, WebPushSubscription, DailyTask, DailyTaskCompletion, DailyTaskReply
 from .serializers import (
     NotificationSerializer, SendNotificationSerializer,
     ContactFeedbackSerializer, ContactFeedbackCreateSerializer, ContactFeedbackReplySerializer,
-    DailyTaskSerializer, DailyTaskCompletionSerializer, DailyTaskStaffSerializer,
+    DailyTaskSerializer, DailyTaskCompletionSerializer, DailyTaskStaffSerializer, DailyTaskReplySerializer,
 )
 from accounts.menu_permissions import can_edit_menu, can_view_menu
 
@@ -208,6 +208,22 @@ TASK_MANAGER_ROLES = ('admin', 'office', 'evaluator')
 TASK_STAFF_ROLES = ('admin', 'office', 'employee', 'evaluator')
 
 
+def _apply_repeat(payload, task=None):
+    """فیلد repeat_daily را به تاریخ پایانِ نمادین تبدیل می‌کند (بدون ستون جدید)."""
+    if 'repeat_daily' not in payload:
+        return
+    raw = payload.pop('repeat_daily')
+    flag = raw is True or str(raw).lower() in ('1', 'true', 'on', 'yes')
+    if flag:
+        payload['end_date'] = REPEAT_FOREVER_DATE.isoformat()
+        payload['end_time'] = None
+    elif task is not None and task.end_date == REPEAT_FOREVER_DATE:
+        payload['end_date'] = None
+        payload['end_time'] = None
+    elif task is None and payload.get('end_date') == REPEAT_FOREVER_DATE.isoformat():
+        payload['end_date'] = None
+
+
 def _task_manager(user):
     return user.role in TASK_MANAGER_ROLES
 
@@ -219,7 +235,7 @@ class DailyTaskListCreateView(APIView):
         today = timezone.localdate()
         qs = DailyTask.objects.filter(is_active=True, start_date__lte=today).filter(
             models.Q(end_date__isnull=True) | models.Q(end_date__gte=today)
-        ).prefetch_related('assigned_to', 'completions')
+        ).prefetch_related('assigned_to', 'completions', 'replies')
         if request.user.role not in TASK_MANAGER_ROLES:
             qs = qs.filter(models.Q(assigned_to__isnull=True) | models.Q(assigned_to=request.user)).distinct()
         return Response(DailyTaskSerializer(qs, many=True, context={'request': request}).data)
@@ -231,12 +247,18 @@ class DailyTaskListCreateView(APIView):
         assigned = payload.pop('assigned_to', [])
         if assigned is None:
             assigned = []
+        _apply_repeat(payload)
         serializer = DailyTaskSerializer(data=payload, context={'request': request})
         serializer.is_valid(raise_exception=True)
-        task = serializer.save(created_by=request.user)
-        valid_staff = User.objects.filter(id__in=assigned, role__in=TASK_STAFF_ROLES, is_active=True)
-        task.assigned_to.set(valid_staff)
-        return Response(DailyTaskSerializer(task, context={'request': request}).data, status=status.HTTP_201_CREATED)
+        try:
+            task = serializer.save(created_by=request.user)
+            valid_staff = User.objects.filter(id__in=assigned, role__in=TASK_STAFF_ROLES, is_active=True)
+            task.assigned_to.set(valid_staff)
+            return Response(DailyTaskSerializer(task, context={'request': request}).data, status=status.HTTP_201_CREATED)
+        except Exception as exc:  # علت واقعی خطا به‌جای ۵۰۰ مبهم نمایش داده شود و در لاگ هم بماند
+            import logging
+            logging.getLogger(__name__).exception('daily task create failed')
+            return Response({'error': f'ثبت دستور انجام نشد ({type(exc).__name__}: {exc}). اگر مربوط به ستون/جدول است، migrate را اجرا و سرور را restart کنید.'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
 class DailyTaskDetailView(APIView):
@@ -250,6 +272,7 @@ class DailyTaskDetailView(APIView):
             return Response({'error': 'دستور کاری پیدا نشد'}, status=status.HTTP_404_NOT_FOUND)
         payload = request.data.copy()
         assigned = payload.pop('assigned_to', None)
+        _apply_repeat(payload, task)
         serializer = DailyTaskSerializer(task, data=payload, partial=True, context={'request': request})
         serializer.is_valid(raise_exception=True)
         task = serializer.save()
@@ -308,3 +331,47 @@ class DailyTaskCompleteView(APIView):
             completion.note = note
             completion.save(update_fields=['note'])
         return Response(DailyTaskCompletionSerializer(completion).data)
+
+
+class DailyTaskReplyCreateView(APIView):
+    """POST: پاسخ/توضیح روی یک دستور (با parent اختیاری برای حالت ریپلای)."""
+    permission_classes = [IsAuthenticated]
+    def post(self, request, pk):
+        if request.user.role not in TASK_STAFF_ROLES:
+            return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
+        task = DailyTask.objects.filter(pk=pk, is_active=True).first()
+        if not task:
+            return Response({'error': 'دستور کاری پیدا نشد'}, status=status.HTTP_404_NOT_FOUND)
+        if not _task_manager(request.user) and task.assigned_to.exists() and not task.assigned_to.filter(pk=request.user.pk).exists():
+            return Response({'error': 'این دستور به شما ارجاع نشده است'}, status=status.HTTP_403_FORBIDDEN)
+        body = str(request.data.get('body') or '').strip()[:4000]
+        if not body:
+            return Response({'error': 'متن پاسخ خالی است'}, status=status.HTTP_400_BAD_REQUEST)
+        parent = None
+        parent_id = request.data.get('parent')
+        if parent_id:
+            try:
+                parent = DailyTaskReply.objects.filter(pk=parent_id, task=task).first()
+            except Exception:
+                parent = None
+            if not parent:
+                return Response({'error': 'پیام مورد نظر برای ریپلای پیدا نشد'}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            reply = DailyTaskReply.objects.create(task=task, author=request.user, parent=parent, body=body)
+            return Response(DailyTaskReplySerializer(reply, context={'request': request}).data, status=status.HTTP_201_CREATED)
+        except Exception as exc:
+            import logging
+            logging.getLogger(__name__).exception('daily task reply failed')
+            return Response({'error': f'ثبت پاسخ انجام نشد ({type(exc).__name__}). احتمالاً باید python manage.py migrate اجرا و سرور restart شود.'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+class DailyTaskReplyDetailView(APIView):
+    permission_classes = [IsAuthenticated]
+    def delete(self, request, pk):
+        reply = DailyTaskReply.objects.filter(pk=pk).first()
+        if not reply:
+            return Response({'error': 'پاسخ پیدا نشد'}, status=status.HTTP_404_NOT_FOUND)
+        if reply.author_id != request.user.pk and not _task_manager(request.user):
+            return Response({'error': 'فقط نویسنده یا مدیر می‌تواند حذف کند'}, status=status.HTTP_403_FORBIDDEN)
+        reply.delete()
+        return Response({'message': 'پاسخ حذف شد'})

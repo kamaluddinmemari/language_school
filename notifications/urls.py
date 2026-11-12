@@ -7,6 +7,7 @@ from .views import (
     AdminContactFeedbackListView, AdminContactFeedbackDetailView, MarkContactFeedbackSeenView,
     WebPushPublicKeyView, WebPushSubscribeView, WebPushUnsubscribeView,
     DailyTaskListCreateView, DailyTaskDetailView, DailyTaskStaffView, DailyTaskCompleteView,
+    DailyTaskReplyCreateView, DailyTaskReplyDetailView,
 )
 
 urlpatterns = [
@@ -26,5 +27,7 @@ urlpatterns = [
     path('daily-tasks/staff/', DailyTaskStaffView.as_view(), name='daily_task_staff'),
     path('daily-tasks/', DailyTaskListCreateView.as_view(), name='daily_task_list_create'),
     path('daily-tasks/<int:pk>/', DailyTaskDetailView.as_view(), name='daily_task_detail'),
+    path('daily-tasks/<int:pk>/replies/', DailyTaskReplyCreateView.as_view(), name='daily_task_reply_create'),
+    path('daily-task-replies/<int:pk>/', DailyTaskReplyDetailView.as_view(), name='daily_task_reply_detail'),
     path('daily-tasks/<int:pk>/complete/', DailyTaskCompleteView.as_view(), name='daily_task_complete'),
 ]

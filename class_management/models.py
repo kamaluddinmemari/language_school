@@ -1212,3 +1212,43 @@ class ClassSurveyResponse(models.Model):
     class Meta:
         constraints = [models.UniqueConstraint(fields=['survey_list', 'student', 'class_slot'], name='unique_survey_response_row')]
         indexes = [models.Index(fields=['survey_list', 'completed', 'due_at'])]
+
+
+class PhysicalRoom(models.Model):
+    """کلاس فیزیکی (اتاق) و تعداد صندلی آن — مبنای «جایگذاری خودکار محل کلاس‌ها».
+    شمارهٔ اتاق همان ClassSlot.number است؛ اتاق‌های ۱ تا ۱۱ پیش‌فرض‌اند و می‌توان اتاق اضافه کرد."""
+    number = models.PositiveIntegerField(unique=True)
+    seats = models.PositiveIntegerField(default=15, help_text='تعداد صندلی فیزیکی این اتاق')
+    is_active = models.BooleanField(default=True, help_text='اتاق فعلاً در دسترس است؟')
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['number']
+
+    def __str__(self):
+        return f'اتاق {self.number} ({self.seats} صندلی)'
+
+
+class GraduationLevelSetting(models.Model):
+    """سطوح استاندارد فارغ‌التحصیلی/مدرک هر ردهٔ سنی (انتخابی از میان همهٔ سطوح). یک ردیف سراسری.
+    سطح قبلی هر سطح انتخاب‌شده خودکار از ترتیب سطوح استاندارد به‌دست می‌آید و برای استخراج افراد ترم بعد استفاده می‌شود."""
+    levels = models.JSONField(default=dict, blank=True)  # {'kids': [...], 'teen': [...], 'adult': [...]}
+    updated_at = models.DateTimeField(auto_now=True)
+
+    @classmethod
+    def get_current(cls):
+        obj = cls.objects.first()
+        return obj or cls.objects.create(levels={})
+
+
+class AccessFormConfig(models.Model):
+    """تنظیم «فرم دسترسی معلم/کارمند جدید»: قالب اکسل استاندارد، نگاشت ستون‌ها، سلول‌های ثابت و قالب متن اداری."""
+    KIND_CHOICES = (('teacher', 'معلم جدید'), ('employee', 'کارمند جدید'))
+    kind = models.CharField(max_length=16, choices=KIND_CHOICES, unique=True)
+    template_name = models.CharField(max_length=255, blank=True, default='')
+    template_b64 = models.TextField(blank=True, default='')
+    start_row = models.PositiveSmallIntegerField(default=2)
+    fields = models.JSONField(default=list, blank=True)       # [{key,label,column}]
+    fixed_cells = models.JSONField(default=list, blank=True)  # [{label,cell,value}]
+    letter_template = models.TextField(blank=True, default='')
+    updated_at = models.DateTimeField(auto_now=True)

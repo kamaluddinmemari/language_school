@@ -56,6 +56,11 @@ class WebPushSubscription(models.Model):
         return f"اشتراک push {self.user} — {self.endpoint[:40]}..."
 
 
+import datetime as _dt
+# دستور «تکرار روزانه» = تاریخ پایانِ نمادین (بدون ستون جدید در دیتابیس)؛ تا وقتی خودمان خاموش کنیم هر روز فعال است.
+REPEAT_FOREVER_DATE = _dt.date(2999, 12, 31)
+
+
 class DailyTask(models.Model):
     """دستور روزانه یا بازه‌ای برای یک یا همهٔ کارکنان اداری."""
     title = models.CharField(max_length=180)
@@ -90,3 +95,19 @@ class DailyTaskCompletion(models.Model):
     def completed_at_jalali(self):
         import jdatetime
         return jdatetime.datetime.fromgregorian(datetime=timezone.localtime(self.completed_at)).strftime('%Y/%m/%d - %H:%M')
+
+
+class DailyTaskReply(models.Model):
+    """پاسخ/توضیح روی یک دستور کاری (به‌صورت ریپلای؛ parent = پاسخی که به آن جواب داده شده)."""
+    task = models.ForeignKey(DailyTask, on_delete=models.CASCADE, related_name='replies')
+    author = models.ForeignKey(User, on_delete=models.CASCADE, related_name='daily_task_replies')
+    parent = models.ForeignKey('self', null=True, blank=True, on_delete=models.SET_NULL, related_name='children')
+    body = models.TextField()
+    created_on = models.DateField(default=timezone.localdate)
+    created_at = models.DateTimeField(auto_now_add=True)
+    class Meta:
+        ordering = ['created_at', 'id']
+    @property
+    def created_at_jalali(self):
+        import jdatetime
+        return jdatetime.datetime.fromgregorian(datetime=timezone.localtime(self.created_at)).strftime('%Y/%m/%d - %H:%M')

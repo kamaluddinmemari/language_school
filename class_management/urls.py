@@ -1,5 +1,7 @@
 from django.urls import path
 from .dropout_extract import DropoutExtractParseView, DropoutExtractComputeView, DropoutExtractCommitView, DropoutExtractFollowUpView, DropoutExtractListView, DropoutExtractListRefreshPreviewView, DropoutExtractListRefreshConfirmView, DropoutExtractRegisterOptionsView, DropoutExtractRegisterView, DropoutExtractBulkRegisterPreviewView, DropoutExtractBulkRegisterView, DropoutStatsView
+from .room_placement import PhysicalRoomsView, AutoPlaceRoomsView, SeatShortageView
+from .graduation_settings import GraduationLevelSettingView, AccessFormConfigView, AccessFormTemplateView
 from .views import (
     ClassSlotListView, ClassSlotDetailView, SwapClassLocationView, TransferClassLocationView, AllocateClassesView,
     ConfirmOverflowView, EnrollmentPulseView, StudentClassSearchView, TransferSurplusView, SpinOffSurplusView, ClassStatsView,
@@ -59,6 +61,9 @@ urlpatterns = [
     path('class-management/student-search/', StudentClassSearchView.as_view(), name='student_class_search'),
     path('class-management/graduated-students/', GraduatedStudentsView.as_view(), name='graduated_students'),
     path('class-management/graduated-students/safir-archives/', GraduateSafirArchiveView.as_view(), name='graduate_safir_archives'),
+    path('class-management/graduation-level-settings/', GraduationLevelSettingView.as_view(), name='graduation_level_settings'),
+    path('class-management/access-forms/<str:kind>/', AccessFormConfigView.as_view(), name='access_form_config'),
+    path('class-management/access-forms/<str:kind>/template/', AccessFormTemplateView.as_view(), name='access_form_template'),
     path('class-management/graduated-students/lookup/', GraduatedStudentLookupView.as_view(), name='graduated_student_lookup'),
     path('class-management/tuition-settings/', TuitionSettingListView.as_view(), name='tuition_setting_list'),
     path('class-management/tuition-settings/<int:pk>/', TuitionSettingDetailView.as_view(), name='tuition_setting_detail'),
@@ -153,4 +158,7 @@ urlpatterns = [
     path('class-management/attendance/mark/', MarkAttendanceView.as_view(), name='mark_attendance'),
     path('class-management/attendance/', ClassAttendanceListView.as_view(), name='attendance_list'),
     path('class-management/slots/bulk-action/', BulkClassSlotActionView.as_view(), name='bulk_class_slot_action'),
+    path('class-management/rooms/', PhysicalRoomsView.as_view(), name='physical_rooms'),
+    path('class-management/slots/seat-shortage/', SeatShortageView.as_view(), name='seat_shortage'),
+    path('class-management/slots/auto-place-rooms/', AutoPlaceRoomsView.as_view(), name='auto_place_rooms'),
 ]

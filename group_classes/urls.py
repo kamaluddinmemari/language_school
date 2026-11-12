@@ -1,4 +1,5 @@
 from django.urls import path
+from .conversion import ConvertRequestToWorkshopView, ConvertRequestTypeView, ConvertWorkshopToRequestsView
 from .views import (
     GroupSessionListCreateView,
     GroupSessionDetailView,
@@ -21,6 +22,9 @@ from .views import (
 )
 
 urlpatterns = [
+    path('group-classes/convert/request-type/', ConvertRequestTypeView.as_view(), name='group_convert_request_type'),
+    path('group-classes/convert/request-to-workshop/', ConvertRequestToWorkshopView.as_view(), name='group_convert_request_to_workshop'),
+    path('group-classes/convert/workshop-to-requests/', ConvertWorkshopToRequestsView.as_view(), name='group_convert_workshop_to_requests'),
     path('group-classes/price-setting/', GroupPriceSettingView.as_view(), name='group_price_setting'),
     path('group-classes/sessions/', GroupSessionListCreateView.as_view(), name='group_session_list'),
     path('group-classes/sessions/<int:pk>/', GroupSessionDetailView.as_view(), name='group_session_detail'),

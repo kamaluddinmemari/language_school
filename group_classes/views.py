@@ -28,7 +28,7 @@ from .serializers import (
 
 def _serializer_for(request, instance=None, many=False):
     role = request.user.role
-    if role in ('admin', 'evaluator'):
+    if role in ('admin', 'evaluator', 'office'):
         return GroupSessionAdminSerializer
     if role in User.TEACHER_LIKE_ROLES:
         return GroupSessionTeacherSerializer
@@ -40,7 +40,7 @@ class GroupSessionListCreateView(APIView):
 
     def get(self, request):
         user = request.user
-        if user.role in ('admin', 'evaluator'):
+        if user.role in ('admin', 'evaluator', 'office'):
             qs = GroupSession.objects.all()
         elif user.role in User.TEACHER_LIKE_ROLES:
             qs = GroupSession.objects.filter(Q(assigned_teachers=user) | Q(teacher=user)).distinct()
@@ -68,7 +68,7 @@ class GroupSessionDetailView(APIView):
 
     def _get(self, request, pk):
         user = request.user
-        if user.role in ('admin', 'evaluator'):
+        if user.role in ('admin', 'evaluator', 'office'):
             qs = GroupSession.objects.all()
         elif user.role in User.TEACHER_LIKE_ROLES:
             qs = GroupSession.objects.filter(Q(assigned_teachers=user) | Q(teacher=user)).distinct()
@@ -120,7 +120,7 @@ class JoinGroupSessionView(APIView):
             return Response({'error': 'جلسه پیدا نشد'}, status=status.HTTP_404_NOT_FOUND)
 
         user = request.user
-        is_staff = user.role in ('admin', 'evaluator')
+        is_staff = user.role in ('admin', 'evaluator', 'office')
 
         # مدیر/مسئول آموزش می‌توانند در هر وضعیتی (حتی بعد از بسته‌شدن ثبت‌نام یا تایید نهایی) نفر
         # اضافه کنند — چون ممکن است بعد از شروع دوره هم لازم باشد کسی به کلاس اضافه شود.

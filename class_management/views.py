@@ -187,6 +187,29 @@ class ClassSlotListView(generics.ListCreateAPIView):
     def create(self, request, *args, **kwargs):
         if not can_edit_menu(request.user, 'class-management'):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
+        # ساخت کلاس دو‌روزه/سه‌روزه در اتاقی که روزهای هفته‌اش با کلاس هم‌ساعتِ دیگری مشترک است ممکن نیست
+        # (روز آزادشده‌ی کلاسِ سه‌روزه‌ای که دو‌روزه شده، آزاد حساب می‌شود)
+        data = request.data
+        try:
+            number = int(data.get('number'))
+        except (TypeError, ValueError):
+            number = None
+        day_type = data.get('day_type')
+        days = data.get('schedule_days') if isinstance(data.get('schedule_days'), (list, tuple)) else []
+        term_raw = data.get('term')
+        try:
+            term_id = int(term_raw) if term_raw not in (None, '', 'null') else None
+        except (TypeError, ValueError):
+            term_id = None
+        is_online = data.get('is_online')
+        if isinstance(is_online, str):
+            is_online = is_online.strip().lower() in ('1', 'true', 'yes', 'on')
+        if number and day_type:
+            if day_type == 'two_day' and len(days) != 2:
+                return Response({'error': 'برای کلاس دو روز در هفته دقیقاً دو روز انتخاب کنید'}, status=status.HTTP_400_BAD_REQUEST)
+            conflict = room_conflict(term_id, is_online, day_type, days, data.get('time_slot') or '', number)
+            if conflict:
+                return Response({'error': 'ساخت کلاس ممکن نیست: ' + thu_odd_conflict_message(conflict, number)}, status=status.HTTP_400_BAD_REQUEST)
         return super().create(request, *args, **kwargs)
 
 
@@ -305,11 +328,15 @@ class CarryClassesToNextTermView(APIView):
                 assigned_level = str(row['assigned_level']).strip() if 'assigned_level' in row else automatic_level
                 if assigned_level == automatic_level and level_warning:
                     warnings.append({'source_id': source.id, 'number': source.number, 'level': source.assigned_level or '', 'message': level_warning})
-                if number < 1 or number > 11:
+                if number < 1 or number > _max_room_number():
                     skipped.append({'source_id': source.id, 'reason': 'شماره محل باید بین ۱ تا ۱۱ باشد'})
                     continue
                 if ClassSlot.objects.filter(term=target_term, number=number, day_type=day_type, time_slot=time_slot, is_online=is_online).exists():
                     skipped.append({'source_id': source.id, 'reason': f'محل {number} در ترم مقصد برای روز و ساعت انتخاب‌شده قبلاً وجود دارد'})
+                    continue
+                rc = room_conflict(target_term.id, is_online, day_type, schedule_days, time_slot, number)
+                if rc:
+                    skipped.append({'source_id': source.id, 'reason': 'کلاس ساخته نشد: ' + thu_odd_conflict_message(rc, number)})
                     continue
                 carry_flag = row.get('carry_students', True)
                 if isinstance(carry_flag, str):
@@ -627,6 +654,102 @@ class TermHolidayDetailView(generics.DestroyAPIView):
         return super().destroy(request, *args, **kwargs)
 
 
+def _thu_odd_kind(day_type, time_slot):
+    """«پنجشنبه عصر» و «فرد 15:45-17:15» هم‌زمان از اتاق‌ها استفاده می‌کنند؛ این تابع نوع کلاس را برمی‌گرداند."""
+    if day_type == 'thursday_evening':
+        return 'thu'
+    if day_type == 'odd' and str(time_slot or '').strip() == '15:45-17:15':
+        return 'odd'
+    return ''
+
+
+def thu_odd_room_conflict(term_id, is_online, day_type, time_slot, number, exclude_ids=()):
+    """اگر کلاسی با این مشخصات در اتاق `number` قرار بگیرد، با کدام کلاسِ نوع مقابل
+    (پنجشنبه‌عصر ↔ فرد 15:45) در همان اتاق/ترم/حالت حضوری-آنلاین تداخل پیدا می‌کند؟ (یا None)"""
+    kind = _thu_odd_kind(day_type, time_slot)
+    if not kind:
+        return None
+    qs = ClassSlot.objects.filter(term_id=term_id, is_online=bool(is_online), number=number).exclude(pk__in=list(exclude_ids))
+    if kind == 'thu':
+        return qs.filter(day_type='odd', time_slot='15:45-17:15').first()
+    return qs.filter(day_type='thursday_evening').first()
+
+
+# مطابق attendance.DAY_TYPE_WEEKDAYS: زوج = شنبه/دوشنبه/چهارشنبه ، فرد = یکشنبه/سه‌شنبه/پنجشنبه
+_EVEN_WEEKDAYS = ['saturday', 'monday', 'wednesday']
+_ODD_WEEKDAYS = ['sunday', 'tuesday', 'thursday']
+
+
+def _slot_weekdays(day_type, schedule_days):
+    """روزهای واقعی هفته‌ی برگزاری کلاس؛ برای دو‌روزه همان روزهای انتخاب‌شده (روز آزادشده‌ی کلاس سه‌روزه اینجا آزاد حساب می‌شود)."""
+    if day_type == 'even':
+        return list(_EVEN_WEEKDAYS)
+    if day_type == 'odd':
+        return list(_ODD_WEEKDAYS)
+    if day_type == 'two_day':
+        return list(schedule_days or [])
+    if day_type in ('thursday_morning', 'thursday_evening'):
+        return ['thursday']
+    if day_type in ('friday', 'friday_morning', 'friday_evening'):
+        return ['friday']
+    return None
+
+
+def _max_room_number():
+    """بیشینهٔ شمارهٔ محل مجاز: ۱۱ یا بزرگ‌ترین شمارهٔ اتاقی که در «تنظیم تعداد صندلی» اضافه شده."""
+    from django.db.models import Max
+    from .models import PhysicalRoom
+    return max(11, PhysicalRoom.objects.aggregate(m=Max('number'))['m'] or 0)
+
+
+def _time_ranges_overlap(a, b):
+    """دو بازهٔ «HH:MM-HH:MM» هم‌پوشانی دارند؟ اگر قابل‌خواندن نبود فقط برابری رشته‌ها."""
+    import re
+    def parse(value):
+        m = re.match(r'^\s*(\d{1,2}):(\d{2})\s*-\s*(\d{1,2}):(\d{2})\s*$', str(value or ''))
+        return (int(m.group(1)) * 60 + int(m.group(2)), int(m.group(3)) * 60 + int(m.group(4))) if m else None
+    pa, pb = parse(a), parse(b)
+    if not pa or not pb:
+        return str(a or '').strip() == str(b or '').strip()
+    return pa[0] < pb[1] and pb[0] < pa[1]
+
+
+def exact_room_duplicate(term_id, is_online, day_type, time_slot, number, exclude_ids=()):
+    """همان محل (شماره/روز/ساعت/ترم/حالت) که قبلاً برای کلاس دیگری ثبت شده."""
+    return ClassSlot.objects.filter(
+        term_id=term_id, is_online=bool(is_online), number=number, day_type=day_type, time_slot=time_slot or '',
+    ).exclude(pk__in=list(exclude_ids)).first()
+
+
+def two_day_room_conflict(term_id, is_online, day_type, schedule_days, time_slot, number, exclude_ids=()):
+    """کلاس دو‌روزه با کلاس هم‌اتاق/هم‌ساعت فقط وقتی تداخل دارد که روزهای هفته‌شان مشترک باشد."""
+    mine = _slot_weekdays(day_type, schedule_days)
+    if not mine:
+        return None
+    qs = ClassSlot.objects.filter(term_id=term_id, is_online=bool(is_online), number=number).exclude(pk__in=list(exclude_ids))
+    for other in qs:
+        if day_type != 'two_day' and other.day_type != 'two_day':
+            continue
+        if not _time_ranges_overlap(time_slot, other.time_slot):
+            continue
+        theirs = _slot_weekdays(other.day_type, other.schedule_days)
+        if theirs and set(mine) & set(theirs):
+            return other
+    return None
+
+
+def room_conflict(term_id, is_online, day_type, schedule_days, time_slot, number, exclude_ids=()):
+    return (exact_room_duplicate(term_id, is_online, day_type, time_slot, number, exclude_ids)
+            or thu_odd_room_conflict(term_id, is_online, day_type, time_slot, number, exclude_ids)
+            or two_day_room_conflict(term_id, is_online, day_type, schedule_days, time_slot, number, exclude_ids))
+
+
+def thu_odd_conflict_message(conflict, number):
+    teacher = f' — استاد: {conflict.teacher_name}' if conflict.teacher_name else ''
+    return (f'محل {number} در این روز/ساعت با کلاس {conflict.number} (سطح {conflict.assigned_level or "بدون سطح"}، '
+            f'{conflict.day_type_display}، ساعت {conflict.time_slot}{teacher}) تداخل دارد')
+
+
 class ClassSlotDetailView(generics.RetrieveUpdateDestroyAPIView):
     permission_classes = [IsAuthenticated]
     serializer_class = ClassSlotSerializer
@@ -649,19 +772,96 @@ class ClassSlotDetailView(generics.RetrieveUpdateDestroyAPIView):
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 
-        # خواسته: توی هر ردیفِ روز+ساعت (مثلاً همه‌ی کلاس‌های زوج ساعت ۳:۴۵ الی ۵:۱۵)، یک استاد
-        # فقط می‌تواند همزمان روی یک کلاس باشد — نباید بین چند اتاق در همان روز/ساعت تداخل داشته باشد
-        new_teacher = (request.data.get('teacher_name') or '').strip()
-        if new_teacher:
+        data = request.data
+
+        def _norm_term(value):
+            if value in (None, '', 'null', 'legacy', 'unassigned'):
+                return None
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                return obj.term_id
+
+        # مقادیر نهایی کلاس بعد از ذخیره (نه مقادیر قبلی) — تا چک تداخل با همان ترم/روز/ساعت جدید انجام شود
+        eff_term = _norm_term(data.get('term')) if 'term' in data else obj.term_id
+        eff_day = data.get('day_type') or obj.day_type
+        eff_time = data.get('time_slot') if 'time_slot' in data else obj.time_slot
+        eff_online = data.get('is_online') if 'is_online' in data else obj.is_online
+        if isinstance(eff_online, str):
+            eff_online = eff_online.strip().lower() in ('1', 'true', 'yes', 'on')
+        new_teacher = ((data.get('teacher_name') if 'teacher_name' in data else obj.teacher_name) or '').strip()
+
+        # خواسته: توی هر ردیفِ روز+ساعت، یک استاد فقط همزمان روی یک کلاس باشد — ولی فقط بین کلاس‌های
+        # «همان ترم». استادِ ترم‌های دیگر (از جمله «استاد ترم قبل» که فقط یک نام راهنماست) هیچ تداخلی نمی‌سازد.
+        # اگر استاد/ترم/روز/ساعت این کلاس تغییری نکرده، سابقهٔ قبلی جلوی ویرایش بقیهٔ فیلدها (مثل محل) را نمی‌گیرد.
+        teacher_scope_changed = (
+            new_teacher.lower() != (obj.teacher_name or '').strip().lower()
+            or eff_term != obj.term_id or eff_day != obj.day_type or (eff_time or '') != (obj.time_slot or '')
+        )
+        if new_teacher and teacher_scope_changed:
             conflict = ClassSlot.objects.filter(
-                day_type=obj.day_type, time_slot=obj.time_slot, term=obj.term,
+                day_type=eff_day, time_slot=eff_time or '', term_id=eff_term,
                 teacher_name__iexact=new_teacher,
             ).exclude(pk=obj.pk).first()
             if conflict:
                 return Response(
-                    {'error': f'استاد «{new_teacher}» همین الان در همین روز و ساعت روی کلاس شماره {conflict.number} تعریف شده — یک استاد نمی‌تواند همزمان روی دو کلاس باشد'},
+                    {'error': f'استاد «{new_teacher}» همین الان در همین ترم، روز و ساعت روی کلاس شماره {conflict.number} تعریف شده — یک استاد نمی‌تواند همزمان روی دو کلاس باشد'},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
+
+        # خواسته: اگر در ویرایش، «محل» (شماره) کلاس به محلِ یک کلاس دیگر تغییر کرد، خطا نمی‌دهد؛
+        # جای این کلاس و کلاس مقصد با هم عوض می‌شود (بقیهٔ مشخصات هر کلاس با خودش می‌ماند).
+        old_number = obj.number
+        try:
+            new_number = int(data.get('number')) if 'number' in data and data.get('number') not in (None, '') else old_number
+        except (TypeError, ValueError):
+            new_number = old_number
+        other = None
+        pure_room_change = (eff_day == obj.day_type and (eff_time or '') == (obj.time_slot or '')
+                            and eff_term == obj.term_id and bool(eff_online) == bool(obj.is_online))
+        if new_number != old_number and pure_room_change:
+            other = ClassSlot.objects.filter(
+                number=new_number, day_type=eff_day, time_slot=eff_time or '', term_id=eff_term, is_online=bool(eff_online),
+            ).exclude(pk=obj.pk).first()
+        # قاعدهٔ تداخل محل پنجشنبه‌عصر ↔ فرد 15:45 (فقط وقتی محل/روز/ساعت/ترم تغییر کرده)
+        eff_days = list(data.get('schedule_days')) if 'schedule_days' in data and isinstance(data.get('schedule_days'), (list, tuple)) else list(obj.schedule_days or [])
+        if eff_day == 'two_day' and len(eff_days) != 2:
+            return Response({'error': 'برای کلاس دو روز در هفته دقیقاً دو روز انتخاب کنید'}, status=status.HTTP_400_BAD_REQUEST)
+        room_changed = (new_number != old_number or eff_term != obj.term_id or eff_day != obj.day_type
+                        or (eff_time or '') != (obj.time_slot or '') or bool(eff_online) != bool(obj.is_online)
+                        or sorted(eff_days) != sorted(obj.schedule_days or []))
+        if room_changed:
+            skip_ids = [obj.pk] + ([other.pk] if other else [])
+            c = room_conflict(eff_term, eff_online, eff_day, eff_days, eff_time, new_number, skip_ids)
+            if c:
+                return Response({'error': 'ذخیره ممکن نیست: ' + thu_odd_conflict_message(c, new_number)}, status=status.HTTP_400_BAD_REQUEST)
+            if other:
+                c2 = room_conflict(other.term_id, other.is_online, other.day_type, other.schedule_days, other.time_slot, old_number, skip_ids)
+                if c2:
+                    return Response({'error': f'جابجایی با کلاس {new_number} ممکن نیست: ' + thu_odd_conflict_message(c2, old_number)}, status=status.HTTP_400_BAD_REQUEST)
+        if other:
+            with transaction.atomic():
+                other = ClassSlot.objects.select_for_update().get(pk=other.pk)
+                if other.number != new_number:
+                    other = None
+            if other:
+                clash = ClassSlot.objects.filter(
+                    number=old_number, day_type=other.day_type, time_slot=other.time_slot,
+                    term_id=other.term_id, is_online=other.is_online,
+                ).exclude(pk__in=[obj.pk, other.pk]).exists()
+                if clash:
+                    return Response({'error': f'جابجایی با کلاس {new_number} ممکن نیست: محل {old_number} در روز و ساعت آن کلاس از قبل اشغال است'}, status=status.HTTP_400_BAD_REQUEST)
+                with transaction.atomic():
+                    temporary_number = (ClassSlot.objects.order_by('-number').values_list('number', flat=True).first() or 0) + 1000000
+                    other.number = temporary_number
+                    other.save(update_fields=['number', 'updated_at'])
+                    response = super().update(request, *args, **kwargs)   # در صورت خطای اعتبارسنجی، کل تراکنش برمی‌گردد
+                    other.number = old_number
+                    other.save(update_fields=['number', 'updated_at'])
+                payload = dict(response.data)
+                payload['swapped_with'] = {'id': other.id, 'number': old_number, 'previous_number': new_number}
+                response.data = payload
+                return response
 
         return super().update(request, *args, **kwargs)
 
@@ -729,8 +929,16 @@ class SwapClassLocationView(APIView):
                 target = ClassSlot.objects.select_for_update().get(pk=target_id)
                 if source.term_id != target.term_id:
                     return Response({'error': 'کلاس مقصد باید متعلق به همان ترم کلاس مبدا باشد'}, status=status.HTTP_400_BAD_REQUEST)
-                if source.number < 1 or source.number > 11 or target.number < 1 or target.number > 11:
+                if source.number < 1 or source.number > _max_room_number() or target.number < 1 or target.number > _max_room_number():
                     return Response({'error': 'شمارهٔ محل هر دو کلاس باید بین ۱ تا ۱۱ باشد'}, status=status.HTTP_400_BAD_REQUEST)
+                # قاعدهٔ تداخل محل پنجشنبه‌عصر ↔ فرد 15:45: محل جدید هیچ‌کدام از دو کلاس نباید با کلاس نوع مقابل هم‌اتاق شود
+                skip_ids = [source.pk, target.pk]
+                c1 = room_conflict(source.term_id, source.is_online, source.day_type, source.schedule_days, source.time_slot, target.number, skip_ids)
+                if c1:
+                    return Response({'error': 'جابجایی ممکن نیست: ' + thu_odd_conflict_message(c1, target.number)}, status=status.HTTP_400_BAD_REQUEST)
+                c2 = room_conflict(target.term_id, target.is_online, target.day_type, target.schedule_days, target.time_slot, source.number, skip_ids)
+                if c2:
+                    return Response({'error': 'جابجایی ممکن نیست: ' + thu_odd_conflict_message(c2, source.number)}, status=status.HTTP_400_BAD_REQUEST)
                 if not _swap_locations_compatible(source, target):
                     return Response({'error': 'کلاس مقصد باید متعلق به همان ترم کلاس مبدا باشد و شماره‌ی متفاوتی داشته باشد'}, status=status.HTTP_400_BAD_REQUEST)
                 source_number, target_number = source.number, target.number
@@ -766,7 +974,10 @@ class TransferClassLocationView(APIView):
                     # حالت آنلاین/حضوری و خالی بودن مقصد همچنان اجباری است.
                     if not force_compatibility or source.is_online != target.is_online:
                         return Response({'error': 'روز/نوع روز یا جنسیت مقصد با کلاس مبدا سازگار نیست؛ برای ادامه باید یکی از گزینه‌های جایگزین را با تایید مدیر انتخاب کنید'}, status=status.HTTP_400_BAD_REQUEST)
-                if target.number < 1 or target.number > 11 or target.number == source.number:
+                tc = room_conflict(target.term_id, target.is_online, target.day_type, source.schedule_days if target.day_type == 'two_day' and source.day_type == 'two_day' else target.schedule_days, target.time_slot, target.number, [source.pk, target.pk])
+                if tc:
+                    return Response({'error': 'انتقال ممکن نیست: ' + thu_odd_conflict_message(tc, target.number)}, status=status.HTTP_400_BAD_REQUEST)
+                if target.number < 1 or target.number > _max_room_number() or target.number == source.number:
                     return Response({'error': 'شمارهٔ محل مقصد باید از ۱ تا ۱۱ و متفاوت از مبدا باشد'}, status=status.HTTP_400_BAD_REQUEST)
                 if target.real_enrolled_count or target.current_count or target.assigned_level or target.teacher_name:
                     return Response({'error': 'محل مقصد خالی نیست؛ برای جابه‌جایی دو کلاس از دکمهٔ «جابجایی محل کلاس» استفاده کنید'}, status=status.HTTP_409_CONFLICT)
@@ -1168,11 +1379,8 @@ class GraduatedStudentsView(APIView):
             term = Term.objects.order_by('-year', '-term_number', '-id').first()
         if not term:
             return Response({'term_id': None, 'term_title': '', 'rows': []})
-        level_groups = {
-            'kids': {'current': ('i5',), 'next': ('i4',)},
-            'teen': {'current': ('teen15',), 'next': ('teen14',)},
-            'adult': {'current': ('606', '406'), 'next': ('605', '405')},
-        }
+        from .graduation_settings import get_level_groups
+        level_groups = get_level_groups()  # سطوح مدرک قابل‌تنظیم؛ «next» = سطح قبلیِ خودکار
         all_levels = [level for group in level_groups.values() for levels in group.values() for level in levels]
         age_rank = {'kids': 0, 'teen': 1, 'adult': 2}
         gender_rank = {'female': 0, 'male': 1}
@@ -6210,7 +6418,7 @@ class BulkClassSlotActionView(APIView):
     هرکلاس جداگانه (که همچنان هم موجود و قابل‌استفاده است).
 
     بدنه‌ی درخواست:
-      action: 'delete' | 'edit'
+      action: 'delete' | 'edit' | 'clear_teachers'  (clear_teachers: استاد همه‌ی کلاس‌های منطبق حذف و کلاس‌ها «بدون استاد» می‌شوند)
       day_types: ['even', 'odd', 'thursday_morning', 'thursday_evening', 'friday']  (الزامی، حداقل یکی)
       time_slots: [...]  (اختیاری — فقط برای زوج/فرد؛ اگه خالی باشه یعنی همه‌ی ساعت‌ها)
       term_id: عدد (اختیاری)
@@ -6234,8 +6442,8 @@ class BulkClassSlotActionView(APIView):
         is_online_filter = request.data.get('is_online')
         slot_ids = request.data.get('slot_ids') or []
 
-        if action not in ('delete', 'edit'):
-            return Response({'error': "action باید 'delete' یا 'edit' باشد"}, status=status.HTTP_400_BAD_REQUEST)
+        if action not in ('delete', 'edit', 'clear_teachers'):
+            return Response({'error': "action باید 'delete'، 'edit' یا 'clear_teachers' باشد"}, status=status.HTTP_400_BAD_REQUEST)
         if not day_types:
             return Response({'error': 'حداقل یک روز (زوج/فرد/پنجشنبه‌صبح/پنجشنبه‌عصر/جمعه) را انتخاب کنید'}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -6252,6 +6460,15 @@ class BulkClassSlotActionView(APIView):
         match_count = qs.count()
         if match_count == 0:
             return Response({'error': 'هیچ کلاسی با این فیلتر پیدا نشد'}, status=status.HTTP_404_NOT_FOUND)
+
+        if action == 'clear_teachers':
+            # خواسته: استاد همه‌ی کلاس‌های منطبق با فیلتر (ترم/روز/ساعت/...) حذف شود و کلاس‌ها بدون استاد بمانند.
+            # «استاد ترم قبل» (فقط نام راهنما) دست‌نخورده می‌ماند.
+            from django.utils import timezone as _tz
+            with_teacher = qs.exclude(teacher_name='')
+            cleared = with_teacher.count()
+            with_teacher.update(teacher_name='', updated_at=_tz.now())
+            return Response({'message': f'استاد {cleared} کلاس حذف شد و این کلاس‌ها بدون استاد شدند', 'cleared_count': cleared, 'matched_count': match_count})
 
         if action == 'delete':
             # خواسته: کلاسی که دانش‌آموز ثبت‌نام‌شده دارد حذف نمی‌شود، تا وقتی همه‌ی افراد مسترد یا حذف شوند

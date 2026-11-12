@@ -34,6 +34,7 @@ class Book(models.Model):
     # پیش‌بینی خودکار (library/forecast.py): اگر predicted_override خالی باشد، عدد خودکار از ثبت‌نام‌های ترم ملاک ملاک است.
     predicted_override = models.PositiveIntegerField(null=True, blank=True, help_text='تعداد دستیِ زبان‌آموز ترم بعد؛ خالی = محاسبه‌ی خودکار')
     extra_copies = models.PositiveIntegerField(default=2, help_text='تعداد اضافه‌ی احتیاطی که علاوه بر کسری سفارش داده می‌شود')
+    purchase_percent = models.PositiveSmallIntegerField(default=100, help_text='خرید کتاب برای چند درصد از دانشجویان کلاس/سطح؛ ۱۰۰ = همه')
     forecast_levels = models.CharField(max_length=200, blank=True, default='', help_text='سطح‌های ملاک پیش‌بینی با کاما (مثلاً 101,106)؛ خالی = تشخیص خودکار از عنوان کتاب')
     sort_order = models.PositiveIntegerField(default=0, help_text='ترتیب دلخواه نمایش کتاب‌ها (کمتر = بالاتر)')
     unit_price = models.PositiveIntegerField(default=0, help_text='قیمت فروش هر جلد (تومان)')

@@ -17,6 +17,7 @@ class BookSerializer(serializers.ModelSerializer):
     forecast_text = serializers.SerializerMethodField()
     predicted_is_manual = serializers.SerializerMethodField()
     order_needed = serializers.SerializerMethodField()
+    purchase_students = serializers.SerializerMethodField()
     total_sales_quantity = serializers.ReadOnlyField()
     total_sales_revenue = serializers.ReadOnlyField()
     total_stock_added = serializers.ReadOnlyField()
@@ -31,7 +32,7 @@ class BookSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'title', 'category', 'category_display',
             'initial_stock', 'current_stock', 'predicted_students', 'predicted_need',
-            'predicted_override', 'extra_copies', 'forecast_levels', 'forecast_levels_effective', 'forecast_levels_default',
+            'predicted_override', 'extra_copies', 'purchase_percent', 'purchase_students', 'forecast_levels', 'forecast_levels_effective', 'forecast_levels_default',
             'forecast_auto', 'forecast_breakdown', 'forecast_term_id', 'forecast_term_title', 'forecast_text',
             'predicted_is_manual', 'order_needed', 'sort_order',
             'unit_price', 'purchase_price', 'stock_value',
@@ -64,8 +65,17 @@ class BookSerializer(serializers.ModelSerializer):
     def get_predicted_students(self, obj):
         return self._effective(obj)
 
+    def get_purchase_students(self, obj):
+        """تعداد دانشجویانی که برای آن‌ها کتاب خریده می‌شود = ceil(پیش‌بینی × درصد خرید / ۱۰۰)"""
+        return fc.purchase_students(self._effective(obj), obj.purchase_percent)
+
     def get_order_needed(self, obj):
-        return max(0, self._effective(obj) + int(obj.extra_copies or 0) - int(obj.current_stock or 0))
+        return max(0, self.get_purchase_students(obj) + int(obj.extra_copies or 0) - int(obj.current_stock or 0))
+
+    def validate_purchase_percent(self, value):
+        if value is None or not 1 <= int(value) <= 100:
+            raise serializers.ValidationError('درصد خرید باید بین ۱ تا ۱۰۰ باشد')
+        return int(value)
 
     def get_predicted_need(self, obj):
         return self.get_order_needed(obj)
@@ -104,9 +114,11 @@ class BookSerializer(serializers.ModelSerializer):
         term = ctx.get('term')
         if auto is None or not term:
             return 'برای این کتاب سطحی برای پیش‌بینی خودکار تعریف نشده است؛ عدد را دستی وارد کنید.'
+        percent = int(obj.purchase_percent or 100)
+        note = f" — کتاب برای {percent}٪ از افراد خریداری می‌شود ({self.get_purchase_students(obj)} نفر)" if percent < 100 else ''
         if ctx.get('mode') == 'deposit':
-            return f"طبق بیعانه‌های ثبت‌شده ({term.title}، سطح {'، '.join(levels)})، {auto} نفر زبان‌آموز ترم بعد داریم"
-        return f"طبق محاسبات {term.title} (سطح {'، '.join(levels)})، {auto} نفر زبان‌آموز ترم بعد داریم"
+            return f"طبق بیعانه‌های ثبت‌شده ({term.title}، سطح {'، '.join(levels)})، {auto} نفر زبان‌آموز ترم بعد داریم{note}"
+        return f"طبق محاسبات {term.title} (سطح {'، '.join(levels)})، {auto} نفر زبان‌آموز ترم بعد داریم{note}"
 
     def validate_forecast_levels(self, value):
         return ','.join(fc.parse_levels(value))
