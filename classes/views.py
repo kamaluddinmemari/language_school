@@ -95,13 +95,22 @@ class ClassRequestListCreateView(generics.ListCreateAPIView):
     def get_queryset(self):
         user = self.request.user
         if user.role in ('admin', 'evaluator', 'office', 'employee'):
-            return _private_class_queue_ordering(ClassRequest.objects.all())
+            return _private_class_queue_ordering(ClassRequest.objects.all()).select_related(
+                'student', 'teacher', 'refund_recorded_by',
+            ).prefetch_related('assigned_teachers', 'accepted_teachers', 'sessions')
         elif user.role in User.TEACHER_LIKE_ROLES:
             from django.db.models import Q
             return ClassRequest.objects.filter(
                 Q(assigned_teachers=user) | Q(teacher=user)
             ).distinct().order_by('-created_at')
         return ClassRequest.objects.filter(student=user).order_by('-created_at')
+
+    def list(self, request, *args, **kwargs):
+        # نبض سبک برای اعلان صوتی «کلاس خصوصی جدید»: فقط شناسه‌ها، نه کل اطلاعات هر درخواست
+        if request.query_params.get('pulse') and request.user.role in ('admin', 'evaluator', 'office', 'employee'):
+            ids = ClassRequest.objects.filter(class_type=ClassRequest.ClassType.PRIVATE).values_list('id', flat=True)
+            return Response([{'id': pk, 'class_type': 'private'} for pk in ids])
+        return super().list(request, *args, **kwargs)
 
     def perform_create(self, serializer):
         if self.request.user.role == 'evaluator':

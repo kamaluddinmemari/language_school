@@ -3060,8 +3060,12 @@ class EnrollmentReportView(APIView):
         if not term_id and not (date_from and date_to):
             return Response({'error': 'برای گزارش، یک ترم یا هر دو تاریخ «از تاریخ» و «تا تاریخ» را انتخاب کنید.'}, status=status.HTTP_400_BAD_REQUEST)
 
+        selected_term = None
         if term_id:
-            qs = qs.filter(class_slot__term_id=term_id)
+            selected_term = Term.objects.filter(pk=term_id).first()
+            if not selected_term:
+                return Response({'error': 'ترم انتخاب‌شده پیدا نشد'}, status=status.HTTP_404_NOT_FOUND)
+            qs = qs.filter(class_slot__term_id=selected_term.id)
         if level:
             level_list = [x.strip() for x in level.split(',') if x.strip()]
             if level_list:
@@ -3089,38 +3093,149 @@ class EnrollmentReportView(APIView):
         by_level = {}
         by_teacher_level = {}
         by_student_gender = {}
-        for e in qs.order_by('-created_at'):
-            lvl = e.class_slot.assigned_level or 'نامشخص'
-            row = by_level.setdefault(lvl, {'level': lvl, 'count': 0, 'total_tuition': 0, 'discount_count': 0, 'total_discount_amount': 0})
-            row['count'] += 1
-            row['total_tuition'] += e.tuition_amount or 0
-            teacher = (e.class_slot.teacher_name or 'بدون استاد').strip()
-            teacher_level = by_teacher_level.setdefault((teacher, lvl), {'teacher': teacher, 'level': lvl, 'count': 0, 'female_count': 0, 'male_count': 0})
-            teacher_level['count'] += 1
-            if e.student.gender in ('female', 'male'):
-                teacher_level[f"{e.student.gender}_count"] += 1
-            gender_key = e.student.gender or 'unknown'
-            by_student_gender.setdefault(gender_key, {'gender': gender_key, 'count': 0})['count'] += 1
-            if (e.discount_percent or 0) > 0:
-                row['discount_count'] += 1
-                row['total_discount_amount'] += e.tuition_amount or 0
-            enrollments.append({
-                'id': e.id, 'student_name': f"{e.student.first_name} {e.student.last_name}",
-                'student_national_code': e.student.national_code, 'student_gender': e.student.gender,
-                'teacher_name': e.class_slot.teacher_name,
-                'class_number': e.class_slot.number, 'level': lvl, 'day_type_display': e.class_slot.day_type_display,
-                'time_slot': e.class_slot.time_slot, 'gender': e.class_slot.gender, 'gender_display': e.class_slot.get_gender_display(),
-                'payment_method_display': e.get_payment_method_display(), 'tuition_amount': e.tuition_amount,
-                'discount_percent': e.discount_percent, 'created_at_jalali': e.created_at_jalali,
-            })
-
+        total_tuition = 0
+        if term_id:
+            # شمارش ترمی باید با فهرست یکپارچهٔ افراد (یک نفر = یک ردیف) هم‌تعریف باشد؛
+            # گزارش قبلی صرفاً ردیف‌های ClassSlotEnrollment را می‌شمرد و هم چندکلاسه‌ها را
+            # تکراری می‌کرد و هم ثبت‌نام از پیگیری/ورودی جدید/تعیین سطح را جا می‌انداخت.
+            from .dropout_reference import get_dropout_reference, reference_rows, reference_is_required
+            reference = get_dropout_reference(selected_term, auto_select=True)
+            if reference_is_required(selected_term) and not reference:
+                return Response({'error': 'برای گزارش این ترم ابتدا در بخش «استخراج ریزشی» یک آرشیو مرجع انتخاب کنید.', 'reference_required': True}, status=status.HTTP_409_CONFLICT)
+            report_rows = reference_rows(reference.saved_list, term=selected_term) if reference else build_term_registered_rows(selected_term)
+            enrollment_by_key = {}
+            enrollment_by_student = {}
+            enrollment_by_code = {}
+            for e in qs.order_by('-created_at'):
+                enrollment_by_key.setdefault((e.student_id, e.class_slot_id), e)
+                enrollment_by_student.setdefault(e.student_id, e)
+                code = _wl_digits(e.student.national_code)
+                if code:
+                    enrollment_by_code.setdefault(code, e)
+            if reference:
+                for person in report_rows:
+                    if not person.get('student_id') and person.get('national_code'):
+                        match = get_user_model().objects.filter(role='student', national_code=person['national_code']).only('id').first()
+                        if match:
+                            person['student_id'] = match.id
+                    live_enrollment = enrollment_by_student.get(person.get('student_id')) or enrollment_by_code.get(_wl_digits(person.get('national_code')))
+                    if live_enrollment:
+                        person['student_id'] = live_enrollment.student_id
+                        person.update({'slot_id': live_enrollment.class_slot_id, 'class_number': live_enrollment.class_slot.number,
+                                       'level': live_enrollment.class_slot.assigned_level or person.get('level'),
+                                       'day': live_enrollment.class_slot.day_type_display, 'day_type': live_enrollment.class_slot.day_type,
+                                       'time': live_enrollment.class_slot.time_slot, 'teacher': live_enrollment.class_slot.teacher_name or '',
+                                       'has_class': True})
+                    else:
+                        person['has_class'] = False
+            for person in report_rows:
+                if not person.get('has_class'):
+                    # برای فرد منتظر، فیلتر سطح/روز/استاد از snapshot آرشیو است؛ جنسیت کلاس فعلی نامعلوم است.
+                    if level and person.get('level') not in [x.strip() for x in level.split(',') if x.strip()]:
+                        continue
+                    if day_type and (person.get('day_type') or person.get('day')) != day_type:
+                        continue
+                    if teacher_name and (person.get('teacher') or '') != teacher_name:
+                        continue
+                    if gender:
+                        continue
+                    if student_gender in ('female', 'male'):
+                        student = get_user_model().objects.filter(pk=person.get('student_id')).first() if person.get('student_id') else None
+                        if not student or student.gender != student_gender:
+                            continue
+                    e = None
+                else:
+                    if level and person.get('level') not in [x.strip() for x in level.split(',') if x.strip()]:
+                        continue
+                    slot = ClassSlot.objects.filter(pk=person.get('slot_id')).first()
+                    if not slot:
+                        continue
+                    if day_type and slot.day_type != day_type:
+                        continue
+                    if gender and slot.gender != gender:
+                        continue
+                    if teacher_name and slot.teacher_name != teacher_name:
+                        continue
+                    e = enrollment_by_key.get((person.get('student_id'), person.get('slot_id'))) or enrollment_by_student.get(person.get('student_id'))
+                    if student_gender in ('female', 'male'):
+                        student = e.student if e else (get_user_model().objects.filter(pk=person.get('student_id')).first() if person.get('student_id') else None)
+                        if not student or student.gender != student_gender:
+                            continue
+                e_student = e.student if e else (get_user_model().objects.filter(pk=person.get('student_id')).first() if person.get('student_id') else None)
+                lvl = (person.get('level') or (e.class_slot.assigned_level if e else '') or 'نامشخص')
+                teacher = (e.class_slot.teacher_name if e else person.get('teacher') or '').strip() or 'بدون استاد'
+                gender_key = (e_student.gender if e_student else '') or 'unknown'
+                row = by_level.setdefault(lvl, {'level': lvl, 'count': 0, 'total_tuition': 0, 'discount_count': 0, 'total_discount_amount': 0})
+                row['count'] += 1
+                tuition = (e.tuition_amount or 0) if e else 0
+                row['total_tuition'] += tuition
+                total_tuition += tuition
+                teacher_level = by_teacher_level.setdefault((teacher, lvl), {'teacher': teacher, 'level': lvl, 'count': 0, 'female_count': 0, 'male_count': 0})
+                teacher_level['count'] += 1
+                if gender_key in ('female', 'male'):
+                    teacher_level[f'{gender_key}_count'] += 1
+                by_student_gender.setdefault(gender_key, {'gender': gender_key, 'count': 0})['count'] += 1
+                if e and (e.discount_percent or 0) > 0:
+                    row['discount_count'] += 1
+                    row['total_discount_amount'] += e.tuition_amount or 0
+                enrollments.append({
+                    'id': e.id if e else None,
+                    'student_name': person.get('student_name') or (e_student.get_full_name() if e_student else ''),
+                    'student_national_code': person.get('national_code') or (e_student.national_code if e_student else ''),
+                    'student_gender': gender_key if gender_key != 'unknown' else '',
+                    'teacher_name': e.class_slot.teacher_name if e else person.get('teacher') or '',
+                    'class_number': person.get('class_number'), 'level': lvl,
+                    'day_type_display': person.get('day') or (e.class_slot.day_type_display if e else ''),
+                    'time_slot': person.get('time') or (e.class_slot.time_slot if e else ''),
+                    'gender': e.class_slot.gender if e else '',
+                    'gender_display': e.class_slot.get_gender_display() if e else '',
+                    'payment_method_display': e.get_payment_method_display() if e else '',
+                    'tuition_amount': tuition, 'discount_percent': e.discount_percent if e else 0,
+                    'created_at_jalali': e.created_at_jalali if e else person.get('registered_at') or '',
+                })
+        else:
+            # گزارش بازهٔ تاریخیِ بدون انتخاب ترم، همچنان گزارش رویدادهای ثبت‌نام است.
+            seen_students = set()
+            for e in qs.order_by('-created_at'):
+                identity = _wl_digits(e.student.national_code) or f'id:{e.student_id}'
+                if identity in seen_students:
+                    continue
+                seen_students.add(identity)
+                lvl = e.class_slot.assigned_level or 'نامشخص'
+                row = by_level.setdefault(lvl, {'level': lvl, 'count': 0, 'total_tuition': 0, 'discount_count': 0, 'total_discount_amount': 0})
+                row['count'] += 1
+                row['total_tuition'] += e.tuition_amount or 0
+                total_tuition += e.tuition_amount or 0
+                teacher = (e.class_slot.teacher_name or 'بدون استاد').strip()
+                teacher_level = by_teacher_level.setdefault((teacher, lvl), {'teacher': teacher, 'level': lvl, 'count': 0, 'female_count': 0, 'male_count': 0})
+                teacher_level['count'] += 1
+                if e.student.gender in ('female', 'male'):
+                    teacher_level[f"{e.student.gender}_count"] += 1
+                gender_key = e.student.gender or 'unknown'
+                by_student_gender.setdefault(gender_key, {'gender': gender_key, 'count': 0})['count'] += 1
+                if (e.discount_percent or 0) > 0:
+                    row['discount_count'] += 1
+                    row['total_discount_amount'] += e.tuition_amount or 0
+                enrollments.append({
+                    'id': e.id, 'student_name': f"{e.student.first_name} {e.student.last_name}",
+                    'student_national_code': e.student.national_code, 'student_gender': e.student.gender,
+                    'teacher_name': e.class_slot.teacher_name, 'class_number': e.class_slot.number,
+                    'level': lvl, 'day_type_display': e.class_slot.day_type_display,
+                    'time_slot': e.class_slot.time_slot, 'gender': e.class_slot.gender,
+                    'gender_display': e.class_slot.get_gender_display(),
+                    'payment_method_display': e.get_payment_method_display(), 'tuition_amount': e.tuition_amount,
+                    'discount_percent': e.discount_percent, 'created_at_jalali': e.created_at_jalali,
+                })
         return Response({
             'enrollments': enrollments,
             'summary_by_level': sorted(by_level.values(), key=lambda r: r['level']),
             'summary_by_teacher_level': sorted(by_teacher_level.values(), key=lambda r: (r['teacher'], r['level'])),
             'summary_by_gender': sorted(by_student_gender.values(), key=lambda r: r['gender']),
             'total_count': len(enrollments),
-            'total_tuition': sum((r['tuition_amount'] or 0) for r in enrollments),
+            'total_tuition': total_tuition,
+            'count_basis': ('آرشیو مرجع انتخاب‌شده برای این ترم' if term_id and locals().get('reference') else ('افراد یکتای ثبت‌شده در ترم' if term_id else 'افراد یکتای بازهٔ زمانی')),
+            'reference_list_id': reference.saved_list_id if term_id and locals().get('reference') else None,
+            'reference_list_name': reference.saved_list.name if term_id and locals().get('reference') else '',
         })
 
 
@@ -3158,6 +3273,58 @@ class EnrollmentTermChartView(APIView):
         available_teachers = sorted({(t or '').strip() for t in slot_qs.values_list('teacher_name', flat=True) if (t or '').strip()})
         available_teacher_levels = sorted({f"{(t or 'بدون استاد').strip()} — {(l or 'بدون سطح').strip()}" for t, l in slot_qs.values_list('teacher_name', 'assigned_level')})
 
+        if term_id:
+            selected_term = Term.objects.filter(pk=int(term_id)).first()
+            from .dropout_reference import get_dropout_reference, reference_rows, reference_is_required
+            reference = get_dropout_reference(selected_term, auto_select=True)
+            if selected_term and reference_is_required(selected_term) and not reference:
+                return Response({'error': 'برای نمودار این ترم ابتدا آرشیو مرجع را انتخاب کنید.', 'reference_required': True}, status=status.HTTP_409_CONFLICT)
+            if reference:
+                rows = reference_rows(reference.saved_list, term=selected_term)
+                from .models import ClassSlotEnrollment
+                student_ids = {row.get('student_id') for row in rows if row.get('student_id')}
+                if not student_ids:
+                    codes = {row.get('national_code') for row in rows if row.get('national_code')}
+                    student_ids = set(get_user_model().objects.filter(role='student', national_code__in=codes).values_list('id', flat=True))
+                enrollments_by_student = {}
+                enrollments_by_code = {}
+                codes = {row.get('national_code') for row in rows if row.get('national_code')}
+                student_ids.update(get_user_model().objects.filter(role='student', national_code__in=codes).values_list('id', flat=True))
+                for enrollment in ClassSlotEnrollment.objects.filter(class_slot__term_id=selected_term.id, student_id__in=student_ids).select_related('class_slot', 'student').order_by('-created_at'):
+                    enrollments_by_student.setdefault(enrollment.student_id, enrollment)
+                    code = _wl_digits(enrollment.student.national_code)
+                    if code:
+                        enrollments_by_code.setdefault(code, enrollment)
+                value_set = {x.strip() for x in value.split(',') if x.strip()} if group_by == 'level' else ({value} if value else set())
+                buckets = {}
+                for person in rows:
+                    student_id = person.get('student_id')
+                    if not student_id and person.get('national_code'):
+                        student_id = next(iter(get_user_model().objects.filter(role='student', national_code=person['national_code']).values_list('id', flat=True)[:1]), None)
+                    enrollment = enrollments_by_student.get(student_id) or enrollments_by_code.get(_wl_digits(person.get('national_code')))
+                    level_label = ((enrollment.class_slot.assigned_level if enrollment else person.get('level')) or '').strip() or 'بدون سطح'
+                    teacher_label = ((enrollment.class_slot.teacher_name if enrollment else person.get('teacher')) or '').strip() or 'بدون استاد'
+                    label = f'{teacher_label} — {level_label}' if group_by == 'teacher_level' else (level_label if group_by == 'level' else teacher_label)
+                    if gender in ('female', 'male'):
+                        student = enrollment.student if enrollment else (get_user_model().objects.filter(role='student', national_code=person.get('national_code')).first() if person.get('national_code') else None)
+                        if not student or student.gender != gender:
+                            continue
+                    if value_set and label not in value_set:
+                        continue
+                    identity = person.get('national_code') or f"id:{student_id or person.get('key')}"
+                    buckets.setdefault(label, set()).add(identity)
+                for label in buckets:
+                    if group_by == 'level' and label not in available_levels: available_levels.append(label)
+                    if group_by == 'teacher' and label not in available_teachers: available_teachers.append(label)
+                    if group_by == 'teacher_level' and label not in available_teacher_levels: available_teacher_levels.append(label)
+                pool = available_levels if group_by == 'level' else (available_teacher_levels if group_by == 'teacher_level' else available_teachers)
+                labels = [label for label in pool if not value_set or label in value_set]
+                bars = [{'label': label, 'count': len(buckets.get(label, set()))} for label in labels]
+                return Response({'available_levels': sorted(available_levels), 'available_teachers': sorted(available_teachers),
+                                 'available_teacher_levels': sorted(available_teacher_levels), 'group_by': group_by, 'bars': bars,
+                                 'total': len({person for values in buckets.values() for person in values}),
+                                 'count_basis': 'آرشیو مرجع انتخاب‌شده', 'reference_list_id': reference.saved_list_id,
+                                 'reference_list_name': reference.saved_list.name})
         qs = ClassSlotEnrollment.objects.filter(class_slot__in=slot_qs, student__role='student').filter(
             Q(is_carryover=False) | Q(carryover_confirmed=True)
         ).select_related('class_slot', 'student')
@@ -3174,7 +3341,7 @@ class EnrollmentTermChartView(APIView):
                 label = (getattr(e.class_slot, field) or '').strip() or ('بدون سطح' if group_by == 'level' else 'بدون استاد')
             if value_set and label not in value_set:
                 continue
-            buckets.setdefault(label, set()).add(e.student_id)
+            buckets.setdefault(label, set()).add(_wl_digits(e.student.national_code) or f'id:{e.student_id}')
 
         pool = available_levels if group_by == 'level' else (available_teacher_levels if group_by == 'teacher_level' else available_teachers)
         if value_set:
@@ -3215,20 +3382,21 @@ class TermEnrollmentComparisonView(APIView):
         enrollments = ClassSlotEnrollment.objects.filter(
             class_slot_id__in=slots.keys(), student__role='student', payment_verified=True
         ).filter(Q(is_carryover=False) | Q(carryover_confirmed=True)).values_list(
-            'class_slot_id', 'student_id', 'student__gender'
+            'class_slot_id', 'student_id', 'student__gender', 'student__national_code'
         )
-        for slot_id, student_id, student_gender in enrollments.iterator(chunk_size=2000):
+        for slot_id, student_id, student_gender, national_code in enrollments.iterator(chunk_size=2000):
             slot = slots.get(slot_id)
             if not slot or slot.term_id not in sets:
                 continue
             bucket = sets[slot.term_id]
-            bucket['all'].add(student_id)
+            person_key = _wl_digits(national_code) or f'id:{student_id}'
+            bucket['all'].add(person_key)
             level = (slot.assigned_level or '').strip() or 'بدون سطح'
             gender = student_gender if student_gender in ('female', 'male') else 'unknown'
             day = slot.get_day_type_display() or 'نامشخص'
-            bucket['levels'].setdefault(level, set()).add(student_id)
-            bucket['genders'].setdefault(gender, set()).add(student_id)
-            bucket['days'].setdefault(day, set()).add(student_id)
+            bucket['levels'].setdefault(level, set()).add(person_key)
+            bucket['genders'].setdefault(gender, set()).add(person_key)
+            bucket['days'].setdefault(day, set()).add(person_key)
 
         levels = sorted({key for item in sets.values() for key in item['levels']}, key=str.casefold)
         days = sorted({key for item in sets.values() for key in item['days']}, key=str.casefold)
@@ -3641,7 +3809,6 @@ class TermRetentionFollowUpView(APIView):
             for item in TermRetentionFollowUp.objects.filter(
                 previous_term=previous_term,
                 current_term=current_term,
-                student_id__in=student_ids,
             ).select_related('updated_by')
         }
 
@@ -3732,6 +3899,16 @@ class TermRetentionFollowUpView(APIView):
             'active_filters': {'day_type': day_filter, 'level': level_filter, 'gender': gender_filter, 'teacher_name': teacher_filter},
             'teacher_options': teacher_options,
             'summary': summary,
+            'saved_followups': [{
+                'student_id': item.student_id,
+                'follow_up_status': item.status,
+                'follow_up_status_display': item.get_status_display(),
+                'reason': item.reason,
+                'reason_display': item.get_reason_display() if item.reason else '',
+                'notes': item.notes,
+                'next_follow_up_date': item.next_follow_up_date.isoformat() if item.next_follow_up_date else '',
+                'last_contacted_at': item.last_contacted_at.isoformat() if item.last_contacted_at else '',
+            } for item in followups.values()],
             'status_options': [{'value': value, 'label': label} for value, label in TermRetentionFollowUp.Status.choices],
             'reason_options': [{'value': value, 'label': label} for value, label in TermRetentionFollowUp.Reason.choices],
             'results': results,
@@ -3793,9 +3970,8 @@ class TermRetentionFollowUpView(APIView):
             'notes': str(request.data.get('notes') or '').strip(),
             'next_follow_up_date': next_follow_up_date,
             'updated_by': request.user,
+            'last_contacted_at': timezone.now(),
         }
-        if follow_up_status != TermRetentionFollowUp.Status.NEEDS_FOLLOW_UP:
-            record_defaults['last_contacted_at'] = timezone.now()
         record, _ = TermRetentionFollowUp.objects.update_or_create(
             student_id=student_id,
             previous_term=previous_term,
@@ -6630,7 +6806,7 @@ class AttendanceStatusView(APIView):
 
 def _registered_person_key(national_code='', phone='', first_name='', last_name=''):
     """کلید یکتای فرد برای ادغام ردیف‌های یک نفر از منابع مختلف: کد ملی ← موبایل+نام ← نام."""
-    national = re.sub(r'\D', '', str(national_code or ''))
+    national = _wl_digits(national_code)
     if national:
         return f'nc:{national}'
     name = ' '.join(f'{first_name or ""} {last_name or ""}'.split()).casefold()
@@ -6638,6 +6814,117 @@ def _registered_person_key(national_code='', phone='', first_name='', last_name=
     if phone_digits and name:
         return f'ph:{phone_digits}|{name}'
     return f'nm:{name}' if name else ''
+
+
+def build_term_registered_rows(term):
+    """فهرست یکپارچهٔ ثبت‌نام‌شده‌های یک ترم از همهٔ مسیرها (مشترک بین «ثبت‌نام‌شده‌ها» و «لیست منتظر ثبت‌نام»)."""
+    from leads.models import UnregisteredStudent, NewLead
+
+    rows = {}
+    order = []
+
+    def slot_fields(slot):
+        if not slot:
+            return {
+                'slot_id': None, 'level': '', 'class_number': None, 'day': '', 'day_type': '', 'time': '', 'teacher': '', 'has_class': False,
+            }
+        return {
+            'slot_id': slot.id, 'level': slot.assigned_level or '', 'class_number': slot.number,
+            'day': slot.day_type_display or slot.day_type or '', 'day_type': slot.day_type or '', 'time': slot.time_slot or '',
+            'teacher': slot.teacher_name or 'بدون استاد', 'has_class': True,
+        }
+
+    def add(key, source, base, slot=None, fallback_level=''):
+        if not key:
+            key = f'row:{len(order)}'
+        row = rows.get(key)
+        if row is None:
+            row = {
+                'student_id': None, 'student_name': '', 'national_code': '', 'phone': '',
+                'payment_verified': True, 'is_carryover': False, 'carryover_confirmed': False,
+                'sources': [], 'has_enrollment': False, 'is_confirmed': False, 'registered_at': '', 'level': '', 'slot_id': None, 'class_number': None,
+                'day': '', 'day_type': '', 'time': '', 'teacher': '', 'has_class': False,
+            }
+            rows[key] = row
+            order.append(key)
+        for field, value in base.items():
+            if value not in (None, '') and (row.get(field) in (None, '') or field in ('payment_verified', 'is_carryover', 'carryover_confirmed')):
+                row[field] = value
+        if source not in row['sources']:
+            row['sources'].append(source)
+        # اطلاعات کلاس فقط وقتی پر می‌شود که ردیف هنوز کلاسی نداشته باشد (ثبت‌نام واقعی اولویت دارد)
+        if slot and not row['has_class']:
+            row.update(slot_fields(slot))
+        if not row['level'] and fallback_level:
+            row['level'] = fallback_level
+        return row
+
+    # ۱) ثبت‌نام‌های واقعی در کلاس‌های این ترم (تاییدشده و در انتظار تایید پرداخت)
+    enrollments = ClassSlotEnrollment.objects.filter(class_slot__term_id=term.id).select_related('student', 'class_slot').order_by('created_at', 'id')
+    for en in enrollments:
+        st = en.student
+        if en.is_carryover and not en.carryover_confirmed:
+            source = 'منتقل‌شده از ترم قبل (منتظر ثبت‌نام)'
+        elif not en.payment_verified:
+            source = 'ثبت‌نام اپ (در انتظار تأیید پرداخت)'
+        elif en.self_enrolled:
+            source = 'ثبت‌نام از اپ دانش‌آموز'
+        else:
+            source = 'ثبت‌نام در کلاس'
+        key = _registered_person_key(st.national_code, st.phone, st.first_name, st.last_name)
+        row = add(key, source, {
+            'student_id': st.id, 'student_name': f'{st.first_name or ""} {st.last_name or ""}'.strip(),
+            'national_code': st.national_code or '', 'phone': st.phone or '',
+            'registered_at': en.created_at_jalali or '',
+        }, slot=en.class_slot)
+        row['has_enrollment'] = True
+        # اگر فرد چند ثبت‌نام دارد، ثبت‌نام قطعی/تأییدشده بر ثبت‌نام در انتظار یا منتقل‌نشده اولویت دارد
+        is_final = en.payment_verified and (not en.is_carryover or en.carryover_confirmed)
+        if is_final:
+            row.update(slot_fields(en.class_slot))
+            row.update(payment_verified=True, is_carryover=en.is_carryover, carryover_confirmed=en.carryover_confirmed, _confirmed=True, is_confirmed=True)
+        elif not row.get('_confirmed'):
+            row.update(slot_fields(en.class_slot))
+            row.update(payment_verified=en.payment_verified, is_carryover=en.is_carryover, carryover_confirmed=en.carryover_confirmed)
+
+    # ۲) پیگیری ثبت‌نام‌نشده‌ها که «ثبت‌نام شد» خورده‌اند
+    for u in UnregisteredStudent.objects.filter(term_id=term.id, status=UnregisteredStudent.Status.REGISTERED).select_related('reported_slot'):
+        key = _registered_person_key(u.national_code, u.phone, u.first_name, u.last_name)
+        add(key, 'پیگیری ثبت‌نام‌نشده‌ها', {
+            'student_name': f'{u.first_name} {u.last_name}'.strip(), 'national_code': u.national_code or '', 'phone': u.phone or '',
+            'registered_at': u.registered_at_jalali or '',
+        }, slot=u.reported_slot, fallback_level=u.class_level or '')
+
+    # ۳) ورودی‌های جدید (لیست انتظار) که ثبت‌نام شده‌اند
+    for lead in NewLead.objects.filter(term_id=term.id, status=NewLead.Status.REGISTERED):
+        key = _registered_person_key(lead.national_code, lead.phone, lead.first_name, lead.last_name)
+        add(key, 'ورودی‌های جدید', {
+            'student_name': f'{lead.first_name} {lead.last_name}'.strip(), 'national_code': lead.national_code or '', 'phone': lead.phone or '',
+            'registered_at': lead.registered_at_jalali or '',
+        }, fallback_level=lead.requested_level or '')
+
+    # ۴) تعیین سطح‌های تکمیل‌شده‌ای که فرد را در کلاس همین ترم جایابی کرده‌اند
+    tests = LevelTest.objects.filter(
+        status=LevelTest.Status.COMPLETED, assigned_class_slot__term_id=term.id,
+    ).select_related('assigned_class_slot', 'student').order_by('updated_at', 'id')
+    for t in tests:
+        key = _registered_person_key(t.national_code, t.phone, t.first_name, t.last_name)
+        add(key, 'تعیین سطح', {
+            'student_id': t.student_id, 'student_name': f'{t.first_name} {t.last_name}'.strip(),
+            'national_code': t.national_code or '', 'phone': t.phone or '',
+            'registered_at': jdatetime.datetime.fromgregorian(datetime=timezone.localtime(t.updated_at)).strftime('%Y/%m/%d') if t.updated_at else '',
+        }, slot=t.assigned_class_slot, fallback_level=t.level or '')
+
+    result = []
+    for key in order:
+        row = rows[key]
+        row.pop('_confirmed', None)
+        row['key'] = key
+        row['level'] = row['level'] or '—'
+        row['sources_text'] = '، '.join(row['sources'])
+        result.append(row)
+    result.sort(key=lambda r: (r['class_number'] is None, r['class_number'] or 0, r['student_name']))
+    return result
 
 
 class TermRegisteredPeopleView(APIView):
@@ -6660,110 +6947,324 @@ class TermRegisteredPeopleView(APIView):
         if not term:
             return Response({'error': 'ترم پیدا نشد'}, status=status.HTTP_404_NOT_FOUND)
 
-        from leads.models import UnregisteredStudent, NewLead
+        from .dropout_reference import get_dropout_reference, reference_rows, reference_is_required
+        reference = get_dropout_reference(term, auto_select=True)
+        if reference_is_required(term) and not reference:
+            return Response({'error': 'برای این ترم ابتدا در بخش «استخراج ریزشی»، یک آرشیو ذخیره‌شده را با دکمهٔ رادیویی به‌عنوان مرجع انتخاب کنید.', 'reference_required': True}, status=status.HTTP_409_CONFLICT)
+        if reference:
+            result_rows = reference_rows(reference.saved_list, term=term)
+            for row in result_rows:
+                row['student_name'] = row.get('student_name') or f"{row.get('first_name', '')} {row.get('last_name', '')}".strip()
+                row['national_code'] = row.get('national_code') or ''
+                row['phone'] = row.get('phone') or ''
+                if not row.get('student_id') and row['national_code']:
+                    row['student_id'] = get_user_model().objects.filter(role='student', national_code=row['national_code']).values_list('id', flat=True).first()
+                live = ClassSlotEnrollment.objects.filter(class_slot__term=term, student_id=row.get('student_id')).select_related('class_slot').order_by('-payment_verified', '-created_at').first() if row.get('student_id') else None
+                if live:
+                    row.update({'slot_id': live.class_slot_id, 'class_number': live.class_slot.number, 'level': live.class_slot.assigned_level or row.get('level'),
+                                'day': live.class_slot.day_type_display or '', 'day_type': live.class_slot.day_type or '', 'time': live.class_slot.time_slot or '',
+                                'teacher': live.class_slot.teacher_name or '', 'has_class': True, 'has_enrollment': True,
+                                'payment_verified': live.payment_verified, 'is_carryover': live.is_carryover,
+                                'carryover_confirmed': live.carryover_confirmed, 'is_confirmed': live.payment_verified and (not live.is_carryover or live.carryover_confirmed)})
+                else:
+                    row.update({'slot_id': None, 'has_class': False, 'has_enrollment': False, 'is_confirmed': False})
+                row['sources_text'] = '، '.join(row.get('sources', []))
+                row['reference_list_id'] = reference.saved_list_id
+                row['reference_list_name'] = reference.saved_list.name
+        else:
+            result_rows = build_term_registered_rows(term)
+        return Response({'term': term.id, 'count': len(result_rows), 'rows': result_rows,
+                         'confirmed_count': sum(1 for row in result_rows if row.get('is_confirmed')),
+                         'pending_payment_count': sum(1 for row in result_rows if row.get('has_enrollment') and not row.get('payment_verified')),
+                         'waiting_count': sum(1 for row in result_rows if not row.get('has_enrollment')),
+                         'reference_list_id': reference.saved_list_id if reference else None,
+                         'reference_list_name': reference.saved_list.name if reference else '',
+                         'count_basis': 'آرشیو مرجع ریزشی' if reference else 'فهرست یکپارچه سامانه'})
 
-        rows = {}
-        order = []
 
-        def slot_fields(slot):
-            if not slot:
-                return {
-                    'slot_id': None, 'level': '', 'class_number': None, 'day': '', 'day_type': '', 'time': '', 'teacher': '', 'has_class': False,
-                }
-            return {
-                'slot_id': slot.id, 'level': slot.assigned_level or '', 'class_number': slot.number,
-                'day': slot.day_type_display or slot.day_type or '', 'day_type': slot.day_type or '', 'time': slot.time_slot or '',
-                'teacher': slot.teacher_name or 'بدون استاد', 'has_class': True,
-            }
+# ---------------------------------------------------------------------------
+# لیست دقیق «منتظر ثبت‌نام» = ثبت‌نام‌شده‌های ترم قبل − ثبت‌نام‌شده‌های ترم جاری (از هر مسیر)
+# ---------------------------------------------------------------------------
+_PENDING_PAYMENT_SOURCE = 'ثبت‌نام اپ (در انتظار تأیید پرداخت)'
+_CARRYOVER_SOURCE = 'منتقل‌شده از ترم قبل (منتظر ثبت‌نام)'
+_FOLLOWUP_LINE_RE = re.compile(r'^\d{4}/\d{2}/\d{2} - \d{2}:\d{2} — ', re.M)
 
-        def add(key, source, base, slot=None, fallback_level=''):
-            if not key:
-                key = f'row:{len(order)}'
-            row = rows.get(key)
-            if row is None:
-                row = {
-                    'student_id': None, 'student_name': '', 'national_code': '', 'phone': '',
-                    'payment_verified': True, 'is_carryover': False, 'carryover_confirmed': False,
-                    'sources': [], 'has_enrollment': False, 'is_confirmed': False, 'registered_at': '', 'level': '', 'slot_id': None, 'class_number': None,
-                    'day': '', 'day_type': '', 'time': '', 'teacher': '', 'has_class': False,
-                }
-                rows[key] = row
-                order.append(key)
-            for field, value in base.items():
-                if value not in (None, '') and (row.get(field) in (None, '') or field in ('payment_verified', 'is_carryover', 'carryover_confirmed')):
-                    row[field] = value
-            if source not in row['sources']:
-                row['sources'].append(source)
-            # اطلاعات کلاس فقط وقتی پر می‌شود که ردیف هنوز کلاسی نداشته باشد (ثبت‌نام واقعی اولویت دارد)
-            if slot and not row['has_class']:
-                row.update(slot_fields(slot))
-            if not row['level'] and fallback_level:
-                row['level'] = fallback_level
-            return row
 
-        # ۱) ثبت‌نام‌های واقعی در کلاس‌های این ترم (تاییدشده و در انتظار تایید پرداخت)
-        enrollments = ClassSlotEnrollment.objects.filter(class_slot__term_id=term.id).select_related('student', 'class_slot').order_by('created_at', 'id')
-        for en in enrollments:
-            st = en.student
-            if en.is_carryover and not en.carryover_confirmed:
-                source = 'منتقل‌شده از ترم قبل (منتظر ثبت‌نام)'
-            elif not en.payment_verified:
-                source = 'ثبت‌نام اپ (در انتظار تأیید پرداخت)'
-            elif en.self_enrolled:
-                source = 'ثبت‌نام از اپ دانش‌آموز'
+def _wl_digits(value):
+    return re.sub(r'\D', '', str(value or '').translate(str.maketrans('۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩', '01234567890123456789')))
+
+
+def _wl_name(value):
+    return ' '.join(str(value or '').replace('ي', 'ی').replace('ك', 'ک').split()).casefold()
+
+
+def _wl_registration_state(row):
+    """registered (قطعی) | pending_payment (در کلاس، منتظر تأیید پرداخت) | none (ثبت‌نام قطعی ندارد؛ مثلاً فقط خاکستریِ انتقالی)."""
+    if row.get('is_confirmed'):
+        return 'registered'
+    if any(src not in (_PENDING_PAYMENT_SOURCE, _CARRYOVER_SOURCE) for src in row.get('sources', [])):
+        return 'registered'
+    if _PENDING_PAYMENT_SOURCE in row.get('sources', []):
+        return 'pending_payment'
+    return 'none'
+
+
+def _wl_jalali_dt(dt):
+    if not dt:
+        return ''
+    return jdatetime.datetime.fromgregorian(datetime=timezone.localtime(dt)).strftime('%Y/%m/%d - %H:%M')
+
+
+def _wl_followup_payload(item):
+    if not item:
+        return {
+            'follow_up_status': '', 'follow_up_status_display': '', 'no_response': False, 'result_label': 'پیگیری نشده',
+            'last_followup_at': '', 'last_followup_display': '', 'last_followup_by': '', 'followup_count': 0, 'notes': '',
+        }
+    contacted = item.last_contacted_at
+    no_response = item.status == TermRetentionFollowUp.Status.NO_RESPONSE
+    if no_response:
+        label = 'فرد پاسخگو نبود'
+    elif contacted:
+        label = 'پیگیری شد' if item.status == TermRetentionFollowUp.Status.NEEDS_FOLLOW_UP else item.get_status_display()
+    else:
+        label = item.get_status_display()
+    return {
+        'follow_up_status': item.status,
+        'follow_up_status_display': item.get_status_display(),
+        'no_response': no_response,
+        'result_label': label,
+        'last_followup_at': contacted.isoformat() if contacted else '',
+        'last_followup_display': _wl_jalali_dt(contacted),
+        'last_followup_by': (item.updated_by.get_full_name().strip() or item.updated_by.username) if item.updated_by else '',
+        'followup_count': len(_FOLLOWUP_LINE_RE.findall(item.notes or '')),
+        'notes': item.notes or '',
+    }
+
+
+def _wl_dedupe_people(rows):
+    """هر کد ملی فقط یک‌بار: ردیف‌های تکراریِ یک نفر ادغام می‌شوند (ردیفِ دارای حساب دانش‌آموزی/کلاس اولویت دارد)."""
+    merged, order = {}, []
+    for row in rows:
+        nc = _wl_digits(row.get('national_code'))
+        key = f'nc:{nc}' if nc else (f"id:{row['student_id']}" if row.get('student_id') else f"k:{row.get('key')}")
+        base = merged.get(key)
+        if base is None:
+            merged[key] = dict(row)
+            order.append(key)
+            continue
+        if not base.get('student_id') and row.get('student_id'):
+            base['student_id'] = row['student_id']
+        if not base.get('has_class') and row.get('has_class'):
+            for f in ('slot_id', 'level', 'class_number', 'day', 'day_type', 'time', 'teacher', 'has_class'):
+                base[f] = row.get(f)
+        for f in ('phone', 'student_name', 'national_code'):
+            if not base.get(f) and row.get(f):
+                base[f] = row[f]
+        base['sources'] = list(dict.fromkeys(list(base.get('sources', [])) + list(row.get('sources', []))))
+        base['sources_text'] = '، '.join(base['sources'])
+    return [merged[k] for k in order]
+
+
+class TermWaitingListView(APIView):
+    """
+    GET ?term=<ترم جاری>[&previous_term=<id>][&state=waiting|registered|all]
+    مقایسهٔ خودکار: همهٔ ثبت‌نام‌شده‌های ترم قبل  ←  هرکس در ترم جاری از هر مسیری ثبت‌نام شد (کلاس، اپ، ورودی جدید،
+    پیگیری ثبت‌نام‌نشده‌ها، تعیین سطح، ...) از لیست «منتظر» خارج و «ثبت‌نام‌شده» (سبز) می‌شود؛ باقیمانده‌ها = منتظر/ریزشی.
+    POST: ثبت نتیجهٔ پیگیری (action = followup | no_response) با تاریخ و ساعت.
+    """
+    permission_classes = [IsAuthenticated]
+
+    @staticmethod
+    def _allowed(user, edit=False):
+        check = can_edit_menu if edit else (lambda u, m: can_view_menu(u, m) or can_edit_menu(u, m))
+        return check(user, 'class-management') or can_edit_menu(user, 'followups')
+
+    def get(self, request):
+        if not self._allowed(request.user):
+            return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
+        try:
+            previous_term, current_term = TermRetentionFollowUpView._term_pair({
+                'current_term_id': request.query_params.get('term'),
+                'previous_term_id': request.query_params.get('previous_term'),
+            })
+        except ValueError as exc:
+            return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        want = request.query_params.get('state') or 'all'
+
+        from .dropout_reference import get_dropout_reference, reference_rows, reference_is_required
+        reference = get_dropout_reference(current_term, auto_select=True)
+        if reference_is_required(current_term) and not reference:
+            return Response({'error': 'برای این ترم ابتدا در بخش «استخراج ریزشی»، یک آرشیو مرجع انتخاب کنید.', 'reference_required': True}, status=status.HTTP_409_CONFLICT)
+        if reference:
+            previous_rows = _wl_dedupe_people(reference_rows(reference.saved_list, term=current_term))
+        else:
+            previous_rows = _wl_dedupe_people(
+                [r for r in build_term_registered_rows(previous_term) if _wl_registration_state(r) == 'registered']
+            )
+        current_rows = build_term_registered_rows(current_term)
+
+        cur_ids, cur_codes, cur_phone_names, cur_names_only = set(), set(), set(), set()
+        cur_by = {}
+        for row in current_rows:
+            state = _wl_registration_state(row)
+            # ردیف‌های خاکستریِ انتقالی هنوز ثبت‌نام قطعی ندارند، اما کلاس/سطح/استادِ مقصدشان
+            # باید در فهرست منتظرها دیده شود؛ بنابراین برای تطبیق نگه‌شان می‌داریم.
+            row['_state'] = state
+            nc, ph, nm = _wl_digits(row.get('national_code')), _wl_digits(row.get('phone'))[-10:], _wl_name(row.get('student_name'))
+            if row.get('student_id'):
+                cur_ids.add(row['student_id']); cur_by.setdefault(('id', row['student_id']), row)
+            if nc:
+                cur_codes.add(nc); cur_by.setdefault(('nc', nc), row)
+            if ph and nm:
+                cur_phone_names.add((ph, nm)); cur_by.setdefault(('pn', ph, nm), row)
+            if not nc and not ph and nm:
+                cur_names_only.add(nm); cur_by.setdefault(('nm', nm), row)
+
+        def current_match(prev):
+            nc, ph, nm = _wl_digits(prev.get('national_code')), _wl_digits(prev.get('phone'))[-10:], _wl_name(prev.get('student_name'))
+            if prev.get('student_id') and prev['student_id'] in cur_ids:
+                return cur_by.get(('id', prev['student_id']))
+            if nc and nc in cur_codes:
+                return cur_by.get(('nc', nc))
+            if ph and nm and (ph, nm) in cur_phone_names:
+                return cur_by.get(('pn', ph, nm))
+            if not nc and not ph and nm in cur_names_only:
+                return cur_by.get(('nm', nm))
+            return None
+
+        # حساب کاربری ردیف‌هایی که student_id ندارند (برای ثبت پیگیری) با کد ملی / موبایل+نام
+        missing = [r for r in previous_rows if not r.get('student_id')]
+        if missing:
+            codes = {_wl_digits(r.get('national_code')) for r in missing} - {''}
+            phones = {r.get('phone') for r in missing if r.get('phone')}
+            users = get_user_model().objects.filter(role='student').filter(
+                Q(national_code__in=codes) | Q(phone__in=phones)
+            ).values('id', 'national_code', 'phone', 'first_name', 'last_name') if (codes or phones) else []
+            by_code, by_pn = {}, {}
+            for u in users:
+                if u['national_code']:
+                    by_code.setdefault(_wl_digits(u['national_code']), u['id'])
+                by_pn.setdefault((_wl_digits(u['phone'])[-10:], _wl_name(f"{u['first_name']} {u['last_name']}")), u['id'])
+            for r in missing:
+                r['student_id'] = by_code.get(_wl_digits(r.get('national_code'))) or by_pn.get((_wl_digits(r.get('phone'))[-10:], _wl_name(r.get('student_name'))))
+
+        followups = {
+            f.student_id: f for f in TermRetentionFollowUp.objects.filter(
+                previous_term=previous_term, current_term=current_term,
+            ).select_related('updated_by')
+        }
+
+        out, waiting_n, registered_n, pending_n = [], 0, 0, 0
+        for prev in previous_rows:
+            cur = current_match(prev)
+            if cur is None or cur['_state'] == 'none':
+                state = 'waiting'; waiting_n += 1
+            elif cur['_state'] == 'pending_payment':
+                state = 'pending_payment'; pending_n += 1
             else:
-                source = 'ثبت‌نام در کلاس'
-            key = _registered_person_key(st.national_code, st.phone, st.first_name, st.last_name)
-            row = add(key, source, {
-                'student_id': st.id, 'student_name': f'{st.first_name or ""} {st.last_name or ""}'.strip(),
-                'national_code': st.national_code or '', 'phone': st.phone or '',
-                'registered_at': en.created_at_jalali or '',
-            }, slot=en.class_slot)
-            row['has_enrollment'] = True
-            # اگر فرد چند ثبت‌نام دارد، ثبت‌نام قطعی/تأییدشده بر ثبت‌نام در انتظار یا منتقل‌نشده اولویت دارد
-            is_final = en.payment_verified and (not en.is_carryover or en.carryover_confirmed)
-            if is_final:
-                row.update(slot_fields(en.class_slot))
-                row.update(payment_verified=True, is_carryover=en.is_carryover, carryover_confirmed=en.carryover_confirmed, _confirmed=True, is_confirmed=True)
-            elif not row.get('_confirmed'):
-                row.update(slot_fields(en.class_slot))
-                row.update(payment_verified=en.payment_verified, is_carryover=en.is_carryover, carryover_confirmed=en.carryover_confirmed)
+                state = 'registered'; registered_n += 1
+            if want == 'waiting' and state != 'waiting':
+                continue
+            if want == 'registered' and state == 'waiting':
+                continue
+            item = {
+                'key': prev.get('key') or f"s{prev.get('student_id')}",
+                'student_id': prev.get('student_id'),
+                'student_name': prev.get('student_name') or '',
+                'national_code': prev.get('national_code') or '',
+                'phone': prev.get('phone') or '',
+                'previous_class_number': prev.get('class_number'),
+                'previous_level': prev.get('level') if prev.get('level') != '—' else '',
+                'previous_day': prev.get('day') or '',
+                'previous_time': prev.get('time') or '',
+                'previous_teacher': prev.get('teacher') or '',
+                'previous_sources': prev.get('sources_text') or '',
+                'state': state,
+                'state_display': {'waiting': 'منتظر ثبت‌نام', 'pending_payment': 'ثبت‌نام شد (در انتظار تأیید پرداخت)', 'registered': 'ثبت‌نام شد'}[state],
+                'current_class_number': cur.get('class_number') if cur else None,
+                'current_level': (cur.get('level') if cur and cur.get('level') != '—' else '') if cur else '',
+                'current_day': cur.get('day') if cur else '',
+                'current_time': cur.get('time') if cur else '',
+                'current_teacher': cur.get('teacher') if cur else '',
+                'registered_at': cur.get('registered_at') if cur else '',
+                'registered_via': cur.get('sources_text') if cur else '',
+            }
+            item.update(_wl_followup_payload(followups.get(prev.get('student_id'))))
+            out.append(item)
 
-        # ۲) پیگیری ثبت‌نام‌نشده‌ها که «ثبت‌نام شد» خورده‌اند
-        for u in UnregisteredStudent.objects.filter(term_id=term.id, status=UnregisteredStudent.Status.REGISTERED).select_related('reported_slot'):
-            key = _registered_person_key(u.national_code, u.phone, u.first_name, u.last_name)
-            add(key, 'پیگیری ثبت‌نام‌نشده‌ها', {
-                'student_name': f'{u.first_name} {u.last_name}'.strip(), 'national_code': u.national_code or '', 'phone': u.phone or '',
-                'registered_at': u.registered_at_jalali or '',
-            }, slot=u.reported_slot, fallback_level=u.class_level or '')
+        seen_codes, unique_out = set(), []
+        for r in out:
+            nc = _wl_digits(r['national_code'])
+            if nc:
+                if nc in seen_codes:
+                    continue
+                seen_codes.add(nc)
+            unique_out.append(r)
+        out = unique_out
+        out.sort(key=lambda r: (r['state'] != 'waiting', r['previous_class_number'] is None, r['previous_class_number'] or 0, r['student_name']))
+        return Response({
+            'previous_term': {'id': previous_term.pk, 'title': previous_term.title},
+            'current_term': {'id': current_term.pk, 'title': current_term.title},
+            'reference': ({'list_id': reference.saved_list_id, 'list_name': reference.saved_list.name,
+                           'count': len(previous_rows), 'basis': 'آرشیو مرجع ریزشی'} if reference else None),
+            'counts': {
+                'previous_total': len(previous_rows), 'waiting': waiting_n,
+                'registered': registered_n, 'pending_payment': pending_n,
+            },
+            'rows': out,
+        })
 
-        # ۳) ورودی‌های جدید (لیست انتظار) که ثبت‌نام شده‌اند
-        for lead in NewLead.objects.filter(term_id=term.id, status=NewLead.Status.REGISTERED):
-            key = _registered_person_key(lead.national_code, lead.phone, lead.first_name, lead.last_name)
-            add(key, 'ورودی‌های جدید', {
-                'student_name': f'{lead.first_name} {lead.last_name}'.strip(), 'national_code': lead.national_code or '', 'phone': lead.phone or '',
-                'registered_at': lead.registered_at_jalali or '',
-            }, fallback_level=lead.requested_level or '')
+    def post(self, request):
+        if not self._allowed(request.user, edit=True):
+            return Response({'error': 'دسترسی ویرایش ندارید'}, status=status.HTTP_403_FORBIDDEN)
+        try:
+            previous_term, current_term = TermRetentionFollowUpView._term_pair(request.data, require_explicit=True)
+        except ValueError as exc:
+            return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        student_id = request.data.get('student_id')
+        action = request.data.get('action')
+        if not student_id:
+            return Response({'error': 'برای این فرد حساب دانش‌آموزی پیدا نشد؛ ابتدا او را در سیستم ثبت کنید'}, status=status.HTTP_400_BAD_REQUEST)
+        if action not in ('followup', 'no_response'):
+            return Response({'error': 'نوع پیگیری نامعتبر است'}, status=status.HTTP_400_BAD_REQUEST)
+        from .dropout_reference import get_dropout_reference
+        reference = get_dropout_reference(current_term, auto_select=True)
+        in_reference = False
+        if reference:
+            student_obj = get_user_model().objects.filter(pk=student_id).first()
+            code = _wl_digits(getattr(student_obj, 'national_code', '')) if student_obj else ''
+            in_reference = any(_wl_digits(row.get('national_code') or row.get('key')) == code and len(code) == 10 for row in (reference.saved_list.rows or [])) if code else False
+        has_previous_enrollment = ClassSlotEnrollment.objects.filter(
+            class_slot__term_id=previous_term.pk, student_id=student_id, student__role='student', payment_verified=True,
+        ).exists()
+        if not (in_reference or (not reference and has_previous_enrollment)):
+            return Response({'error': 'این دانش‌آموز در آرشیو مرجع انتخاب‌شده/ترم قبل وجود ندارد'}, status=status.HTTP_404_NOT_FOUND)
+        already = ClassSlotEnrollment.objects.filter(class_slot__term_id=current_term.pk, student_id=student_id).exclude(
+            is_carryover=True, carryover_confirmed=False,
+        ).exists()
+        if already:
+            return Response({'error': 'این فرد در ترم جاری ثبت‌نام شده است؛ فهرست به‌روز می‌شود', 'already_registered': True}, status=status.HTTP_400_BAD_REQUEST)
 
-        # ۴) تعیین سطح‌های تکمیل‌شده‌ای که فرد را در کلاس همین ترم جایابی کرده‌اند
-        tests = LevelTest.objects.filter(
-            status=LevelTest.Status.COMPLETED, assigned_class_slot__term_id=term.id,
-        ).select_related('assigned_class_slot', 'student').order_by('updated_at', 'id')
-        for t in tests:
-            key = _registered_person_key(t.national_code, t.phone, t.first_name, t.last_name)
-            add(key, 'تعیین سطح', {
-                'student_id': t.student_id, 'student_name': f'{t.first_name} {t.last_name}'.strip(),
-                'national_code': t.national_code or '', 'phone': t.phone or '',
-                'registered_at': jdatetime.datetime.fromgregorian(datetime=timezone.localtime(t.updated_at)).strftime('%Y/%m/%d') if t.updated_at else '',
-            }, slot=t.assigned_class_slot, fallback_level=t.level or '')
-
-        result = []
-        for key in order:
-            row = rows[key]
-            row.pop('_confirmed', None)
-            row['key'] = key
-            row['level'] = row['level'] or '—'
-            row['sources_text'] = '، '.join(row['sources'])
-            result.append(row)
-        result.sort(key=lambda r: (r['class_number'] is None, r['class_number'] or 0, r['student_name']))
-        return Response({'term': term.id, 'count': len(result), 'rows': result})
+        now = timezone.now()
+        who = request.user.get_full_name().strip() or request.user.username
+        text = 'فرد پاسخگو نبود' if action == 'no_response' else 'پیگیری شد'
+        extra = str(request.data.get('note') or '').strip()
+        line = f"{_wl_jalali_dt(now)} — {who}: {text}" + (f' ({extra})' if extra else '')
+        existing = TermRetentionFollowUp.objects.filter(
+            student_id=student_id, previous_term=previous_term, current_term=current_term,
+        ).first()
+        S = TermRetentionFollowUp.Status
+        if action == 'no_response':
+            new_status = S.NO_RESPONSE
+        elif existing and existing.status not in (S.NO_RESPONSE, S.NEEDS_FOLLOW_UP):
+            new_status = existing.status
+        else:
+            new_status = S.NEEDS_FOLLOW_UP
+        notes = '\n'.join(x for x in ((existing.notes if existing else ''), line) if x)
+        record, _ = TermRetentionFollowUp.objects.update_or_create(
+            student_id=student_id, previous_term=previous_term, current_term=current_term,
+            defaults={'status': new_status, 'notes': notes, 'updated_by': request.user, 'last_contacted_at': now},
+        )
+        record = TermRetentionFollowUp.objects.select_related('updated_by').get(pk=record.pk)
+        return Response({'message': 'ثبت شد', 'student_id': int(student_id), **_wl_followup_payload(record)})

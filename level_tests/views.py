@@ -188,7 +188,17 @@ class LevelTestListCreateView(APIView):
 
         # خواسته: صف همیشه بر اساس وقتِ تعیین‌شده از نزدیک‌ترین به دورترین چیده شود؛ برای کسانی
         # که هنوز وقتی برایشان تعیین نشده، زمان ثبتشان در صف (created_at) ملاک مرتب‌سازی است.
-        qs = LevelTest.objects.annotate(_effective_sort_time=Coalesce('test_date', 'created_at')).order_by('_effective_sort_time')
+        qs = LevelTest.objects.select_related('evaluator').annotate(_effective_sort_time=Coalesce('test_date', 'created_at')).order_by('_effective_sort_time')
+
+        # فقط «در انتظار»ها (برای شمارنده و هشدارهای صفحهٔ اصلی؛ بدون خواندن کل بایگانی)
+        status_filter = request.query_params.get('status', '').strip()
+        if status_filter in {value for value, _label in LevelTest.Status.choices}:
+            qs = qs.filter(status=status_filter)
+
+        # نبض سبک برای اعلان‌های صوتیِ سراسری: همهٔ در انتظارها + نتیجه‌های دو روز اخیر (نه کل بایگانی)
+        if request.query_params.get('pulse'):
+            from datetime import timedelta as _td
+            qs = qs.filter(Q(status=LevelTest.Status.PENDING) | Q(status=LevelTest.Status.COMPLETED, updated_at__gte=timezone.now() - _td(days=2)))
 
         search = request.query_params.get('search', '').strip()
         if search:

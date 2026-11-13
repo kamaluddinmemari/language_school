@@ -23,7 +23,7 @@ class BookListView(generics.ListCreateAPIView):
     def get_queryset(self):
         if not can_edit_menu(self.request.user, 'library'):
             return Book.objects.none()
-        return Book.objects.all()
+        return Book.objects.all().prefetch_related('sales', 'stock_additions')
 
     def create(self, request, *args, **kwargs):
         if not can_edit_menu(request.user, 'library'):
@@ -182,10 +182,16 @@ class LibraryStatsView(APIView):
             sales_qs = sales_qs.filter(sold_at__date__lte=date_to)
             additions_qs = additions_qs.filter(added_at__date__lte=date_to)
 
-        books = Book.objects.all()
+        # فروش‌ها و تأمین‌ها یک‌جا خوانده می‌شوند (به‌جای چند کوئری برای هر کتاب)
+        books = list(Book.objects.all().prefetch_related('sales', 'stock_additions'))
+        sales_by_book, additions_by_book = {}, {}
+        for sale in sales_qs.only('book_id', 'quantity', 'unit_price_at_sale'):
+            sales_by_book.setdefault(sale.book_id, []).append(sale)
+        for addition in additions_qs.only('book_id', 'quantity'):
+            additions_by_book.setdefault(addition.book_id, []).append(addition)
         forecast_ctx = fc.build_context(request.query_params.get('forecast_term'))
         ser_ctx = {'request': request, 'forecast': forecast_ctx}
-        total_titles = books.count()
+        total_titles = len(books)
         total_stock = sum(b.current_stock for b in books)
         total_stock_value = sum(b.stock_value for b in books)
         total_predicted_need = 0
@@ -199,8 +205,8 @@ class LibraryStatsView(APIView):
         period_profit = 0
 
         for b in books:
-            b_sales = list(sales_qs.filter(book=b))
-            b_additions = list(additions_qs.filter(book=b))
+            b_sales = sales_by_book.get(b.pk, [])
+            b_additions = additions_by_book.get(b.pk, [])
             b_sales_qty = sum(s.quantity for s in b_sales)
             b_sales_rev = sum(s.total_price for s in b_sales)
             b_added_qty = sum(a.quantity for a in b_additions)
@@ -236,7 +242,7 @@ class LibraryStatsView(APIView):
             'total_stock_value': total_stock_value,
             'total_predicted_need': total_predicted_need,
             'forecast_mode': forecast_ctx.get('mode'),
-            'available_levels': fc.available_levels(forecast_ctx['term']),
+            'available_levels': fc.available_levels(forecast_ctx['term'], forecast_ctx),
             'forecast_term': {'id': forecast_ctx['term'].id, 'title': forecast_ctx['term'].title} if forecast_ctx['term'] else None,
             'terms': [{'id': t.id, 'title': t.title, 'is_latest': bool(forecast_ctx['term'] and t.id == forecast_ctx['term'].id)} for t in reversed(forecast_ctx['terms'])],
             # آمار درون‌بازه‌ای (اگه تاریخ داده نشه، یعنی از ابتدا تا الان = همون آمار کلی سابق)

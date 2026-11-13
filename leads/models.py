@@ -64,16 +64,23 @@ def build_identity_key(national_code, phone, first_name, last_name, level=''):
 
 def auto_mark_unregistered_registered(student, term_id=None, slot_id=None):
     """
-    اگر دانش‌آموز در کلاسی ثبت‌نام شد، فقط ردیف همان هویت در همان ترم «ثبت‌نام شد» می‌شود.
+    اگر دانش‌آموز در ترم انتخاب‌شده ثبت‌نام شد، ردیف‌های همان هویت در آن ترم
+    و ترم‌های قدیمی‌تری که در فهرست فعال نمایش داده می‌شوند «ثبت‌نام شد» می‌شوند.
     کد ملی معیار قطعی است؛ در نبود آن، موبایل همراه با نام کامل جایگزین می‌شود.
     """
     from django.db.models import Q
-    national = (getattr(student, 'national_code', '') or '').strip()
+    national_raw = (getattr(student, 'national_code', '') or '').strip()
+    national = normalize_national_code(national_raw)
     phone = (getattr(student, 'phone', '') or '').strip()
+    phone_key = normalize_phone(phone)
     first = (getattr(student, 'first_name', '') or '').strip()
     last = (getattr(student, 'last_name', '') or '').strip()
     if national:
         q = Q(national_code=national)
+        # رکوردهای قدیمی ممکن است کد ملی را با رقم فارسی/عربی یا اصلاً خالی ذخیره کرده باشند.
+        # با موبایل و نام هم کاندید می‌گیریم، ولی کد ملیِ غیرخالی و متفاوت را پایین‌تر رد می‌کنیم.
+        if phone_key and first and last:
+            q |= Q(phone=phone, first_name=first, last_name=last)
     elif phone and first and last:
         q = Q(phone=phone, first_name=first, last_name=last)
     elif first and last:
@@ -81,13 +88,28 @@ def auto_mark_unregistered_registered(student, term_id=None, slot_id=None):
     else:
         return 0
     rows = UnregisteredStudent.objects.filter(q, status=UnregisteredStudent.Status.TRACKING)
-    if slot_id:
-        # فردِ «در کلاس درست ثبت‌نام نشده» با ثبت‌نامِ فعلی‌اش در همان کلاسِ اشتباه حل‌شده حساب نمی‌شود
-        rows = rows.exclude(is_misplaced=True, misplaced_from_slot_id=slot_id)
     if term_id:
-        rows = rows.filter(Q(term_id=term_id) | Q(term__isnull=True))
+        from class_management.models import Term
+        term = Term.objects.filter(pk=term_id).first()
+        if term:
+            earlier_terms = Term.objects.filter(
+                Q(year__lt=term.year) | Q(year=term.year, term_number__lt=term.term_number)
+            )
+            rows = rows.filter(Q(term_id=term_id) | Q(term__in=earlier_terms) | Q(term__isnull=True))
+        else:
+            rows = rows.filter(Q(term_id=term_id) | Q(term__isnull=True))
     count = 0
-    for row in rows:
+    for row in rows.iterator():
+        row_national = normalize_national_code(row.national_code)
+        row_phone = normalize_phone(row.phone)
+        same_name = row.first_name.strip() == first and row.last_name.strip() == last
+        if national:
+            if row_national and row_national != national:
+                continue
+            if not row_national and not (phone_key and row_phone == phone_key and same_name):
+                continue
+        elif phone_key and not (row_phone == phone_key and same_name):
+            continue
         row.status = UnregisteredStudent.Status.REGISTERED
         row.registered_at = timezone.now()
         if term_id and not row.term_id:
@@ -251,6 +273,7 @@ class UnregisteredStudent(models.Model):
     )
 
     status = models.CharField(max_length=10, choices=Status.choices, default=Status.TRACKING)
+    not_coming = models.BooleanField(default=False, help_text='علامت‌گذاری شده که فرد کلاً نمی‌آید')
     registered_at = models.DateTimeField(null=True, blank=True)
     term = models.ForeignKey(
         'class_management.Term', on_delete=models.SET_NULL, null=True, blank=True, related_name='+',
@@ -302,11 +325,15 @@ class UnregisteredStudent(models.Model):
 
     @property
     def latest_level(self):
-        person_key = build_person_key(self.national_code, self.phone, self.first_name, self.last_name)
-        return type(self).objects.filter(
-            term=self.term,
-            identity_key__startswith=person_key + '|level:',
-        ).order_by('-created_at', '-id').values_list('class_level', flat=True).first() or self.class_level
+        cached = self.__dict__.get('_latest_level_cache')
+        if cached is None:  # در یک درخواست چندبار صدا زده می‌شود؛ فقط یک‌بار کوئری بزن
+            person_key = build_person_key(self.national_code, self.phone, self.first_name, self.last_name)
+            cached = type(self).objects.filter(
+                term=self.term,
+                identity_key__startswith=person_key + '|level:',
+            ).order_by('-created_at', '-id').values_list('class_level', flat=True).first() or self.class_level
+            self.__dict__['_latest_level_cache'] = cached
+        return cached
 
     @property
     def created_at_jalali(self):
@@ -318,11 +345,18 @@ class UnregisteredStudent(models.Model):
 
     @property
     def followup_count(self):
+        prefetched = getattr(self, '_prefetched_objects_cache', {}).get('followups')
+        if prefetched is not None:  # prefetch_related شده: بدون کوئری اضافه
+            return len(prefetched)
         return self.followups.count()
 
     @property
     def last_followup_at_jalali(self):
-        last = self.followups.order_by('-followed_up_at').first()
+        prefetched = getattr(self, '_prefetched_objects_cache', {}).get('followups')
+        if prefetched is not None:
+            last = max(prefetched, key=lambda f: f.followed_up_at, default=None)
+        else:
+            last = self.followups.order_by('-followed_up_at').first()
         return _jalali(last.followed_up_at) if last else None
 
     @property
@@ -366,6 +400,7 @@ class Debtor(models.Model):
 
     status = models.CharField(max_length=10, choices=Status.choices, default=Status.PENDING)
     settled_at = models.DateTimeField(null=True, blank=True)
+    not_coming = models.BooleanField(default=False, help_text='علامت‌گذاری شده که فرد کلاً نمی‌آید')
     term = models.ForeignKey(
         'class_management.Term', on_delete=models.SET_NULL, null=True, blank=True, related_name='+',
         help_text='ترمی که این فرد در آن ثبت شده — برای فیلتر ترمی در صفحه‌ی پیگیری',
@@ -421,11 +456,18 @@ class Debtor(models.Model):
 
     @property
     def followup_count(self):
+        prefetched = getattr(self, '_prefetched_objects_cache', {}).get('followups')
+        if prefetched is not None:  # prefetch_related شده: بدون کوئری اضافه
+            return len(prefetched)
         return self.followups.count()
 
     @property
     def last_followup_at_jalali(self):
-        last = self.followups.order_by('-followed_up_at').first()
+        prefetched = getattr(self, '_prefetched_objects_cache', {}).get('followups')
+        if prefetched is not None:
+            last = max(prefetched, key=lambda f: f.followed_up_at, default=None)
+        else:
+            last = self.followups.order_by('-followed_up_at').first()
         return _jalali(last.followed_up_at) if last else None
 
     @property

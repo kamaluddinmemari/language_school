@@ -430,6 +430,9 @@ class ClassSlot(models.Model):
         از اپ که هنوز رسیدشان توسط مدیر تایید نشده (payment_verified=False) جزو این عدد حساب
         نمی‌شوند — یعنی تا تایید نشوند، اصلاً «توی کلاس» به‌حساب نمی‌آیند (خواسته‌ی ۱)
         """
+        annotated = self.__dict__.get('real_enrolled_annot')  # در لیست‌ها یک‌جا با annotate محاسبه می‌شود
+        if annotated is not None:
+            return annotated
         return self.enrollments.filter(payment_verified=True).count()
 
     @property
@@ -1082,11 +1085,14 @@ from django.dispatch import receiver as _receiver
 
 @_receiver(_post_save, sender=ClassSlotEnrollment)
 def _auto_clear_unregistered(sender, instance, **kwargs):
-    if instance.is_carryover or not instance.payment_verified:
+    # انتقالیِ خاکستری هنوز ثبت‌نام قطعی نیست؛ انتقالیِ تأییدشده ثبت‌نام قطعی است.
+    if (instance.is_carryover and not instance.carryover_confirmed) or not instance.payment_verified:
         return
     try:
         from leads.models import auto_mark_unregistered_registered
         auto_mark_unregistered_registered(instance.student, instance.class_slot.term_id, instance.class_slot_id)
+        from class_management.carryover import settle_awaiting_debtors
+        settle_awaiting_debtors(instance.student, instance.class_slot.term_id)
     except Exception:  # هرگز نباید ثبت‌نام را خراب کند
         import logging
         logging.getLogger(__name__).exception('auto_mark_unregistered_registered failed')
@@ -1110,6 +1116,18 @@ class DropoutExtractList(models.Model):
 
     def __str__(self):
         return self.name
+
+
+class DropoutExtractReference(models.Model):
+    """آرشیو ریزشیِ مرجع برای یک ترم؛ ردیف‌ها از لیست ذخیره‌شده و وضعیت ثبت‌نام از سامانه خوانده می‌شود."""
+    term = models.OneToOneField(Term, on_delete=models.CASCADE, related_name='dropout_extract_reference')
+    saved_list = models.ForeignKey(DropoutExtractList, on_delete=models.PROTECT, related_name='reference_for_terms')
+    scope = models.CharField(max_length=16, default='global', unique=True, editable=False)
+    selected_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f'{self.term} — {self.saved_list.name}'
 
 
 class DropoutExtractFollowUp(models.Model):

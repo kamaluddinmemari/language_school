@@ -19,7 +19,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from accounts.menu_permissions import can_edit_menu
-from .models import ClassSlotEnrollment, DropoutExtractFollowUp, DropoutExtractList, Term
+from .models import ClassSlotEnrollment, DropoutExtractFollowUp, DropoutExtractList, DropoutExtractReference, Term
 from .views import ClassSlotExcelImportView
 
 _COLUMN_RE = re.compile(r'^[A-Z]{1,2}$')
@@ -521,6 +521,58 @@ _LIST_ROW_KEYS = ('key', 'row_number', 'first_name', 'last_name', 'national_code
                   'teacher', 'class_number', 'last_term_id', 'last_term_title', 'student_id')
 
 
+class DropoutExtractReferenceView(APIView):
+    """انتخاب یک آرشیو پیگیری به‌عنوان مرجع سراسریِ تمام ترم‌ها."""
+    permission_classes = [IsAuthenticated]
+
+    @staticmethod
+    def allowed(user):
+        return can_edit_menu(user, 'class-management')
+
+    def get(self, request):
+        if not self.allowed(request.user):
+            return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
+        from .dropout_reference import get_dropout_reference, reference_anchor_term
+        ref = get_dropout_reference(auto_select=True)
+        candidates = []
+        for item in DropoutExtractList.objects.select_related('term').order_by('-created_at', '-id')[:200]:
+            if not item.rows:
+                continue
+            meta = item.meta if isinstance(item.meta, dict) else {}
+            source = meta.get('a_source') or (meta.get('a') or {}).get('source') or ''
+            candidates.append({'id': item.id, 'name': item.name, 'term_id': item.term_id,
+                               'term_title': item.term.title, 'count': len(item.rows or []),
+                               'created_at': item.created_at.isoformat(), 'source': source,
+                               'is_excel_source': str(source).lower() == 'excel'})
+        anchor = reference_anchor_term()
+        return Response({'required': bool(anchor), 'anchor_term_id': anchor.id if anchor else None,
+                         'selected_id': ref.saved_list_id if ref else None,
+                         'selected_name': ref.saved_list.name if ref else '', 'candidates': candidates})
+
+    def post(self, request):
+        if not self.allowed(request.user):
+            return Response({'error': 'دسترسی ویرایش ندارید'}, status=status.HTTP_403_FORBIDDEN)
+        try:
+            saved = DropoutExtractList.objects.select_related('term').get(pk=int(request.data.get('list_id')))
+        except (DropoutExtractList.DoesNotExist, TypeError, ValueError):
+            return Response({'error': 'آرشیو انتخاب‌شده معتبر نیست'}, status=status.HTTP_400_BAD_REQUEST)
+        if not saved.rows:
+            return Response({'error': 'یک آرشیو ذخیره‌شدهٔ دارای ردیف انتخاب کنید'}, status=status.HTTP_400_BAD_REQUEST)
+        from .dropout_reference import reference_is_anchor
+        if reference_is_anchor(saved.term):
+            meta = saved.meta if isinstance(saved.meta, dict) else {}
+            source = meta.get('a_source') or (meta.get('a') or {}).get('source') or ''
+            if str(source).lower() != 'excel':
+                return Response({'error': 'برای مرجع اولیهٔ ترم ۶، آرشیو ساخته‌شده از ورودی Excel را انتخاب کنید'}, status=status.HTTP_400_BAD_REQUEST)
+        with transaction.atomic():
+            # مرجع سراسری است: انتخاب تازه، انتخاب قبلی هر ترمی را جایگزین می‌کند.
+            DropoutExtractReference.objects.all().delete()
+            ref = DropoutExtractReference.objects.create(term=saved.term, saved_list=saved, scope='global', selected_by=request.user)
+        return Response({'selected_id': ref.saved_list_id, 'selected_name': ref.saved_list.name,
+                         'term_id': saved.term_id, 'term_title': saved.term.title,
+                         'saved_count': len(ref.saved_list.rows or [])})
+
+
 class DropoutExtractListView(APIView):
     """
     لیست‌های ریزشیِ ذخیره‌شده برای پیگیری.
@@ -539,21 +591,22 @@ class DropoutExtractListView(APIView):
                 saved = DropoutExtractList.objects.select_related('term', 'created_by').get(pk=int(list_id))
             except (DropoutExtractList.DoesNotExist, TypeError, ValueError):
                 return Response({'error': 'لیست پیدا نشد'}, status=status.HTTP_404_NOT_FOUND)
-            rows = saved.rows or []
-            # وضعیت لحظه‌ای ثبت‌نام هر نفر در ترم مقصد؛ از هر مسیری که ثبت‌نام شده باشد (خاکستری و غیرفعال می‌شود)
-            from .carryover import list_registration_status
-            statuses = list_registration_status(saved)
-            rows = [{**row, 'reg_status': statuses.get(row.get('key'), '')} for row in rows]
+            # لیست بازشده هم یکتا و زنده است؛ کد ملی‌های تکراری یکی می‌شوند.
+            from .dropout_reference import reference_rows
+            rows = reference_rows(saved)
             return Response({
                 'id': saved.id, 'name': saved.name, 'mode': saved.mode, 'term_id': saved.term_id,
                 'meta': saved.meta, 'rows': rows, 'created_at': saved.created_at.isoformat(),
             })
         data = []
+        from .dropout_reference import get_dropout_reference
+        reference = get_dropout_reference(auto_select=True)
+        reference_list_id = reference.saved_list_id if reference else None
         for saved in DropoutExtractList.objects.select_related('term', 'source_term', 'created_by').all()[:200]:
             follow = DropoutExtractFollowUp.objects.filter(saved_list=saved).select_related('assigned_to')
-            from .carryover import list_registration_status
-            registration_statuses = list_registration_status(saved)
-            registered = sum(1 for label in registration_statuses.values() if label == 'ثبت‌نام قطعی شد')
+            from .dropout_reference import reference_rows
+            current_rows = reference_rows(saved)
+            registered = sum(1 for row in current_rows if row.get('is_confirmed'))
             employee_stats = {}
             for item in follow:
                 employee = item.assigned_to
@@ -564,12 +617,17 @@ class DropoutExtractListView(APIView):
                 if item.contacted:
                     stats['contacted_count'] += 1
             meta = saved.meta if isinstance(saved.meta, dict) else {}
+            from .dropout_reference import reference_is_required, reference_is_anchor
             data.append({
-                'id': saved.id, 'name': saved.name, 'mode': saved.mode, 'auto': saved.mode == 'carryover', 'not_coming_count': follow.filter(not_coming=True).count(),
+                'id': saved.id, 'name': saved.name, 'mode': saved.mode, 'auto': saved.mode == 'carryover',
+                'reference_required': reference_is_required(saved.term), 'reference_anchor': reference_is_anchor(saved.term),
+                'is_reference': reference_list_id == saved.id,
+                'term_id': saved.term_id, 'reference_term_number': saved.term.term_number,
+                'not_coming_count': follow.filter(not_coming=True).count(),
                 'registered_count': registered, 'term_title': saved.term.title,
                 'a_source': 'db' if saved.mode == 'carryover' else (meta.get('a_source') or (meta.get('a') or {}).get('source') or 'db'),
                 'b_source': 'db' if saved.mode == 'carryover' else (meta.get('b_source') or (meta.get('b') or {}).get('source') or 'db'),
-                'count': len(saved.rows or []), 'contacted_count': follow.filter(contacted=True).count(),
+                'count': len(current_rows), 'contacted_count': follow.filter(contacted=True).count(),
                 'assigned_count': follow.filter(assigned_to__isnull=False).count(),
                 'employee_stats': sorted(employee_stats.values(), key=lambda row: (row['id'] == 0, row['name'])),
                 'created_at': saved.created_at.isoformat(),
@@ -614,11 +672,28 @@ class DropoutExtractListView(APIView):
             ).update(saved_list=saved)
         return Response({'id': saved.id, 'name': saved.name, 'count': len(clean_rows)}, status=status.HTTP_201_CREATED)
 
+    def patch(self, request):
+        if not can_edit_menu(request.user, 'class-management'):
+            return Response({'error': 'دسترسی ویرایش ندارید'}, status=status.HTTP_403_FORBIDDEN)
+        try:
+            saved = DropoutExtractList.objects.get(pk=int(request.data.get('id')))
+        except (DropoutExtractList.DoesNotExist, TypeError, ValueError):
+            return Response({'error': 'لیست پیدا نشد'}, status=status.HTTP_404_NOT_FOUND)
+        name = str(request.data.get('name') or '').strip()
+        if not name:
+            return Response({'error': 'عنوان جدید را وارد کنید'}, status=status.HTTP_400_BAD_REQUEST)
+        saved.name = name[:200]
+        saved.save(update_fields=['name'])
+        return Response({'id': saved.id, 'name': saved.name})
+
     def delete(self, request):
         if not can_edit_menu(request.user, 'class-management'):
             return Response({'error': 'دسترسی ویرایش ندارید'}, status=status.HTTP_403_FORBIDDEN)
         try:
-            DropoutExtractList.objects.get(pk=int(request.query_params.get('id'))).delete()
+            item = DropoutExtractList.objects.get(pk=int(request.query_params.get('id')))
+            if DropoutExtractReference.objects.filter(saved_list=item).exists():
+                return Response({'error': 'این آرشیو مرجع سراسری فعال است؛ ابتدا یک آرشیو دیگر را با رادیوباتن به‌عنوان مرجع انتخاب کنید.'}, status=status.HTTP_409_CONFLICT)
+            item.delete()
         except (DropoutExtractList.DoesNotExist, TypeError, ValueError):
             return Response({'error': 'لیست پیدا نشد'}, status=status.HTTP_404_NOT_FOUND)
         return Response(status=status.HTTP_204_NO_CONTENT)
@@ -991,28 +1066,89 @@ class DropoutStatsView(APIView):
         if index == 0:
             return Response({'error': 'برای این ترم، ترم قبلی در سامانه وجود ندارد'}, status=status.HTTP_400_BAD_REQUEST)
         term1 = terms[index - 1]
+        from .dropout_reference import get_dropout_reference, reference_rows, reference_is_required
+        reference = get_dropout_reference(term2, auto_select=True)
+        if reference_is_required(term2) and not reference:
+            return Response({'error': 'برای این ترم ابتدا یک آرشیو مرجع در بخش «لیست‌های ذخیره‌شده برای پیگیری» انتخاب کنید.', 'reference_required': True}, status=status.HTTP_409_CONFLICT)
+        if reference:
+            archived_rows = reference_rows(reference.saved_list, term=term2)
+            by_level, by_teacher, people = {}, {}, {}
+            registered_codes = set()
+            pending_codes = set()
+            for item in archived_rows:
+                code = _valid_code(item.get('national_code'))
+                if not code:
+                    continue
+                key = code
+                level = str(item.get('level') or 'نامشخص').strip() or 'نامشخص'
+                teacher = str(item.get('teacher') or 'نامشخص').strip() or 'نامشخص'
+                state = item.get('reg_status') or ''
+                registered = state == 'ثبت‌نام قطعی شد'
+                pending = state == 'در انتظار تأیید پرداخت'
+                if registered:
+                    registered_codes.add(code)
+                elif pending:
+                    pending_codes.add(code)
+                for bucket in (by_level.setdefault((level, teacher), {'previous': set(), 'dropouts': set()}),
+                               by_teacher.setdefault(teacher, {'previous': set(), 'dropouts': set(), 'levels': {}}),):
+                    bucket['previous'].add(key)
+                level_group = by_teacher[teacher]['levels'].setdefault(level, {'previous': set(), 'dropouts': set()})
+                level_group['previous'].add(key)
+                if not registered and not pending:
+                    by_level[(level, teacher)]['dropouts'].add(key)
+                    by_teacher[teacher]['dropouts'].add(key)
+                    level_group['dropouts'].add(key)
+                    people[key] = {'student_id': item.get('student_id'), 'name': item.get('student_name') or f"{item.get('first_name', '')} {item.get('last_name', '')}".strip(),
+                                   'national_code': code, 'level': level, 'teacher': teacher, 'class_number': item.get('class_number')}
+            def pack_ref(group):
+                total, count = len(group['previous']), len(group['dropouts'])
+                return {'previous_enrollment_count': total, 'dropout_count': count, 'retained_count': total-count,
+                        'dropout_rate': round(count * 100 / total, 2) if total else 0}
+            level_rows = [{'level': level, 'teacher': teacher, **pack_ref(group)} for (level, teacher), group in by_level.items()]
+            level_rows.sort(key=lambda row: (-row['dropout_count'], row['level'], row['teacher']))
+            teachers = [{'teacher': teacher, **pack_ref(group), 'levels': [{'level': level, **pack_ref(data)} for level, data in sorted(group['levels'].items())]} for teacher, group in by_teacher.items()]
+            teachers.sort(key=lambda row: (-row['dropout_count'], -row['dropout_rate'], row['teacher']))
+            dropout_codes = {_valid_code(row.get('national_code')) for row in people.values()}
+            followup_rows = DropoutExtractFollowUp.objects.filter(term=term2, national_code__in=dropout_codes).values('national_code', 'not_coming', 'assigned_to_id', 'contacted') if dropout_codes else []
+            not_coming_codes, active_followup_codes = set(), set()
+            for followup in followup_rows:
+                if followup['not_coming']: not_coming_codes.add(followup['national_code'])
+                elif followup['assigned_to_id'] or followup['contacted']: active_followup_codes.add(followup['national_code'])
+            active_followup_codes -= not_coming_codes
+            return Response({
+                'term': {'id': term2.id, 'title': term2.title},
+                'previous_term': {'id': term1.id, 'title': term1.title},
+                'reference': {'list_id': reference.saved_list_id, 'list_name': reference.saved_list.name, 'count': len(archived_rows)},
+                'totals': {'previous_enrollment_count': len(archived_rows), 'current_enrollment_count': len(registered_codes),
+                           'not_coming_count': len(not_coming_codes), 'under_followup_count': len(active_followup_codes),
+                           'dropout_count': len(people), 'dropout_rate': round(len(people)*100/len(archived_rows), 2) if archived_rows else 0,
+                           'pending_payment_count': len(pending_codes)},
+                'by_level_and_teacher': level_rows, 'teachers_ranked': teachers,
+                'dropouts': sorted(people.values(), key=lambda row: (row['teacher'], row['level'], row['name'])),
+            })
         eligible = ClassSlotEnrollment.objects.filter(
             student__role='student', payment_verified=True,
         ).exclude(is_carryover=True, carryover_confirmed=False)
         previous = list(eligible.filter(class_slot__term=term1).select_related('student', 'class_slot'))
-        current_ids = set(eligible.filter(class_slot__term=term2).values_list('student_id', flat=True).distinct())
+        current_ids = set(_valid_code(code) or f'id:{sid}' for sid, code in eligible.filter(class_slot__term=term2).values_list('student_id', 'student__national_code').distinct())
         by_level, by_teacher, people = {}, {}, {}
         for enrollment in previous:
             student = enrollment.student
+            person_key = _valid_code(student.national_code) or f'id:{student.id}'
             level = enrollment.class_slot.assigned_level.strip() or 'نامشخص'
             teacher = enrollment.class_slot.teacher_name.strip() or 'نامشخص'
             key = (level, teacher)
             group = by_level.setdefault(key, {'previous': set(), 'dropouts': set()})
-            group['previous'].add(student.id)
+            group['previous'].add(person_key)
             teacher_group = by_teacher.setdefault(teacher, {'previous': set(), 'dropouts': set(), 'levels': {}})
-            teacher_group['previous'].add(student.id)
+            teacher_group['previous'].add(person_key)
             level_group = teacher_group['levels'].setdefault(level, {'previous': set(), 'dropouts': set()})
-            level_group['previous'].add(student.id)
-            if student.id not in current_ids:
-                group['dropouts'].add(student.id)
-                teacher_group['dropouts'].add(student.id)
-                level_group['dropouts'].add(student.id)
-                people[student.id] = {
+            level_group['previous'].add(person_key)
+            if person_key not in current_ids:
+                group['dropouts'].add(person_key)
+                teacher_group['dropouts'].add(person_key)
+                level_group['dropouts'].add(person_key)
+                people[person_key] = {
                     'student_id': student.id,
                     'name': (student.get_full_name() or student.username),
                     'national_code': student.national_code or '',
@@ -1058,12 +1194,12 @@ class DropoutStatsView(APIView):
             'term': {'id': term2.id, 'title': term2.title},
             'previous_term': {'id': term1.id, 'title': term1.title},
             'totals': {
-                'previous_enrollment_count': len({item.student_id for item in previous}),
+                'previous_enrollment_count': len({_valid_code(item.student.national_code) or f'id:{item.student_id}' for item in previous}),
                 'current_enrollment_count': len(current_ids),
                 'not_coming_count': len(not_coming_codes),
                 'under_followup_count': len(active_followup_codes),
                 'dropout_count': len(people),
-                'dropout_rate': round(len(people) * 100 / len({item.student_id for item in previous}), 2)
+                'dropout_rate': round(len(people) * 100 / len({_valid_code(item.student.national_code) or f'id:{item.student_id}' for item in previous}), 2)
                     if previous else 0,
             },
             'by_level_and_teacher': level_rows,

@@ -115,11 +115,17 @@ class UnregisteredFollowupSerializer(serializers.ModelSerializer):
 
 
 def _norm_name(first, last):
-    return ' '.join(f"{first or ''} {last or ''}".split()).casefold()
+    value = f"{first or ''} {last or ''}".replace('ي', 'ی').replace('ك', 'ک').replace('\u200c', ' ')
+    return ' '.join(value.split()).casefold()
+
+
+def _norm_digits(value):
+    value = str(value or '').translate(str.maketrans('۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩', '01234567890123456789'))
+    return ''.join(ch for ch in value if ch.isdigit())
 
 
 def _norm_phone(value):
-    digits = ''.join(ch for ch in str(value or '') if ch.isdigit())
+    digits = _norm_digits(value)
     return digits[-10:] if len(digits) >= 10 else digits
 
 
@@ -136,24 +142,25 @@ class _CrossListIndex:
             rows = Debtor.objects.filter(status=Debtor.Status.PENDING).select_related('student')
             for d in rows:
                 code = getattr(d.student, 'national_code', '') if d.student_id else ''
-                self.items.append((code or '', _norm_phone(d.phone), _norm_name(d.first_name, d.last_name), d.debt_amount or 0))
+                self.items.append((_norm_digits(code), _norm_phone(d.phone), _norm_name(d.first_name, d.last_name), d.debt_amount or 0))
         else:
             from .models import UnregisteredStudent
             rows = UnregisteredStudent.objects.filter(status=UnregisteredStudent.Status.TRACKING)
             for u in rows:
-                self.items.append((u.national_code or '', _norm_phone(u.phone), _norm_name(u.first_name, u.last_name), u.tuition_price or 0))
+                self.items.append((_norm_digits(u.national_code), _norm_phone(u.phone), _norm_name(u.first_name, u.last_name), u.tuition_price or 0))
 
     def match(self, code, phone, first, last):
-        code = (code or '').strip()
+        code = _norm_digits(code)
         phone = _norm_phone(phone)
         name = _norm_name(first, last)
         found = []
         for c, p, n, amount in self.items:
-            # اگر کد ملی موجود است، تلفن مشترک یا نام یکسان نباید هویت دیگری را یکی کند.
-            if code:
-                matched = bool(c and code == c)
-            elif phone:
-                matched = bool(not c and p and phone == p and name and n == name)
+            # کد ملیِ هر دو طرف موجود باشد ملاک قطعی است. اگر فقط یک طرف کد دارد،
+            # شماره همراه و نام کاملِ مشترک امکان match می‌دهد؛ کدهای متفاوت هرگز با هم یکی نمی‌شوند.
+            if code and c:
+                matched = code == c
+            elif phone and p:
+                matched = bool(phone == p and name and n == name)
             else:
                 matched = bool(not c and not p and name and n == name)
             if matched:
@@ -216,9 +223,57 @@ def _compute_unregistered_enrollment_q(obj):
     return Q(student_id__in=[])
 
 
-def _has_current_misplaced_enrollment(obj):
+class _EnrollmentIndex:
+    """
+    ثبت‌نام‌های کلاسیِ همهٔ ردیف‌های یک لیست را با چند کوئری ثابت می‌خواند (به‌جای چند کوئری برای هر ردیف).
+    تطبیق فرد دقیقاً مثل _compute_unregistered_enrollment_q است: کد ملی ← موبایل+نام ← نام؛ تطبیق مبهم = هیچ.
+    """
+    def __init__(self, objs):
+        from accounts.models import User
+        self.by_nc, self.by_pfl, self.by_fl = {}, {}, {}
+        for u in User.objects.filter(role='student').values('id', 'national_code', 'phone', 'first_name', 'last_name'):
+            if u['national_code']:
+                self.by_nc.setdefault(u['national_code'], []).append(u['id'])
+            self.by_pfl.setdefault((u['phone'], u['first_name'], u['last_name']), []).append(u['id'])
+            self.by_fl.setdefault((u['first_name'], u['last_name']), []).append(u['id'])
+        self.by_student = {}
+        self._load({sid for o in objs for sid in self.student_ids(o)})
+
+    def student_ids(self, obj):
+        nc = (obj.national_code or '').strip()
+        if nc:
+            return list(self.by_nc.get(nc, []))
+        phone = (obj.phone or '').strip()
+        ids = self.by_pfl.get((phone, obj.first_name, obj.last_name), []) if phone else self.by_fl.get((obj.first_name, obj.last_name), [])
+        return list(ids) if len(ids) == 1 else []
+
+    def _load(self, ids):
+        from class_management.models import ClassSlotEnrollment
+        ids = {i for i in ids if i not in self.by_student}
+        for i in ids:
+            self.by_student[i] = []
+        if not ids:
+            return
+        for e in ClassSlotEnrollment.objects.filter(student_id__in=ids).select_related('class_slot').order_by('-created_at', '-id'):
+            self.by_student[e.student_id].append(e)
+
+    def enrollments(self, obj):
+        ids = self.student_ids(obj)
+        self._load(ids)
+        rows = [e for i in ids for e in self.by_student.get(i, [])]
+        rows.sort(key=lambda e: (e.created_at, e.id), reverse=True)
+        return rows
+
+
+def _unconfirmed_carryover(e):
+    return bool(e.is_carryover and not e.carryover_confirmed)
+
+
+def _has_current_misplaced_enrollment(obj, index=None):
     if not obj.is_misplaced or not obj.misplaced_from_slot_id:
         return False
+    if index is not None:
+        return any(e.class_slot_id == obj.misplaced_from_slot_id for e in index.enrollments(obj))
     from class_management.models import ClassSlotEnrollment
     return ClassSlotEnrollment.objects.filter(
         _unregistered_enrollment_q(obj), class_slot_id=obj.misplaced_from_slot_id,
@@ -294,16 +349,32 @@ class UnregisteredStudentSerializer(serializers.ModelSerializer):
     has_current_class = serializers.SerializerMethodField()
     is_misplaced = serializers.SerializerMethodField()
 
+    def _enr_index(self):
+        """ایندکس ثبت‌نام‌ها برای کل لیست (یک‌بار برای هر درخواست)."""
+        idx = self.__dict__.get('_enr_index_cache')
+        if idx is None:
+            parent = getattr(self, 'parent', None)
+            if parent is not None and getattr(parent, 'many', False) and parent.instance is not None:
+                objs = list(parent.instance)
+            else:
+                objs = [self.instance] if isinstance(self.instance, UnregisteredStudent) else []
+            idx = _EnrollmentIndex(objs)
+            self.__dict__['_enr_index_cache'] = idx
+        return idx
+
+    def _misplaced_now(self, obj):
+        return _has_current_misplaced_enrollment(obj, self._enr_index())
+
     def get_is_misplaced(self, obj):
-        return _has_current_misplaced_enrollment(obj)
+        return self._misplaced_now(obj)
 
     def get_has_current_class(self, obj):
         if obj.status == 'registered':
             return False
-        from class_management.models import ClassSlotEnrollment
-        return ClassSlotEnrollment.objects.filter(
-            _unregistered_enrollment_q(obj), class_slot__term_id=obj.term_id,
-        ).exclude(is_carryover=True, carryover_confirmed=False).exists()
+        return any(
+            e.class_slot.term_id == obj.term_id and not _unconfirmed_carryover(e)
+            for e in self._enr_index().enrollments(obj)
+        )
     # خواسته: برای هر فرد ثبت‌نام‌نشده، مشخصات کلاس فعلی‌اش (شماره، سطح، روز/ساعت، استاد) هم نمایش داده شود.
     class_slot = serializers.SerializerMethodField()
     class_slot_number = serializers.SerializerMethodField()
@@ -316,18 +387,15 @@ class UnregisteredStudentSerializer(serializers.ModelSerializer):
     class_true_text = serializers.SerializerMethodField()
 
     def _system_slot(self, obj):
-        from class_management.models import ClassSlotEnrollment
-        q = _unregistered_enrollment_q(obj)
+        enrollments = self._enr_index().enrollments(obj)
         if obj.misplaced_from_slot_id:
             # تیک «به اشتباه ثبت شده»: اگر اسمش هنوز در همان کلاس است، همان کلاس اشتباه است
-            if ClassSlotEnrollment.objects.filter(q, class_slot_id=obj.misplaced_from_slot_id).exists():
+            if any(e.class_slot_id == obj.misplaced_from_slot_id for e in enrollments):
                 return obj.misplaced_from_slot
             # از آن کلاس خارج شده (اصلاح شده)؛ ثبت‌نام فعلی‌اش در همان ترم ملاک است
-            pass
         if not obj.term_id:
             return None
-        found = ClassSlotEnrollment.objects.filter(q, class_slot__term_id=obj.term_id).exclude(
-            is_carryover=True, carryover_confirmed=False).select_related('class_slot').order_by('-created_at', '-id').first()
+        found = next((e for e in enrollments if e.class_slot.term_id == obj.term_id and not _unconfirmed_carryover(e)), None)
         return found.class_slot if found else None
 
     def _class_state(self, obj):
@@ -360,21 +428,19 @@ class UnregisteredStudentSerializer(serializers.ModelSerializer):
         if obj.pk in cache:
             return cache[obj.pk]
         slot = None
-        if _has_current_misplaced_enrollment(obj):
+        if self._misplaced_now(obj):
             slot = obj.misplaced_from_slot
         else:
-            from class_management.models import ClassSlotEnrollment
-            q = _unregistered_enrollment_q(obj)
-            base = ClassSlotEnrollment.objects.filter(q).select_related('class_slot').order_by('-created_at', '-id')
+            base = self._enr_index().enrollments(obj)
             # اول کلاس همین ترم (غیر از انتقالیِ تأییدنشده)، بعد ترم مبدأ ریزشی، و در نهایت آخرین کلاسی که داشته است
-            for qs in (
-                base.filter(class_slot__term_id=obj.term_id).exclude(is_carryover=True, carryover_confirmed=False) if obj.term_id else base.none(),
-                base.filter(class_slot__term_id=obj.dropout_from_term_id) if obj.dropout_from_term_id else base.none(),
+            candidates = (
+                [e for e in base if obj.term_id and e.class_slot.term_id == obj.term_id and not _unconfirmed_carryover(e)],
+                [e for e in base if obj.dropout_from_term_id and e.class_slot.term_id == obj.dropout_from_term_id],
                 base,
-            ):
-                found = qs.first()
-                if found:
-                    slot = found.class_slot
+            )
+            for group in candidates:
+                if group:
+                    slot = group[0].class_slot
                     break
         cache[obj.pk] = slot
         return slot
@@ -436,7 +502,7 @@ class UnregisteredStudentSerializer(serializers.ModelSerializer):
         return sum(self._debtor_matches(obj))
 
     def get_misplaced_class_number(self, obj):
-        return obj.misplaced_from_slot.number if _has_current_misplaced_enrollment(obj) else None
+        return obj.misplaced_from_slot.number if self._misplaced_now(obj) else None
 
     def get_dropout_from_term_title(self, obj):
         return obj.dropout_from_term.title if obj.dropout_from_term_id else None
@@ -445,7 +511,7 @@ class UnregisteredStudentSerializer(serializers.ModelSerializer):
         model = UnregisteredStudent
         fields = [
             'id', 'first_name', 'last_name', 'class_level', 'national_code', 'phone', 'tuition_price', 'row_description',
-            'status', 'status_display', 'registered_at', 'registered_at_jalali',
+            'status', 'status_display', 'not_coming', 'registered_at', 'registered_at_jalali',
             'followup_count', 'last_followup_at_jalali', 'latest_level', 'followups',
             'submitted_by_name', 'term', 'term_title', 'claims_registered', 'claim_reviewed',
             'is_dropout', 'dropout_from_term', 'dropout_from_term_title',
@@ -525,34 +591,43 @@ class DebtorSerializer(serializers.ModelSerializer):
         if obj.pk in cache:
             return cache[obj.pk]
         from .models import UnregisteredStudent
-        code = getattr(obj.student, 'national_code', '') if obj.student_id else ''
-        if not code and obj.phone:
-            from accounts.models import User
-            users = list(User.objects.filter(
-                role='student', phone=obj.phone, first_name=obj.first_name, last_name=obj.last_name,
-            ).order_by('id')[:2])
-            if len(users) == 1:
-                code = users[0].national_code or ''
+        index = self.__dict__.get('_open_unregistered_index')
+        if index is None:
+            index = {'by_code': {}, 'by_phone_name': {}, 'by_uncoded_name': {}}
+            rows = UnregisteredStudent.objects.filter(
+                status=UnregisteredStudent.Status.TRACKING,
+            ).order_by('-created_at', '-id')
+            for row in rows:
+                row_code = _norm_digits(row.national_code)
+                row_phone = _norm_phone(row.phone)
+                row_name = _norm_name(row.first_name, row.last_name)
+                if row_code:
+                    index['by_code'].setdefault(row_code, []).append(row)
+                if row_phone and row_name:
+                    index['by_phone_name'].setdefault((row_phone, row_name), []).append(row)
+                if not row_code and not row_phone and row_name:
+                    index['by_uncoded_name'].setdefault(row_name, []).append(row)
+            self.__dict__['_open_unregistered_index'] = index
 
-        candidates = UnregisteredStudent.objects.filter(status=UnregisteredStudent.Status.TRACKING)
+        code = _norm_digits(getattr(obj.student, 'national_code', '') if obj.student_id else '')
+        phone = _norm_phone(obj.phone)
+        name = _norm_name(obj.first_name, obj.last_name)
         if code:
-            candidates = candidates.filter(national_code=code)
-        elif obj.phone:
-            candidates = candidates.filter(phone=obj.phone, first_name=obj.first_name, last_name=obj.last_name)
+            candidates = list(index['by_code'].get(code, []))
+            if not candidates and phone:
+                # کد ملی در یکی از دو فهرست خالی است؛ در آن حالت موبایل+نام کامل معیار تطبیق است.
+                candidates = [r for r in index['by_phone_name'].get((phone, name), []) if not _norm_digits(r.national_code)]
+        elif phone:
+            candidates = list(index['by_phone_name'].get((phone, name), []))
         else:
-            candidates = candidates.filter(phone='', national_code='', first_name=obj.first_name, last_name=obj.last_name)
+            candidates = list(index['by_uncoded_name'].get(name, []))
 
         if obj.term_id:
-            same_term = list(candidates.filter(term_id=obj.term_id).order_by('-created_at', '-id')[:2])
-            if len(same_term) == 1:
-                cache[obj.pk] = same_term[0]
-                return same_term[0]
-            if len(same_term) > 1 and not code:
-                cache[obj.pk] = None
-                return None
-        rows = list(candidates.order_by('-created_at', '-id')[:2])
-        # بدون کد ملی، فقط از یک تطبیق یکتا استفاده می‌کنیم تا دو هم‌نام ادغام نشوند.
-        match = rows[0] if len(rows) == 1 or (code and rows) else None
+            same_term = [r for r in candidates if r.term_id == obj.term_id]
+            if same_term:
+                candidates = same_term
+        # فهرست از جدیدترین مرتب شده؛ بدون کد ملی فقط تطبیق یکتا پذیرفته می‌شود.
+        match = candidates[0] if candidates and (code or len(candidates) == 1) else None
         cache[obj.pk] = match
         return match
 
@@ -673,7 +748,7 @@ class DebtorSerializer(serializers.ModelSerializer):
         model = Debtor
         fields = [
             'id', 'first_name', 'last_name', 'national_code', 'phone', 'class_level', 'debt_amount', 'description', 'row_description',
-            'status', 'status_display', 'settled_at', 'settled_at_jalali',
+            'status', 'status_display', 'settled_at', 'settled_at_jalali', 'not_coming',
             'followup_count', 'last_followup_at_jalali', 'followups',
             'term', 'term_title', 'claims_settled', 'claim_reviewed', 'created_at', 'created_at_jalali', 'updated_at',
             'student', 'awaiting_registration', 'carried_from_term', 'carried_from_term_title',

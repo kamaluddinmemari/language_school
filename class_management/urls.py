@@ -1,11 +1,11 @@
 from django.urls import path
-from .dropout_extract import DropoutExtractParseView, DropoutExtractComputeView, DropoutExtractCommitView, DropoutExtractFollowUpView, DropoutExtractListView, DropoutExtractListRefreshPreviewView, DropoutExtractListRefreshConfirmView, DropoutExtractRegisterOptionsView, DropoutExtractRegisterView, DropoutExtractBulkRegisterPreviewView, DropoutExtractBulkRegisterView, DropoutStatsView
+from .dropout_extract import DropoutExtractParseView, DropoutExtractComputeView, DropoutExtractCommitView, DropoutExtractFollowUpView, DropoutExtractListView, DropoutExtractListRefreshPreviewView, DropoutExtractListRefreshConfirmView, DropoutExtractRegisterOptionsView, DropoutExtractRegisterView, DropoutExtractBulkRegisterPreviewView, DropoutExtractBulkRegisterView, DropoutStatsView, DropoutExtractReferenceView
 from .room_placement import PhysicalRoomsView, AutoPlaceRoomsView, SeatShortageView
 from .graduation_settings import GraduationLevelSettingView, AccessFormConfigView, AccessFormTemplateView
 from .views import (
     ClassSlotListView, ClassSlotDetailView, SwapClassLocationView, TransferClassLocationView, AllocateClassesView,
     ConfirmOverflowView, EnrollmentPulseView, StudentClassSearchView, TransferSurplusView, SpinOffSurplusView, ClassStatsView,
-    BulkCreatePhysicalClassesView, ClassSlotEnrollView, ClassSlotExcelImportView, ClassSlotUnenrollView, ClassSlotRosterView, TermRegisteredPeopleView,
+    BulkCreatePhysicalClassesView, ClassSlotEnrollView, ClassSlotExcelImportView, ClassSlotUnenrollView, ClassSlotRosterView, TermRegisteredPeopleView, TermWaitingListView,
     TuitionSuggestionView, TuitionSettingListView, TuitionSettingDetailView, DiscountedPersonListView, DiscountedPersonDetailView,
     TermOverviewView, AttendanceStatusView, RefundEnrollmentView, TransferEnrollmentOptionsView, TransferEnrollmentView, CreditToWalletView,
     TermSettingView, ConfirmCarryoverEnrollmentView, MarkCarryoverEnrollmentView, GraduatedStudentsView, GraduatedStudentLookupView, GraduateSafirArchiveView,
@@ -51,6 +51,7 @@ urlpatterns = [
     path('class-management/slots/<int:pk>/enroll/<int:student_id>/mark-carryover/', MarkCarryoverEnrollmentView.as_view(), name='class_slot_mark_carryover'),
     path('class-management/slots/<int:pk>/enroll/<int:student_id>/to-wallet/', CreditToWalletView.as_view(), name='class_slot_to_wallet'),
     path('class-management/registered-people/', TermRegisteredPeopleView.as_view(), name='term_registered_people'),
+    path('class-management/term-waiting/', TermWaitingListView.as_view(), name='term_waiting_list'),
     path('class-management/slots/<int:pk>/roster/', ClassSlotRosterView.as_view(), name='class_slot_roster'),
     path('class-management/slots/<int:pk>/tuition-suggestion/', TuitionSuggestionView.as_view(), name='class_tuition_suggestion'),
     path('class-management/bulk-create/', BulkCreatePhysicalClassesView.as_view(), name='class_bulk_create'),
@@ -90,6 +91,7 @@ urlpatterns = [
     path('class-management/dropout-extract/compute/', DropoutExtractComputeView.as_view(), name='dropout_extract_compute'),
     path('class-management/dropout-extract/commit/', DropoutExtractCommitView.as_view(), name='dropout_extract_commit'),
     path('class-management/dropout-extract/lists/', DropoutExtractListView.as_view(), name='dropout_extract_lists'),
+    path('class-management/dropout-extract/reference/', DropoutExtractReferenceView.as_view(), name='dropout_extract_reference'),
     path('class-management/dropout-extract/lists/refresh-preview/', DropoutExtractListRefreshPreviewView.as_view(), name='dropout_extract_list_refresh_preview'),
     path('class-management/dropout-extract/lists/refresh-confirm/', DropoutExtractListRefreshConfirmView.as_view(), name='dropout_extract_list_refresh_confirm'),
     path('class-management/dropout-extract/register-options/', DropoutExtractRegisterOptionsView.as_view(), name='dropout_extract_register_options'),

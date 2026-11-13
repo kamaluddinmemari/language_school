@@ -352,6 +352,9 @@ class ClassRequest(models.Model):
     # جلسات از ابتدا هستند) تغییر کنند — تا بشود اختلاف را با آن مقدار اولیه مقایسه کرد.
     @property
     def cancelled_session_count(self):
+        prefetched = getattr(self, '_prefetched_objects_cache', {}).get('sessions')
+        if prefetched is not None:  # در لیست‌ها جلسات یک‌جا خوانده شده‌اند؛ کوئری اضافه نزن
+            return sum(1 for session in prefetched if session.is_cancelled)
         return self.sessions.filter(is_cancelled=True).count()
 
     @property

@@ -228,9 +228,11 @@ class UnregisteredStudentListView(generics.ListCreateAPIView):
         if term_id:
             from class_management.models import Term
             from django.db.models import Q
+            if not str(term_id).isdigit():
+                return qs.none()
             try:
-                term = Term.objects.get(pk=term_id)
-            except Term.DoesNotExist:
+                term = Term.objects.get(pk=int(term_id))
+            except (Term.DoesNotExist, ValueError, TypeError):
                 return qs.none()
             earlier_terms = Term.objects.filter(
                 Q(year__lt=term.year) | Q(year=term.year, term_number__lt=term.term_number)
@@ -471,6 +473,10 @@ class UnregisteredStudentRegisterView(APIView):
                     transaction.set_rollback(True)
                     return Response({'error': error}, status=status.HTTP_400_BAD_REQUEST)
                 registered_class = slot.number
+                # پشتیبان صریح در همین مسیر: همهٔ ردیف‌های فعال این هویت در ترم جاری
+                # و ترم‌های قبلی را هم‌زمان ببند؛ به اجرای سیگنال وابسته نباشد.
+                from .models import auto_mark_unregistered_registered
+                auto_mark_unregistered_registered(real_student, term_id=slot.term_id, slot_id=slot.pk)
             student.status = UnregisteredStudent.Status.REGISTERED
             student.registered_at = timezone.now()
             if slot_id and tuition_amount:
@@ -686,8 +692,10 @@ def _term_scoped_stats_qs(qs, term_id, resolved_status, archive=False):
     """آمار هم‌دامنه با لیست: ترم انتخاب‌شده + موارد حل‌نشده‌ی ترم‌های قبل (مثل UnregisteredStudentListView/DebtorListView)."""
     if not term_id:
         return qs
+    if not str(term_id).isdigit():
+        return qs.none()
     from class_management.models import Term
-    term = Term.objects.filter(pk=term_id).first()
+    term = Term.objects.filter(pk=int(term_id)).first()
     if not term:
         return qs.none()
     if archive:
@@ -710,12 +718,17 @@ class UnregisteredStudentStatsView(APIView):
         import jdatetime
         from class_management.carryover import _tuition_for_level
 
+        level_price = {}  # شهریهٔ هر سطح فقط یک‌بار محاسبه شود
+
         def potential_price(s):
             # اگر شهریه‌ی پیشنهادی ثبت نشده باشد، شهریه‌ی تعریف‌شده‌ی همان سطح محاسبه می‌شود
             if s.tuition_price:
                 return s.tuition_price
             try:
-                return int(_tuition_for_level(s.latest_level or s.class_level) or 0)
+                level = s.latest_level or s.class_level
+                if level not in level_price:
+                    level_price[level] = int(_tuition_for_level(level) or 0)
+                return level_price[level]
             except Exception:
                 return 0
         return Response({
@@ -850,19 +863,22 @@ class DebtorListView(generics.ListCreateAPIView):
         if term_id:
             from class_management.models import Term
             from django.db.models import Q
-            try:
-                term = Term.objects.get(pk=term_id)
-            except Term.DoesNotExist:
+            if not str(term_id).isdigit():
                 return qs.none()
-            earlier_terms = Term.objects.filter(
+            try:
+                term = Term.objects.get(pk=int(term_id))
+            except (Term.DoesNotExist, ValueError, TypeError):
+                return qs.none()
+            previous_term = Term.objects.filter(
                 Q(year__lt=term.year) | Q(year=term.year, term_number__lt=term.term_number)
-            )
+            ).order_by('-year', '-term_number').first()
             if str(self.request.query_params.get('archive') or '').lower() in ('1', 'true', 'yes'):
                 qs = qs.filter(term_id=term_id)
             else:
                 qs = qs.filter(
                     Q(term_id=term_id) |
-                    (Q(term__in=earlier_terms) & ~Q(status=Debtor.Status.SETTLED))
+                    (Q(term_id=previous_term.pk) & ~Q(status=Debtor.Status.SETTLED)
+                     if previous_term else Q(pk__in=[]))
                 )
         return qs
 

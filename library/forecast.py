@@ -206,12 +206,14 @@ def forecast_for_book(book, ctx):
     return len(students), levels
 
 
-def available_levels(term):
+def available_levels(term, ctx=None):
     """سطح‌های قابل انتخاب برای ملاک سفارش — از «سطوح استاندارد» سامانه؛ با تعداد ثبت‌نام‌شده‌ی ترم ملاک."""
     from level_tests.models import StandardLevel
     counts = {}
     if term:
-        ctx = build_context(term.id, mode='registered')
+        # اگر ملاک فعلی همان «ثبت‌نام‌شده‌ها» و همان ترم است، از شمارش آماده استفاده می‌شود (بدون خواندن دوباره ثبت‌نام‌ها)
+        if not (ctx and ctx.get('mode') == 'registered' and ctx.get('term') and ctx['term'].id == term.id):
+            ctx = build_context(term.id, mode='registered')
         counts = {k: len(v) for k, v in ctx['index'].items()}
     group_labels = dict(StandardLevel.AgeGroup.choices)
     out = []

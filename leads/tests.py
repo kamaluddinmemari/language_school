@@ -160,13 +160,22 @@ class NationalCodeIdentityTests(TestCase):
             first_name='رها', last_name='مقدسی', phone='09120000077',
             national_code='2222222222', class_level='A2', term=self.term,
         )
+        previous_term = Term.objects.create(
+            year=1404, term_number=3, start_date=date(2025, 12, 21), end_date=date(2026, 3, 20),
+        )
+        previous_row = UnregisteredStudent.objects.create(
+            first_name='رها', last_name='مقدسی', phone='09120000077',
+            national_code='1111111111', class_level='A1', term=previous_term,
+        )
 
         auto_mark_unregistered_registered(self.registered, term_id=self.term.pk, slot_id=self.slot.pk)
 
         registered_row.refresh_from_db()
         other_row.refresh_from_db()
+        previous_row.refresh_from_db()
         self.assertEqual(registered_row.status, UnregisteredStudent.Status.REGISTERED)
         self.assertEqual(other_row.status, UnregisteredStudent.Status.TRACKING)
+        self.assertEqual(previous_row.status, UnregisteredStudent.Status.REGISTERED)
 
     def test_resolve_and_sync_do_not_fallback_to_shared_phone_when_code_is_given(self):
         record = UnregisteredStudent(
