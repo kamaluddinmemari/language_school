@@ -4,7 +4,7 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from django.utils import timezone
-from django.db.models import Q
+from django.db.models import Q, Count, Sum
 from .models import NewLead, NewLeadFollowup, UnregisteredStudent, UnregisteredStudentFollowup, DropoutFollowup, Debtor, DebtorFollowup, DiscountedPerson, build_identity_key, build_person_key, get_current_term
 from .serializers import (
     NewLeadSerializer,
@@ -41,6 +41,69 @@ def purge_old_archives():
 
 
 
+def _registered_class_map(leads):
+    """
+    کلاس مقصدِ افرادِ «ثبت‌نام شد» لیست انتظار (از هر راهی: ثبت در کلاس، ثبت‌نام مستقیم، اپ، ...):
+    دانش‌آموزِ متناظر سرنخ پیدا می‌شود و آخرین ثبت‌نامِ قطعیِ او در ترمِ همان سرنخ خوانده می‌شود.
+    خروجی: {lead_id: {number, level, day, time_slot, teacher}}؛ اگر کلاسی پیدا نشد، کلیدی برای آن سرنخ نیست.
+    """
+    from class_management.models import ClassSlotEnrollment
+    result = {}
+    for lead in leads:
+        try:
+            student = _new_lead_student(lead, create=False)
+            if not student:
+                continue
+            qs = ClassSlotEnrollment.objects.filter(student=student).select_related('class_slot').exclude(is_carryover=True, carryover_confirmed=False)
+            if lead.term_id:
+                qs = qs.filter(class_slot__term_id=lead.term_id)
+            enrollment = qs.order_by('-id').first()
+            if not enrollment:
+                continue
+            slot = enrollment.class_slot
+            result[lead.id] = {
+                'class_slot': slot.id, 'number': slot.number, 'level': slot.assigned_level or '',
+                'day': getattr(slot, 'day_type_display', None) or slot.get_day_type_display(),
+                'time_slot': slot.time_slot or '', 'teacher': slot.teacher_name or '',
+            }
+        except Exception:
+            continue
+    return result
+
+
+class NewLeadTermStatsView(APIView):
+    """GET: آمار ورودی‌های لیست انتظار به تفکیک ترم — کل ورودی، ثبت‌نام‌شده، در انتظار، کنسل، بیعانه‌دار و جمع بیعانه."""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        if not can_edit_menu(request.user, "new-leads"):
+            return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
+        from class_management.models import Term
+        rows = list(NewLead.objects.order_by().values('term_id').annotate(
+            total=Count('id'),
+            registered=Count('id', filter=Q(status=NewLead.Status.REGISTERED)),
+            pending=Count('id', filter=Q(status=NewLead.Status.PENDING)),
+            cancelled=Count('id', filter=Q(status=NewLead.Status.CANCELLED)),
+            with_deposit=Count('id', filter=Q(deposit_amount__gt=0)),
+            deposit_sum=Sum('deposit_amount', filter=Q(deposit_amount__gt=0)),
+        ))
+        terms = {t.id: t for t in Term.objects.filter(id__in=[r['term_id'] for r in rows if r['term_id']])}
+        out = []
+        for r in rows:
+            term = terms.get(r['term_id'])
+            out.append({
+                'term_id': r['term_id'], 'term_title': term.title if term else 'بدون ترم',
+                '_sort': (term.year * 100 + term.term_number) if term else -1,
+                'total': r['total'], 'registered': r['registered'], 'pending': r['pending'], 'cancelled': r['cancelled'],
+                'with_deposit': r['with_deposit'], 'deposit_sum': r['deposit_sum'] or 0,
+                'registered_percent': round(r['registered'] * 100 / r['total'], 1) if r['total'] else 0,
+            })
+        out.sort(key=lambda x: -x['_sort'])
+        for x in out:
+            x.pop('_sort')
+        return Response(out)
+
+
 class NewLeadListView(generics.ListCreateAPIView):
     permission_classes = [IsAuthenticated]
     serializer_class = NewLeadSerializer
@@ -74,6 +137,8 @@ class NewLeadListView(generics.ListCreateAPIView):
                 by_phone.setdefault(phone, []).append(t)
         context['level_test_by_national'] = by_national
         context['level_test_by_phone'] = by_phone
+        if self.request.method == 'GET':
+            context['registered_class_map'] = _registered_class_map(self.get_queryset().filter(status=NewLead.Status.REGISTERED))
         return context
 
     def create(self, request, *args, **kwargs):

@@ -5,7 +5,7 @@ import jdatetime
 from django.db.models import Q
 from django.utils import timezone
 
-from .models import ClassAttendance, ClassSlotEnrollment, TeacherSessionEvent, infer_age_group_from_level
+from .models import ClassAttendance, ClassSlot, ClassSlotEnrollment, TeacherSessionEvent, Term, infer_age_group_from_level
 
 
 DEFAULT_SESSION_COUNT = 15
@@ -184,14 +184,40 @@ def roster_attendance_payload(slot, session_count=DEFAULT_SESSION_COUNT):
         .select_related('student')
         .order_by('created_at')
     )
-    other_current_class_ids = set()
+    confirmed_current_ids = set()
     if slot.term_id:
-        other_current_class_ids = set(ClassSlotEnrollment.objects.filter(
+        confirmed_current_ids = set(ClassSlotEnrollment.objects.filter(
             class_slot__term_id=slot.term_id,
             payment_verified=True,
         ).filter(
             Q(is_carryover=False) | Q(carryover_confirmed=True)
-        ).exclude(class_slot_id=slot.id).values_list('student_id', flat=True))
+        ).values_list('student_id', flat=True))
+    # انتقال به «پیگیری ثبت‌نام‌نشده‌ها» باید فرد را از فهرست زرد همین صفحه خارج کند؛
+    # رکورد پیگیری در leads باقی می‌ماند و فقط نمایش رستر حذف می‌شود.
+    from leads.models import UnregisteredStudent
+    transferred_people = set(UnregisteredStudent.objects.filter(
+        term_id=slot.term_id, misplaced_from_slot=slot,
+        is_misplaced=True, status=UnregisteredStudent.Status.TRACKING,
+    ).values_list('first_name', 'last_name', 'national_code', 'phone'))
+
+    # فردی که «در کلاس حضور دارد ولی ثبت‌نام نکرده» به پیگیری رفته: در رستر می‌ماند (هنوز سر کلاس می‌آید)
+    # ولی با نشان «به لیست پیگیری منتقل شد» دیده می‌شود.
+    attending_transferred = set(UnregisteredStudent.objects.filter(
+        term_id=slot.term_id, reported_slot=slot,
+        attendance_transfer='attending', status=UnregisteredStudent.Status.TRACKING,
+    ).values_list('first_name', 'last_name', 'national_code', 'phone'))
+
+    def _identity(student):
+        return (
+            student.first_name, student.last_name,
+            getattr(student, 'national_code', '') or '', getattr(student, 'phone', '') or '',
+        )
+
+    def was_transferred(student):
+        return _identity(student) in transferred_people
+
+    def attending_in_followup(student):
+        return _identity(student) in attending_transferred
     attendance_by_student = {}
     if enrolled and sessions:
         attendance_rows = ClassAttendance.objects.filter(
@@ -203,13 +229,12 @@ def roster_attendance_payload(slot, session_count=DEFAULT_SESSION_COUNT):
             attendance_by_student.setdefault(row.student_id, {})[(row.date.isoformat(), row.session_in_day)] = row
 
     roster = []
+    roster_student_ids = set()
     for enrollment in enrolled:
         student = enrollment.student
-        needs_follow_up = bool(
-            enrollment.is_carryover
-            and not enrollment.carryover_confirmed
-            and student.id not in other_current_class_ids
-        )
+        needs_follow_up = student.id not in confirmed_current_ids
+        if needs_follow_up and was_transferred(student):
+            continue
         rows = []
         for item in sessions:
             record = attendance_by_student.get(student.id, {}).get((item['date'], item['session_in_day']))
@@ -234,8 +259,67 @@ def roster_attendance_payload(slot, session_count=DEFAULT_SESSION_COUNT):
             'registration_status': 'needs_follow_up' if needs_follow_up else 'registered',
             'student_name_color': '#6c757d' if needs_follow_up else '#212529',
             'student_row_color': '#e9ecef' if needs_follow_up else '#ffffff',
+            'is_previous_only': False,
+            'followup_transfer_available': needs_follow_up,
+            'registration_note': 'این فرد هنوز ثبت‌نام نکرده' if needs_follow_up else '',
+            'followup_transferred': bool(needs_follow_up and attending_in_followup(student)),
             'sessions': rows,
         })
+        roster_student_ids.add(student.id)
+
+    # دانش‌آموزان کلاس متناظر ترم قبل نیز در رستر جاری دیده می‌شوند؛ این کار مخصوصاً
+    # برای افرادی لازم است که هنوز هیچ رکوردی در ترم جاری ندارند و انتقال خودکار برایشان
+    # انجام نشده است. ابتدا ارتباط صریحِ کلاسِ کپی‌شده را ترجیح می‌دهیم و سپس تطبیق شماره/روز/ساعت را.
+    previous_slot = slot.carried_from_slot
+    if previous_slot is None and slot.term_id:
+        previous_term = Term.objects.filter(
+            Q(year__lt=slot.term.year)
+            | Q(year=slot.term.year, term_number__lt=slot.term.term_number)
+        ).order_by('-year', '-term_number').first()
+        if previous_term:
+            previous_slot = ClassSlot.objects.filter(
+                term=previous_term, number=slot.number, day_type=slot.day_type,
+                time_slot=slot.time_slot, is_online=slot.is_online,
+            ).order_by('id').first()
+    if previous_slot:
+        previous_students = ClassSlotEnrollment.objects.filter(
+            class_slot=previous_slot, payment_verified=True,
+        ).select_related('student').order_by('created_at')
+        for enrollment in previous_students:
+            student = enrollment.student
+            if student.id in roster_student_ids:
+                continue
+            rows = [{
+                'session_number': item['session_number'],
+                'date': item['date'],
+                'date_jalali': item['date_jalali'],
+                'status': 'unmarked',
+                'event_status': event_status_by_session.get((item['session_number'], item['date']), ''),
+                'note': '',
+            } for item in sessions]
+            needs_follow_up = student.id not in confirmed_current_ids
+            if needs_follow_up and was_transferred(student):
+                continue
+            roster.append({
+                'student_id': student.id,
+                'student_name': student.get_full_name().strip(),
+                'student_national_code': getattr(student, 'national_code', '') or '',
+                'student_phone': getattr(student, 'phone', '') or '',
+                'enrollment_id': None,
+                'is_carryover': False,
+                'carryover_confirmed': False,
+                'needs_follow_up': needs_follow_up,
+                'needs_follow_up_label': 'شهریه بدهکار — ثبت‌نام قطعی نشده' if needs_follow_up else '',
+                'registration_status': 'needs_follow_up' if needs_follow_up else 'registered',
+                'student_name_color': '#adb5bd' if needs_follow_up else '#212529',
+                'student_row_color': '#fff3cd' if needs_follow_up else '#ffffff',
+                'is_previous_only': True,
+                'followup_transfer_available': needs_follow_up,
+                'registration_note': 'این فرد هنوز ثبت‌نام نکرده' if needs_follow_up else '',
+                'followup_transferred': bool(needs_follow_up and attending_in_followup(student)),
+                'sessions': rows,
+            })
+            roster_student_ids.add(student.id)
 
     warning = ''
     if not slot.term_id:

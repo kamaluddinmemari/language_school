@@ -303,6 +303,14 @@ class UnregisteredStudent(models.Model):
         'class_management.ClassSlot', on_delete=models.SET_NULL, null=True, blank=True, related_name='+',
     )
 
+    # منشأ انتقال از دکمه‌های «حضور و غیاب» در اپ مدیریت کلاس‌ها:
+    #   attending = فرد سر کلاس می‌آید ولی ثبت‌نام نکرده | not_in_class = فرد اصلاً در این کلاس نیست
+    ATTENDANCE_TRANSFER_CHOICES = [('', 'خیر'), ('attending', 'در کلاس حضور دارد'), ('not_in_class', 'اصلاً در این کلاس نیست')]
+    attendance_transfer = models.CharField(
+        max_length=14, blank=True, default='', choices=ATTENDANCE_TRANSFER_CHOICES,
+        help_text='اگر از دکمه‌های حضور و غیابِ اپ به پیگیری منتقل شده باشد، نوع انتقال',
+    )
+
     submitted_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='submitted_unregistered_students')
     assigned_to = models.ForeignKey(
         User, on_delete=models.SET_NULL, null=True, blank=True, related_name='assigned_unregistered_students',

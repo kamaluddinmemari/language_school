@@ -29,6 +29,11 @@ class NewLeadSerializer(serializers.ModelSerializer):
     age = serializers.ReadOnlyField()
     level_test = serializers.SerializerMethodField()
     assigned_to_name = serializers.SerializerMethodField()
+    registered_class = serializers.SerializerMethodField()
+
+    def get_registered_class(self, obj):
+        """کلاس مقصدِ ثبت‌نام قطعی (فقط برای «ثبت‌نام شد»ها؛ از نگاشت پیش‌محاسبه‌شدهٔ ویوی لیست)."""
+        return (self.context.get('registered_class_map') or {}).get(obj.id)
 
     def get_assigned_to_name(self, obj):
         u = obj.assigned_to
@@ -88,7 +93,7 @@ class NewLeadSerializer(serializers.ModelSerializer):
             'followup1_at', 'followup1_at_jalali', 'followup1_by_name',
             'followup2_at', 'followup2_at_jalali', 'followup2_by_name',
             'registered_at', 'registered_at_jalali', 'cancelled_at', 'cancelled_at_jalali', 'no_response',
-            'deposit_amount', 'deposit_paid_at', 'deposit_paid_at_jalali',
+            'deposit_amount', 'deposit_paid_at', 'deposit_paid_at_jalali', 'registered_class',
             'description', 'followups',
             'needs_level_test', 'needs_level_test_marked_at', 'needs_level_test_marked_at_jalali',
             'created_at', 'created_at_jalali', 'updated_at', 'level_test',
@@ -515,12 +520,12 @@ class UnregisteredStudentSerializer(serializers.ModelSerializer):
             'followup_count', 'last_followup_at_jalali', 'latest_level', 'followups',
             'submitted_by_name', 'term', 'term_title', 'claims_registered', 'claim_reviewed',
             'is_dropout', 'dropout_from_term', 'dropout_from_term_title',
-            'is_misplaced', 'misplaced_from_slot', 'misplaced_class_number',
+            'is_misplaced', 'misplaced_from_slot', 'misplaced_class_number', 'attendance_transfer',
             'also_debtor', 'also_debtor_amount', 'assigned_to', 'assigned_to_name', 'gender', 'has_current_class',
             'class_slot', 'class_slot_number', 'class_slot_level', 'class_slot_day', 'class_slot_time', 'class_slot_teacher', 'class_status', 'class_status_text', 'class_true_text',
             'created_at', 'created_at_jalali', 'updated_at',
         ]
-        read_only_fields = ['status', 'registered_at', 'created_at', 'updated_at', 'is_dropout', 'dropout_from_term', 'is_misplaced', 'misplaced_from_slot']
+        read_only_fields = ['status', 'registered_at', 'created_at', 'updated_at', 'is_dropout', 'dropout_from_term', 'is_misplaced', 'misplaced_from_slot', 'attendance_transfer']
 
     def get_submitted_by_name(self, obj):
         if not obj.submitted_by:

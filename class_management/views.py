@@ -5843,9 +5843,15 @@ class RosterNotInClassView(APIView):
         if not _user_can_manage_roster(request.user, slot):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         enrollment = ClassSlotEnrollment.objects.filter(class_slot=slot, student_id=student_id).select_related('student').first()
-        if not enrollment:
-            return Response({'error': 'این دانش‌آموز در لیست این کلاس نیست'}, status=status.HTTP_404_NOT_FOUND)
-        student = enrollment.student
+        if enrollment:
+            student = enrollment.student
+        else:
+            # رستر حضور و غیاب می‌تواند دانش‌آموز کلاس متناظر ترم قبل را هم نمایش دهد؛
+            # برای این ردیف‌ها هنوز ثبت‌نام جاری وجود ندارد، اما هویت از قبل در سامانه معتبر است.
+            from django.contrib.auth import get_user_model
+            student = get_user_model().objects.filter(pk=student_id, role='student').first()
+            if not student:
+                return Response({'error': 'این دانش‌آموز در لیست این کلاس یا کلاس متناظر ترم قبل نیست'}, status=status.HTTP_404_NOT_FOUND)
         existing = UnregisteredStudent.objects.filter(
             term=slot.term, is_misplaced=True, misplaced_from_slot=slot, status=UnregisteredStudent.Status.TRACKING,
             first_name=student.first_name, last_name=student.last_name,
@@ -5864,6 +5870,111 @@ class RosterNotInClassView(APIView):
         except IntegrityError:
             return Response({'error': 'این فرد قبلاً با همین مشخصات در ثبت‌نام‌نشده‌های این ترم ثبت شده است'}, status=status.HTTP_409_CONFLICT)
         return Response({'message': 'به ثبت‌نام‌نشده‌ها منتقل شد', 'id': item.id, 'already': False}, status=status.HTTP_201_CREATED)
+
+
+FOLLOWUP_NOT_IN_CLASS_NOTE = 'فرد اصلاً در این کلاس نیست'
+
+
+def _slot_followup_details(slot):
+    """مشخصات کامل کلاس (شماره، سطح، روز، ساعت، استاد) برای درج زیر ردیف پیگیری."""
+    day = getattr(slot, 'day_type_display', None) or slot.get_day_type_display() or '—'
+    return ' | '.join([
+        f'کلاس {slot.number}',
+        f'سطح: {slot.assigned_level or "نامشخص"}',
+        f'روز: {day}',
+        f'ساعت: {slot.time_slot or "نامشخص"}',
+        f'استاد: {slot.teacher_name or "نامشخص"}',
+    ])
+
+
+class RosterFollowupTransferView(APIView):
+    """
+    انتقال یک فرد از لیست حضور و غیابِ کلاس (اپ مدیریت کلاس‌ها) به «پیگیری ثبت‌نام‌نشده‌ها». دو حالت:
+      attending    = فرد سر کلاس حضور دارد و می‌آید ولی هنوز ثبت‌نام نکرده.
+      not_in_class = فرد اصلاً در این کلاس نیست؛ مشخصات کامل کلاس (ساعت، سطح، روز، استاد) زیر ردیفش در
+                     پیگیری درج می‌شود و برچسب «جابجا شود» می‌گیرد.
+    در هر دو حالت فرد خودکار از فهرست پایینیِ «منتظر ثبت‌نام» (TermWaitingListView) حذف می‌شود، چون در
+    فهرست بالاییِ پیگیری ثبت‌نام‌نشده‌ها با برچسب قرمز «منتقل‌شده از اپ» قرار گرفته است.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        from leads.models import UnregisteredStudent
+        slot_id = request.data.get('class_slot')
+        student_id = request.data.get('student_id')
+        mode = str(request.data.get('mode') or '').strip()
+        if not slot_id or not student_id:
+            return Response({'error': 'class_slot و student_id الزامی هستند'}, status=status.HTTP_400_BAD_REQUEST)
+        if mode not in ('attending', 'not_in_class'):
+            return Response({'error': 'نوع انتقال نامعتبر است'}, status=status.HTTP_400_BAD_REQUEST)
+        slot = get_object_or_404(ClassSlot.objects.select_related('term'), pk=slot_id)
+        if not _user_can_manage_roster(request.user, slot):
+            return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
+        enrollment = ClassSlotEnrollment.objects.filter(class_slot=slot, student_id=student_id).select_related('student').first()
+        student = enrollment.student if enrollment else get_user_model().objects.filter(pk=student_id, role='student').first()
+        if not student:
+            return Response({'error': 'این دانش‌آموز در لیست این کلاس یا کلاس متناظر ترم قبل نیست'}, status=status.HTTP_404_NOT_FOUND)
+
+        from leads.models import build_person_key
+        full_name = f'{student.first_name} {student.last_name}'.strip()
+        person_prefix = build_person_key(student.national_code or '', student.phone or '', student.first_name, student.last_name) + '|level:'
+        existing = UnregisteredStudent.objects.filter(
+            term=slot.term, identity_key__startswith=person_prefix,
+        ).order_by('-created_at', '-id').first()
+        note = f'{FOLLOWUP_NOT_IN_CLASS_NOTE} — {_slot_followup_details(slot)}' if mode == 'not_in_class' else ''
+        message = f'«{full_name}» به لیست پیگیری منتقل شد'
+
+        try:
+            with transaction.atomic():
+                if existing:
+                    if existing.status == UnregisteredStudent.Status.REGISTERED:
+                        return Response({'message': f'«{full_name}» قبلاً ثبت‌نام شده است', 'id': existing.id, 'already': True, 'mode': mode})
+                    already = existing.attendance_transfer == mode
+                    existing.attendance_transfer = mode
+                    if mode == 'attending':
+                        existing.reported_slot = slot
+                    else:
+                        existing.is_misplaced = True
+                        existing.misplaced_from_slot = slot
+                        if FOLLOWUP_NOT_IN_CLASS_NOTE not in (existing.row_description or ''):
+                            existing.row_description = f'{existing.row_description}\n{note}'.strip()
+                    existing.save()
+                    return Response({'message': message, 'id': existing.id, 'already': already, 'mode': mode})
+                item = UnregisteredStudent.objects.create(
+                    first_name=student.first_name, last_name=student.last_name,
+                    class_level=slot.assigned_level or 'نامشخص', national_code=student.national_code or '',
+                    phone=student.phone or '', term=slot.term,
+                    gender=student.gender or {'girls': 'female', 'boys': 'male'}.get(slot.gender, ''),
+                    submitted_by=request.user, attendance_transfer=mode, row_description=note,
+                    **({'reported_slot': slot} if mode == 'attending' else {'is_misplaced': True, 'misplaced_from_slot': slot}),
+                )
+        except IntegrityError:
+            return Response({'error': 'این فرد قبلاً با همین مشخصات در ثبت‌نام‌نشده‌های این ترم ثبت شده است'}, status=status.HTTP_409_CONFLICT)
+        return Response({'message': message, 'id': item.id, 'already': False, 'mode': mode}, status=status.HTTP_201_CREATED)
+
+
+class FollowupTransferPulseView(APIView):
+    """
+    GET [?after_id=N]: افرادی که از حضور و غیابِ اپ به پیگیری ثبت‌نام‌نشده‌ها منتقل شده‌اند — برای هشدار صوتی و
+    زیرنویس «فرد با موفقیت اضافه شد» در سیستم اصلی (پنل وب). بدون after_id فقط max_id (نقطهٔ شروع) برمی‌گردد.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        if not can_edit_menu(request.user, 'followups'):
+            return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
+        from leads.models import UnregisteredStudent
+        qs = UnregisteredStudent.objects.exclude(attendance_transfer='')
+        max_id = qs.aggregate(m=Max('id'))['m'] or 0
+        items = []
+        after = str(request.query_params.get('after_id') or '')
+        if after.isdigit():
+            for u in qs.filter(id__gt=int(after)).order_by('id')[:10]:
+                items.append({
+                    'id': u.id, 'name': f'{u.first_name} {u.last_name}'.strip(), 'kind': u.attendance_transfer,
+                    'by_me': u.submitted_by_id == request.user.id,
+                })
+        return Response({'max_id': max_id, 'items': items})
 
 
 class RosterAttendanceView(APIView):
@@ -6983,6 +7094,127 @@ class TermRegisteredPeopleView(APIView):
 
 
 # ---------------------------------------------------------------------------
+# تحلیل «ورودی‌های جدید» و «جذب ریزشی» به تفکیک ترم (از ترم اول تا امروز)
+# ---------------------------------------------------------------------------
+def _intake_keys(row):
+    """کلیدهای هویتی یک ردیف برای تطبیق فرد بین ترم‌ها: کد ملی، موبایل+نام (و فقط در نبود هر دو، نام)."""
+    nc = _wl_digits(row.get('national_code'))
+    ph = _wl_digits(row.get('phone'))[-10:]
+    nm = _wl_name(row.get('student_name'))
+    keys = []
+    if nc:
+        keys.append(f'nc:{nc}')
+    if ph and nm:
+        keys.append(f'ph:{ph}|{nm}')
+    if not keys and nm:
+        keys.append(f'nm:{nm}')
+    return keys
+
+
+def _intake_person(row, term, **extra):
+    data = {
+        'student_name': row.get('student_name') or '', 'national_code': row.get('national_code') or '', 'phone': row.get('phone') or '',
+        'level': row.get('level') or '', 'class_number': row.get('class_number'), 'day': row.get('day') or '', 'time': row.get('time') or '',
+        'teacher': row.get('teacher') or '', 'sources_text': row.get('sources_text') or '', 'registered_at': row.get('registered_at') or '',
+        'term_id': term.id, 'term_title': term.title,
+    }
+    data.update(extra)
+    return data
+
+
+class TermIntakeAnalyticsView(APIView):
+    """
+    GET ?mode=new|recovery — تحلیل ثبت‌نام قطعیِ همهٔ ترم‌ها (از ترم اول) با همان منبع یکپارچهٔ «ثبت‌نام‌شده‌ها»:
+      new      = ورودی جدید هر ترم: ثبت‌نام قطعی در آن ترم و «حداقل سه ترم متوالیِ قبلی حضور نداشته»
+                 (یا اصلاً سابقه نداشته). خروجی هر ترم + جمع تجمعی از ترم اول.
+      recovery = جذب ریزشی: فردی که در ترم T-2 قطعی بوده، در T-1 نبوده (فقط یک ترم)، و در T دوباره ثبت‌نام قطعی کرده.
+                 درصد = جذب‌شده‌ها ÷ همهٔ کسانی که یک ترم افتاده‌اند (فقط ترم T-2 بوده‌اند و T-1 نبوده‌اند).
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        if not (can_view_menu(request.user, 'class-management') or can_edit_menu(request.user, 'class-management')):
+            return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
+        mode = request.query_params.get('mode', 'new')
+        if mode not in ('new', 'recovery'):
+            return Response({'error': 'mode نامعتبر است'}, status=status.HTTP_400_BAD_REQUEST)
+
+        terms = list(Term.objects.order_by('year', 'term_number'))
+        per_term = []  # برای هر ترم: (ردیف‌های ثبت‌نام قطعی، ایندکس کلید → ردیف)
+        for term in terms:
+            rows = [r for r in build_term_registered_rows(term) if _wl_registration_state(r) == 'registered']
+            index = {}
+            for r in rows:
+                for k in _intake_keys(r):
+                    index.setdefault(k, r)
+            per_term.append((rows, index))
+
+        def find(i, row):
+            if i < 0 or i >= len(per_term):
+                return None
+            for k in _intake_keys(row):
+                hit = per_term[i][1].get(k)
+                if hit is not None:
+                    return hit
+            return None
+
+        out, cum_a, cum_b, cum_c = [], 0, 0, 0
+        if mode == 'new':
+            for i, term in enumerate(terms):
+                rows = per_term[i][0]
+                people, first_time = [], 0
+                for r in rows:
+                    if any(find(j, r) for j in (i - 1, i - 2, i - 3)):
+                        continue
+                    last = next((j for j in range(i - 4, -1, -1) if find(j, r)), None)
+                    if last is None:
+                        first_time += 1
+                        people.append(_intake_person(r, term, kind='جدید (برای اولین بار)', absent_terms=None))
+                    else:
+                        gap = i - last - 1
+                        people.append(_intake_person(r, term, kind=f'بازگشتی پس از {gap} ترم غیبت', absent_terms=gap,
+                                                     last_term_title=terms[last].title))
+                cum_a += len(people)
+                cum_b += first_time
+                cum_c += len(rows)
+                out.append({
+                    'term_id': term.id, 'term_title': term.title, 'registered_total': len(rows),
+                    'new_count': len(people), 'first_time_count': first_time, 'returning_count': len(people) - first_time,
+                    'percent_of_registered': round(len(people) * 100 / len(rows), 1) if rows else 0,
+                    'cumulative_new': cum_a, 'cumulative_first_time': cum_b, 'cumulative_registered_total': cum_c,
+                    'people': people,
+                })
+            return Response({'mode': 'new', 'terms': out, 'totals': {
+                'new_count': cum_a, 'first_time_count': cum_b, 'returning_count': cum_a - cum_b, 'registered_total': cum_c,
+            }})
+
+        for i, term in enumerate(terms):
+            if i < 2:
+                continue
+            pool = [r for r in per_term[i - 2][0] if not find(i - 1, r)]
+            people = []
+            for r in pool:
+                back = find(i, r)
+                if back:
+                    people.append(_intake_person(back, term, kind='جذب ریزشی', missed_term_title=terms[i - 1].title,
+                                                 base_term_title=terms[i - 2].title, base_level=r.get('level') or '',
+                                                 base_class_number=r.get('class_number')))
+            cum_a += len(pool)
+            cum_b += len(people)
+            out.append({
+                'term_id': term.id, 'term_title': term.title, 'missed_term_title': terms[i - 1].title, 'base_term_title': terms[i - 2].title,
+                'pool': len(pool), 'recovered': len(people), 'not_recovered': len(pool) - len(people),
+                'percent': round(len(people) * 100 / len(pool), 1) if pool else 0,
+                'cumulative_pool': cum_a, 'cumulative_recovered': cum_b,
+                'cumulative_percent': round(cum_b * 100 / cum_a, 1) if cum_a else 0,
+                'people': people,
+            })
+        return Response({'mode': 'recovery', 'terms': out, 'totals': {
+            'pool': cum_a, 'recovered': cum_b, 'percent': round(cum_b * 100 / cum_a, 1) if cum_a else 0,
+        }})
+
+
+# ---------------------------------------------------------------------------
 # لیست دقیق «منتظر ثبت‌نام» = ثبت‌نام‌شده‌های ترم قبل − ثبت‌نام‌شده‌های ترم جاری (از هر مسیر)
 # ---------------------------------------------------------------------------
 _PENDING_PAYMENT_SOURCE = 'ثبت‌نام اپ (در انتظار تأیید پرداخت)'
@@ -7155,8 +7387,29 @@ class TermWaitingListView(APIView):
             ).select_related('updated_by')
         }
 
+        # افرادی که از حضور و غیابِ اپ به «پیگیری ثبت‌نام‌نشده‌ها» منتقل شده‌اند (هنوز در حال پیگیری)، دیگر در این
+        # فهرست پایینی نیستند؛ فهرست بالایی پیگیری با برچسب قرمز آن‌ها را نگه می‌دارد.
+        from leads.models import UnregisteredStudent
+        moved_codes, moved_pn, moved_names = set(), set(), set()
+        for u in UnregisteredStudent.objects.filter(
+            term=current_term, status=UnregisteredStudent.Status.TRACKING,
+        ).exclude(attendance_transfer=''):
+            u_nc, u_ph, u_nm = _wl_digits(u.national_code), _wl_digits(u.phone)[-10:], _wl_name(f'{u.first_name} {u.last_name}')
+            if u_nc:
+                moved_codes.add(u_nc)
+            if u_ph and u_nm:
+                moved_pn.add((u_ph, u_nm))
+            if not u_nc and not u_ph and u_nm:
+                moved_names.add(u_nm)
+
+        def moved_to_followup(prev):
+            nc, ph, nm = _wl_digits(prev.get('national_code')), _wl_digits(prev.get('phone'))[-10:], _wl_name(prev.get('student_name'))
+            return bool((nc and nc in moved_codes) or (ph and nm and (ph, nm) in moved_pn) or (not nc and not ph and nm in moved_names))
+
         out, waiting_n, registered_n, pending_n = [], 0, 0, 0
         for prev in previous_rows:
+            if moved_to_followup(prev):
+                continue
             cur = current_match(prev)
             if cur is None or cur['_state'] == 'none':
                 state = 'waiting'; waiting_n += 1
