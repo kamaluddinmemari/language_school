@@ -2,7 +2,7 @@ from django.urls import path
 from .views import (
     PersonFinanceStatusView,
     NewLeadListView, NewLeadTermStatsView, NewLeadDetailView, NewLeadActionView, NewLeadRegisterView, NewLeadRegisterOptionsView,
-    UnregisteredStudentListView, UnregisteredStudentDetailView,
+    UnregisteredStudentListView, UnregisteredStudentDetailView, WaitingTransferView,
     UnregisteredStudentFollowupView, UnregisteredStudentRegisterView, UnregisteredStudentRegisterOptionsView, UnregisteredStudentStatsView,
     DropoutStudentListView, DropoutStudentFollowupView,
     DebtorListView, DebtorDetailView, DebtorFollowupView, DebtorSettleView, DebtorRegisterView, DebtorRegisterOptionsView, DebtorStatsView,
@@ -22,6 +22,7 @@ urlpatterns = [
     path('leads/new-leads/<int:pk>/', NewLeadDetailView.as_view(), name='new_lead_detail'),
     path('leads/new-leads/<int:pk>/<str:action>/', NewLeadActionView.as_view(), name='new_lead_action'),
 
+    path('leads/unregistered-students/from-waiting/', WaitingTransferView.as_view(), name='unregistered_from_waiting'),
     path('leads/unregistered-students/', UnregisteredStudentListView.as_view(), name='unregistered_student_list'),
     path('leads/unregistered-students/<int:pk>/', UnregisteredStudentDetailView.as_view(), name='unregistered_student_detail'),
     path('leads/unregistered-students/<int:pk>/followup/', UnregisteredStudentFollowupView.as_view(), name='unregistered_student_followup'),

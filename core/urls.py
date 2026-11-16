@@ -4,11 +4,13 @@ from django.conf import settings
 from django.conf.urls.static import static
 from rest_framework_simplejwt.views import TokenRefreshView
 from accounts.authentication import TrackedTokenObtainPairView
+from leads.views import SelectedWaitingTransferView
 
 urlpatterns = [
     path('admin/', admin.site.urls),
     path('api/token/', TrackedTokenObtainPairView.as_view(), name='token_obtain_pair'),
     path('api/token/refresh/', TokenRefreshView.as_view(), name='token_refresh'),
+    path('api/leads/waiting-list/transfer-selected/', SelectedWaitingTransferView.as_view(), name='waiting_list_transfer_selected_root'),
     path('api/', include('accounts.urls')),
     path('api/', include('classes.urls')),
     path('api/', include('notifications.urls')),

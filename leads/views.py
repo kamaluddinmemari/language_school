@@ -374,10 +374,13 @@ class UnregisteredStudentListView(generics.ListCreateAPIView):
         return qs
 
     def create(self, request, *args, **kwargs):
+        # انتقال گروهیِ «منتظر ثبت‌نام» روی همین مسیرِ همیشه‌موجود (بدون نیاز به مسیر تازه در urls.py)
+        if isinstance(request.data, dict) and request.data.get('bulk_from_waiting'):
+            return WaitingTransferView().post(request)
         from accounts.models import User
         from accounts.services import sync_student_from_lead
         from .models import get_current_term
-        if request.user.role not in User.TEACHER_LIKE_ROLES and request.user.role not in ('admin', 'office'):
+        if request.user.role not in User.TEACHER_LIKE_ROLES and request.user.role not in ('admin', 'office', 'employee') and not can_edit_menu(request.user, 'followups'):
             return Response({'error': 'فقط استاد یا مدیر می‌تواند ثبت کند'}, status=status.HTTP_403_FORBIDDEN)
         data = request.data.copy()
         confirmed = str(data.pop('confirm_new_term', '')).lower() in ('1', 'true', 'yes')
@@ -2066,3 +2069,74 @@ class EmployeeFollowupTermListView(APIView):
             }
             for term in Term.objects.all().order_by('-start_date', '-id')
         ])
+
+
+class WaitingTransferView(APIView):
+    """
+    انتقال گروهیِ «منتظر ثبت‌نام» ← «پیگیری ثبت‌نام‌نشده‌ها» در یک درخواست.
+    هر ردیف جدا و داخل try/except پردازش می‌شود؛ خطای یک نفر هرگز کل انتقال را خراب نمی‌کند (خطای ۵۰۰ نمی‌دهد) و
+    دلیل دقیق شکست هر نفر برگردانده می‌شود.
+    ورودی: {term: <id>, rows: [{student_name, national_code, phone, class_level, gender}]}
+    خروجی: {moved, already, marked, failures: [{name, reason}]}
+    """
+    permission_classes = [IsAuthenticated]
+    NOTE = 'منتقل‌شده از فهرست منتظر ثبت‌نام — نیازمند پیگیری'
+
+    def post(self, request):
+        from django.db import transaction, IntegrityError
+        if request.user.role not in ('admin', 'office', 'employee') and not can_edit_menu(request.user, 'followups'):
+            return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
+        rows = request.data.get('rows') or []
+        if not isinstance(rows, list) or not rows:
+            return Response({'error': 'هیچ ردیفی ارسال نشد'}, status=status.HTTP_400_BAD_REQUEST)
+        term = None
+        term_id = request.data.get('term')
+        if term_id not in (None, ''):
+            from class_management.models import Term
+            term = Term.objects.filter(pk=term_id).first()
+        if term is None:
+            term = get_current_term()
+        digits = lambda v: ''.join(ch for ch in str(v or '').translate(str.maketrans('۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩', '01234567890123456789')) if ch.isdigit())
+        moved = already = marked = 0
+        failures = []
+        for raw in rows[:500]:
+            raw = raw if isinstance(raw, dict) else {}
+            parts = str(raw.get('student_name') or '').strip().split()
+            first = (parts.pop(0) if parts else 'نامشخص')[:150]
+            last = (' '.join(parts) or 'نامشخص')[:150]
+            label = f'{first} {last}'.strip()
+            national, phone = digits(raw.get('national_code'))[:20], digits(raw.get('phone'))[:20]
+            level = (str(raw.get('class_level') or '').strip() or 'نامشخص')[:50]
+            gender = raw.get('gender') if raw.get('gender') in ('male', 'female') else ''
+            try:
+                with transaction.atomic():
+                    prefix = build_person_key(national, phone, first, last) + '|level:'
+                    existing = UnregisteredStudent.objects.filter(term=term, identity_key__startswith=prefix).order_by('-created_at', '-id').first()
+                    if existing:
+                        already += 1
+                        if existing.status != UnregisteredStudent.Status.REGISTERED and self.NOTE not in (existing.row_description or ''):
+                            existing.row_description = f'{existing.row_description}\n{self.NOTE}'.strip()
+                            existing.save()
+                            marked += 1
+                        continue
+                    UnregisteredStudent.objects.create(
+                        first_name=first, last_name=last, class_level=level, national_code=national, phone=phone,
+                        term=term, row_description=self.NOTE, gender=gender, submitted_by=request.user,
+                    )
+                    moved += 1
+            except IntegrityError:
+                already += 1
+            except Exception as exc:  # noqa: BLE001 — دلیل شکست هر فرد گزارش می‌شود، نه خطای ۵۰۰
+                failures.append({'name': label, 'reason': f'{type(exc).__name__}: {str(exc)[:120]}'})
+                continue
+            # ساخت/تطبیق حساب زبان‌آموز (مثل ثبت دستی)؛ شکست آن نباید انتقال را خراب کند
+            try:
+                from accounts.services import sync_student_from_lead
+                sync_student_from_lead(first_name=first, last_name=last, phone=phone, national_code=national, language_level=level)
+            except Exception:  # noqa: BLE001
+                pass
+        return Response({'moved': moved, 'already': already, 'marked': marked, 'failures': failures})
+
+
+# نام دیگری که core/urls.py شما به آن اشاره می‌کند (همان انتقال گروهی منتظر ثبت‌نام)
+SelectedWaitingTransferView = WaitingTransferView
