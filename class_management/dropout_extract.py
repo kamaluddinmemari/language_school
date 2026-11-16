@@ -1090,14 +1090,18 @@ class DropoutStatsView(APIView):
                 elif pending:
                     pending_codes.add(code)
                 for bucket in (by_level.setdefault((level, teacher), {'previous': set(), 'dropouts': set()}),
-                               by_teacher.setdefault(teacher, {'previous': set(), 'dropouts': set(), 'levels': {}}),):
+                               by_teacher.setdefault(teacher, {'previous': set(), 'dropouts': set(), 'levels': {}, 'classes': {}}),):
                     bucket['previous'].add(key)
                 level_group = by_teacher[teacher]['levels'].setdefault(level, {'previous': set(), 'dropouts': set()})
                 level_group['previous'].add(key)
+                class_number = str(item.get('class_number') or 'بدون شماره')
+                class_group = by_teacher[teacher]['classes'].setdefault((level, class_number), {'previous': set(), 'dropouts': set()})
+                class_group['previous'].add(key)
                 if not registered and not pending:
                     by_level[(level, teacher)]['dropouts'].add(key)
                     by_teacher[teacher]['dropouts'].add(key)
                     level_group['dropouts'].add(key)
+                    class_group['dropouts'].add(key)
                     people[key] = {'student_id': item.get('student_id'), 'name': item.get('student_name') or f"{item.get('first_name', '')} {item.get('last_name', '')}".strip(),
                                    'national_code': code, 'level': level, 'teacher': teacher, 'class_number': item.get('class_number')}
             def pack_ref(group):
@@ -1106,8 +1110,8 @@ class DropoutStatsView(APIView):
                         'dropout_rate': round(count * 100 / total, 2) if total else 0}
             level_rows = [{'level': level, 'teacher': teacher, **pack_ref(group)} for (level, teacher), group in by_level.items()]
             level_rows.sort(key=lambda row: (-row['dropout_count'], row['level'], row['teacher']))
-            teachers = [{'teacher': teacher, **pack_ref(group), 'levels': [{'level': level, **pack_ref(data)} for level, data in sorted(group['levels'].items())]} for teacher, group in by_teacher.items()]
-            teachers.sort(key=lambda row: (-row['dropout_count'], -row['dropout_rate'], row['teacher']))
+            teachers = [{'teacher': teacher, **pack_ref(group), 'levels': [{'level': level, **pack_ref(data)} for level, data in sorted(group['levels'].items())], 'classes': [{'level': level, 'class_number': number, **pack_ref(data)} for (level, number), data in sorted(group['classes'].items())]} for teacher, group in by_teacher.items()]
+            teachers.sort(key=lambda row: (row['dropout_rate'], row['dropout_count'], row['teacher']))
             dropout_codes = {_valid_code(row.get('national_code')) for row in people.values()}
             followup_rows = DropoutExtractFollowUp.objects.filter(term=term2, national_code__in=dropout_codes).values('national_code', 'not_coming', 'assigned_to_id', 'contacted') if dropout_codes else []
             not_coming_codes, active_followup_codes = set(), set()
@@ -1140,14 +1144,18 @@ class DropoutStatsView(APIView):
             key = (level, teacher)
             group = by_level.setdefault(key, {'previous': set(), 'dropouts': set()})
             group['previous'].add(person_key)
-            teacher_group = by_teacher.setdefault(teacher, {'previous': set(), 'dropouts': set(), 'levels': {}})
+            teacher_group = by_teacher.setdefault(teacher, {'previous': set(), 'dropouts': set(), 'levels': {}, 'classes': {}})
             teacher_group['previous'].add(person_key)
             level_group = teacher_group['levels'].setdefault(level, {'previous': set(), 'dropouts': set()})
             level_group['previous'].add(person_key)
+            class_number = str(enrollment.class_slot.number or 'بدون شماره')
+            class_group = teacher_group['classes'].setdefault((level, class_number), {'previous': set(), 'dropouts': set()})
+            class_group['previous'].add(person_key)
             if person_key not in current_ids:
                 group['dropouts'].add(person_key)
                 teacher_group['dropouts'].add(person_key)
                 level_group['dropouts'].add(person_key)
+                class_group['dropouts'].add(person_key)
                 people[person_key] = {
                     'student_id': student.id,
                     'name': (student.get_full_name() or student.username),
@@ -1171,8 +1179,10 @@ class DropoutStatsView(APIView):
                 'teacher': teacher, **pack(group),
                 'levels': [{'level': level, **pack(level_data)}
                            for level, level_data in sorted(group['levels'].items())],
+                'classes': [{'level': level, 'class_number': number, **pack(class_data)}
+                            for (level, number), class_data in sorted(group.get('classes', {}).items())],
             })
-        teachers.sort(key=lambda row: (-row['dropout_count'], -row['dropout_rate'], row['teacher']))
+        teachers.sort(key=lambda row: (row['dropout_rate'], row['dropout_count'], row['teacher']))
         # وضعیت «نمی‌آید» و ارجاع/تماس از لیست‌های پیگیری همین ترم خوانده می‌شود؛ شمارش فقط
         # روی افراد ریزشی همین مقایسه انجام می‌شود تا لیست‌های دیگر باعث دوباره‌شماری نشوند.
         dropout_codes = {

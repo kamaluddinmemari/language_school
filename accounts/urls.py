@@ -1,4 +1,5 @@
 from django.urls import path
+from .identity import SystemCodeLocationView, SourceCodeDownloadView, IdentityDataView, IdentityContentView
 from .views import (
     RegisterView,
     ForgotPasswordView,
@@ -68,4 +69,8 @@ urlpatterns = [
     path('form-archives/upload-by-number/', FormArchiveUploadByNumberView.as_view(), name='form_archive_upload_by_number'),
     path('form-archives/<int:pk>/', FormArchiveDetailView.as_view(), name='form_archive_detail'),
     path('form-archives/<int:pk>/image/', FormArchiveImageView.as_view(), name='form_archive_image'),
+    path('system/code-location/', SystemCodeLocationView.as_view(), name='system_code_location'),
+    path('system/identity-data/', IdentityDataView.as_view(), name='system_identity_data'),
+    path('system/identity-content/', IdentityContentView.as_view(), name='system_identity_content'),
+    path('system/source-download/', SourceCodeDownloadView.as_view(), name='system_source_download'),
 ]

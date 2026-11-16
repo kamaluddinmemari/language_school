@@ -305,11 +305,14 @@ class UnregisteredStudent(models.Model):
 
     # منشأ انتقال از دکمه‌های «حضور و غیاب» در اپ مدیریت کلاس‌ها:
     #   attending = فرد سر کلاس می‌آید ولی ثبت‌نام نکرده | not_in_class = فرد اصلاً در این کلاس نیست
-    ATTENDANCE_TRANSFER_CHOICES = [('', 'خیر'), ('attending', 'در کلاس حضور دارد'), ('not_in_class', 'اصلاً در این کلاس نیست')]
+    ATTENDANCE_TRANSFER_CHOICES = [('', 'خیر'), ('attending', 'در کلاس حضور دارد'), ('not_in_class', 'اصلاً در این کلاس نیست'), ('never_came', 'کلاً نیامده')]
     attendance_transfer = models.CharField(
         max_length=14, blank=True, default='', choices=ATTENDANCE_TRANSFER_CHOICES,
         help_text='اگر از دکمه‌های حضور و غیابِ اپ به پیگیری منتقل شده باشد، نوع انتقال',
     )
+
+    # وقتی فردِ «کلاً نیامده» بعداً در کلاس دیگری پیدا شد: توضیح زردرنگ «از کدام کلاس/استاد/سطح ← به کدام»
+    relocation_note = models.TextField(blank=True, default='', help_text='توضیح جابجایی (کلاس قدیمی ← کلاس درست) — زرد')
 
     submitted_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='submitted_unregistered_students')
     assigned_to = models.ForeignKey(
@@ -622,3 +625,17 @@ class EmployeeFollowupDeadlineRule(models.Model):
         from datetime import datetime
         naive = datetime.combine(due_date, self.deadline_time)
         return timezone.make_aware(naive, timezone.get_current_timezone()) if timezone.is_naive(naive) else naive
+
+
+class FollowupAlertEvent(models.Model):
+    """رویدادهای هشدار «فرد کلاً نیامده» / «فرد در کلاس دیگری پیدا شد» برای پخش صدا و زیرنویس در اپ و پنل وب."""
+    KIND_CHOICES = [('never_came', 'کلاً نیامده'), ('found_elsewhere', 'در کلاس دیگر پیدا شد')]
+    kind = models.CharField(max_length=20, choices=KIND_CHOICES)
+    name = models.CharField(max_length=200, blank=True, default='')
+    text = models.TextField(blank=True, default='')
+    unregistered = models.ForeignKey('UnregisteredStudent', on_delete=models.CASCADE, null=True, blank=True, related_name='alert_events')
+    created_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['id']

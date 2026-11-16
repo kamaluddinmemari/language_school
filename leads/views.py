@@ -41,33 +41,95 @@ def purge_old_archives():
 
 
 
+_FA_DIGITS = str.maketrans('۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩', '01234567890123456789')
+
+
+def _lead_digits(value):
+    return ''.join(ch for ch in str(value or '').translate(_FA_DIGITS) if ch.isdigit())
+
+
+def _lead_name(first, last):
+    text = f'{first or ""} {last or ""}'.replace('ي', 'ی').replace('ك', 'ک')
+    return ''.join(text.replace('\u200c', '').split()).lower()
+
+
+def _find_lead_student_loosely(lead):
+    """
+    پروندهٔ دانش‌آموزِ متناظر سرنخ را با تطبیق منعطف پیدا می‌کند (فقط خواندنی):
+    کد ملی (ارقام فارسی/انگلیسی) ← شماره همراه (۱۰ رقم آخر، همراه/دوم؛ با ترجیح نام یکسان) ← نام کامل یکتا.
+    """
+    from accounts.models import User
+    students = User.objects.filter(role='student')
+    name = _lead_name(lead.first_name, lead.last_name)
+    code = _lead_digits(lead.national_code)
+    if len(code) >= 8:
+        found = students.filter(national_code__in={code, code.lstrip('0'), code.zfill(10)}).first()
+        if found:
+            return found
+    phone = _lead_digits(lead.phone)[-10:]
+    if len(phone) == 10:
+        candidates = list(students.filter(Q(phone__endswith=phone) | Q(phone2__endswith=phone))[:10])
+        if candidates:
+            same = [c for c in candidates if _lead_name(c.first_name, c.last_name) == name]
+            return (same or candidates)[0]
+    if name:
+        same = [c for c in students.filter(first_name=lead.first_name, last_name=lead.last_name)[:2]]
+        if len(same) == 1:
+            return same[0]
+        loose = [c for c in students.filter(last_name=lead.last_name)[:200] if _lead_name(c.first_name, c.last_name) == name]
+        if len(loose) == 1:
+            return loose[0]
+    return None
+
+
 def _registered_class_map(leads):
     """
     کلاس مقصدِ افرادِ «ثبت‌نام شد» لیست انتظار (از هر راهی: ثبت در کلاس، ثبت‌نام مستقیم، اپ، ...):
-    دانش‌آموزِ متناظر سرنخ پیدا می‌شود و آخرین ثبت‌نامِ قطعیِ او در ترمِ همان سرنخ خوانده می‌شود.
-    خروجی: {lead_id: {number, level, day, time_slot, teacher}}؛ اگر کلاسی پیدا نشد، کلیدی برای آن سرنخ نیست.
+    دانش‌آموزِ متناظر سرنخ پیدا می‌شود و ثبت‌نام قطعیِ او خوانده می‌شود؛ اولویت با ترمِ سرنخ،
+    بعد ترم‌های بعدی (پیش‌ثبت‌نام)، و در نهایت آخرین ثبت‌نام قطعی او.
+    خروجی: {lead_id: {number, level, day, time_slot, teacher}} یا اگر پیدا نشد {'missing': دلیل}.
     """
+    import logging
     from class_management.models import ClassSlotEnrollment
     result = {}
     for lead in leads:
         try:
-            student = _new_lead_student(lead, create=False)
+            student = None
+            try:
+                student = _find_lead_student_loosely(lead)
+            except Exception as exc:  # تطبیق منعطف نباید مانع تطبیق ساده شود
+                logging.getLogger(__name__).warning('lead student lookup failed for %s: %s', lead.id, exc)
             if not student:
+                try:
+                    student = _new_lead_student(lead, create=False)
+                except Exception as exc:
+                    logging.getLogger(__name__).warning('lead student fallback failed for %s: %s', lead.id, exc)
+            if not student:
+                result[lead.id] = {'missing': 'پرونده دانش‌آموزی با این کد ملی/شماره/نام پیدا نشد'}
                 continue
-            qs = ClassSlotEnrollment.objects.filter(student=student).select_related('class_slot').exclude(is_carryover=True, carryover_confirmed=False)
-            if lead.term_id:
-                qs = qs.filter(class_slot__term_id=lead.term_id)
-            enrollment = qs.order_by('-id').first()
-            if not enrollment:
+            rows = list(ClassSlotEnrollment.objects.filter(student=student).select_related('class_slot', 'class_slot__term')
+                        .exclude(is_carryover=True, carryover_confirmed=False).order_by('-id')[:30])
+            if not rows:
+                result[lead.id] = {'missing': 'برای این فرد ثبت‌نام قطعی در هیچ کلاسی ثبت نشده است'}
                 continue
-            slot = enrollment.class_slot
+            lead_term = lead.term
+            chosen = next((r for r in rows if lead_term and r.class_slot.term_id == lead_term.id), None)
+            if chosen is None and lead_term:
+                later = [r for r in rows if r.class_slot.term and (r.class_slot.term.year, r.class_slot.term.term_number) >= (lead_term.year, lead_term.term_number)]
+                chosen = later[-1] if later else None
+            if chosen is None:
+                chosen = rows[0]
+            slot = chosen.class_slot
+            slot_term = slot.term
             result[lead.id] = {
                 'class_slot': slot.id, 'number': slot.number, 'level': slot.assigned_level or '',
-                'day': getattr(slot, 'day_type_display', None) or slot.get_day_type_display(),
+                'day': slot.get_day_type_display() if slot.day_type else '',
                 'time_slot': slot.time_slot or '', 'teacher': slot.teacher_name or '',
+                'term_title': slot_term.title if slot_term else '',
             }
-        except Exception:
-            continue
+        except Exception as exc:
+            logging.getLogger(__name__).exception('registered class lookup failed for lead %s', lead.id)
+            result[lead.id] = {'missing': f'خطای محاسبه: {type(exc).__name__}: {exc}'}
     return result
 
 
@@ -346,6 +408,12 @@ class UnregisteredStudentListView(generics.ListCreateAPIView):
         person_prefix = build_person_key(data.get('national_code'), data.get('phone'), data.get('first_name'), data.get('last_name')) + '|level:'
         exact_person = UnregisteredStudent.objects.filter(term=term, identity_key__startswith=person_prefix).order_by('-created_at', '-id')
         if exact_person.exists():
+            # فردی که قبلاً «کلاً نیامده» گزارش شده بود و حالا در کلاس دیگری ثبت شد: همان ردیف پیگیری به‌روز می‌شود
+            _prev = exact_person.first()
+            if _prev.attendance_transfer == 'never_came' and _prev.status == UnregisteredStudent.Status.TRACKING and class_slot_id not in (None, ''):
+                from .alerts import apply_found_elsewhere
+                if apply_found_elsewhere(_prev, picked_slot, request.user):
+                    return Response({'message': 'این فرد قبلاً «کلاً نیامده» ثبت شده بود؛ در کلاس جدید پیدا شد و توضیح جابجایی (زرد) ثبت شد', 'found_elsewhere': True, 'id': _prev.id}, status=status.HTTP_200_OK)
             return Response({'error': 'این شخص در ترم انتخاب‌شده قبلاً ثبت شده است؛ ثبت دوباره حتی با سطح متفاوت مجاز نیست.', 'duplicate_in_term': True, 'existing_record_id': exact_person.first().id}, status=status.HTTP_409_CONFLICT)
 
         normalized_level = ' '.join(str(data.get('class_level') or '').split()).casefold()
@@ -953,7 +1021,9 @@ class DebtorListView(generics.ListCreateAPIView):
         if not can_edit_menu(request.user, "followups"):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         data = request.data.copy()
-        confirmed = str(data.pop('confirm_new_term', '')).lower() in ('1', 'true', 'yes')
+        data.pop('confirm_new_term', None)
+        data.pop('confirm_merge', None)
+        data.pop('national_code', None)
         # کلاسی که فرد در آن قرار دارد: سطح، (و در نبود مبلغ) شهریه‌ی همان سطح و شماره‌ی کلاس خودکار پر می‌شود
         class_slot_id = data.pop('class_slot', None)
         if isinstance(class_slot_id, list):
@@ -987,27 +1057,78 @@ class DebtorListView(generics.ListCreateAPIView):
             term = _Term.objects.filter(pk=term).first()
         data['term'] = getattr(term, 'pk', term) if term else None
         identity = build_identity_key('', data.get('phone'), data.get('first_name'), data.get('last_name'))
-        warning = duplicate_warning(Debtor.objects, identity, term)
-        if warning and warning.get('duplicate_in_term'):
-            return Response(warning, status=status.HTTP_409_CONFLICT)
-        if warning and warning.get('existing_in_other_terms') and not confirmed:
-            return Response(warning, status=status.HTTP_409_CONFLICT)
+        national = _lead_digits(request.data.get('national_code'))
+        # ---- بدهکارِ تکراری: فقط اگر همین فرد قبلاً در لیست بدهکاران هست هشدار بده؛ با تأیید، بدهی جدید به بدهی قبلی اضافه می‌شود ----
+        # (کد ملی یا شماره‌ی تکراری در بخش‌های دیگر/حساب‌های دیگر هیچ مانعی برای ثبت نیست.)
+        match_q = Q(pk__in=[])
+        if identity:
+            match_q |= Q(identity_key=identity)
+        if national:
+            match_q |= Q(student__national_code=national)
+        candidates = list(Debtor.objects.filter(match_q).select_related('term', 'student').order_by('-created_at'))
+        existing = next((d for d in candidates if term is not None and d.term_id == getattr(term, 'pk', None)), None) \
+            or next((d for d in candidates if d.status != Debtor.Status.SETTLED), None)
+        if existing:
+            if not str(request.data.get('confirm_merge', '')).lower() in ('1', 'true', 'yes'):
+                return Response({
+                    'merge_required': True,
+                    'warning': (f'«{existing.first_name} {existing.last_name}» قبلاً در لیست بدهکاران ثبت شده است'
+                                f'{" (ترم " + existing.term.title + ")" if existing.term else ""} با مبلغ {existing.debt_amount:,} تومان'
+                                f'{" — تسویه‌شده" if existing.status == Debtor.Status.SETTLED else ""}.\n'
+                                'آیا بدهی جدید با توضیحات جدید به همان بدهی قبلی اضافه شود؟'),
+                    'existing_debtor': {'id': existing.id, 'name': f'{existing.first_name} {existing.last_name}'.strip(),
+                                        'debt_amount': existing.debt_amount, 'description': existing.description,
+                                        'term': getattr(existing.term, 'title', None), 'status': existing.status},
+                }, status=status.HTTP_409_CONFLICT)
+            try:
+                add_amount = int(float(data.get('debt_amount') or 0))
+            except (TypeError, ValueError):
+                add_amount = 0
+            from django.utils import timezone as _tz
+            from .models import _jalali
+            new_desc = str(data.get('description') or '').strip()
+            stamp = (_jalali(_tz.now()) or '')[:10]
+            line = f'[بدهی جدید {stamp}{" — " + str(add_amount) + " تومان" if add_amount else ""}] {new_desc}'.strip()
+            existing.debt_amount = (existing.debt_amount or 0) + max(0, add_amount)
+            existing.description = f'{existing.description}\n{line}'.strip() if existing.description else line
+            reopen = existing.status == Debtor.Status.SETTLED
+            if reopen:
+                existing.status = Debtor.Status.PENDING
+                existing.settled_at = None
+                existing.claims_settled = False
+                existing.claim_reviewed = False
+            if data.get('class_level') and not existing.class_level:
+                existing.class_level = str(data.get('class_level'))
+            existing.save()
+            payload = DebtorSerializer(existing).data
+            payload['merged'] = True
+            return Response(payload, status=status.HTTP_200_OK)
         serializer = self.get_serializer(data=data)
         serializer.is_valid(raise_exception=True)
         debtor = serializer.save(created_by=request.user, term=term, source_slot=source_slot)
-        student, _created = sync_student_from_lead(
-            first_name=debtor.first_name, last_name=debtor.last_name,
-            phone=debtor.phone, language_level=debtor.class_level,
-            national_code=''.join(ch for ch in str(request.data.get('national_code') or '') if ch.isdigit()),
-        )
-        if student and not debtor.student_id:
-            debtor.student = student
-            debtor.save(update_fields=['student'])
-        if student and source_slot and not getattr(student, 'gender', ''):
-            slot_gender = {'girls': 'female', 'boys': 'male'}.get(source_slot.gender, '')
-            if slot_gender:
-                student.gender = slot_gender
-                student.save(update_fields=['gender'])
+        # ساخت/اتصال حساب دانش‌آموزی فقط یک کمک است و نباید مانع ثبت بدهکار شود
+        try:
+            from django.db import transaction, IntegrityError
+            from accounts.models import User as _User
+            link_code = national
+            if link_code and _User.objects.filter(national_code=link_code).exclude(role='student').exists():
+                link_code = ''
+            with transaction.atomic():
+                student, _created = sync_student_from_lead(
+                    first_name=debtor.first_name, last_name=debtor.last_name,
+                    phone=debtor.phone, language_level=debtor.class_level, national_code=link_code,
+                )
+                if student and not debtor.student_id:
+                    debtor.student = student
+                    debtor.save(update_fields=['student'])
+                if student and source_slot and not getattr(student, 'gender', ''):
+                    slot_gender = {'girls': 'female', 'boys': 'male'}.get(source_slot.gender, '')
+                    if slot_gender:
+                        student.gender = slot_gender
+                        student.save(update_fields=['gender'])
+        except Exception:
+            import logging
+            logging.getLogger(__name__).exception('debtor student sync failed')
         return Response(DebtorSerializer(debtor).data, status=status.HTTP_201_CREATED)
 
 

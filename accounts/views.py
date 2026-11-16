@@ -1100,6 +1100,67 @@ class StudentStatusCheckView(APIView):
                 state, text = 'missed', f'تعیین سطح الزامی دارد — وقت مقرر ({test.test_date_jalali}) گذشته و مراجعه نکرده است'
             return {'state': state, 'text': text, 'test_id': test.id}
 
+        # ---- توالی سطوح: سطحِ ترمِ اخیر باید «سطح بعدیِ» آخرین سطحِ ترمِ قبلی (یا همان سطح، برای تکرار) باشد ----
+        # مگر اینکه با تعیین سطحِ تکمیل‌شده در آن سطح قرار گرفته باشد. فقط وقتی هر دو سطح در یک رده سنیِ تعریف‌شده‌اند بررسی می‌شود.
+        level_sequence_warnings = {}
+        if student_ids:
+            try:
+                from level_tests.models import StandardLevel, LevelTest as _LT
+                std_groups, std_info = {}, {}
+                for lv in StandardLevel.objects.all().order_by('age_group', 'order', 'code'):
+                    std_groups.setdefault(lv.age_group, []).append(lv.code)
+                    std_info[lv.code.lower()] = (lv.age_group, lv.is_terminal)
+                history = {}
+                hist_qs = ClassSlotEnrollment.objects.filter(
+                    student_id__in=student_ids, payment_verified=True, class_slot__term__isnull=False,
+                ).filter(Q(is_carryover=False) | Q(carryover_confirmed=True)).select_related('class_slot__term')
+                for en in hist_qs:
+                    t = en.class_slot.term
+                    lvl = (en.class_slot.assigned_level or '').strip()
+                    if lvl:
+                        history.setdefault(en.student_id, {}).setdefault((t.year, t.term_number, t.id), (t.title, []))[1].append(lvl)
+                tested = {}
+                for tst in _LT.objects.filter(status=_LT.Status.COMPLETED, student_id__in=student_ids).exclude(level=''):
+                    tested.setdefault(tst.student_id, set()).add(tst.level.strip().lower())
+                for sid, by_term in history.items():
+                    ordered = [by_term[k] for k in sorted(by_term)]
+                    if len(ordered) < 2:
+                        continue
+                    (prev_title, prev_levels), (cur_title, cur_levels) = ordered[-2], ordered[-1]
+                    ok, first_bad = False, None
+                    for cur in cur_levels:
+                        cl = cur.lower()
+                        if cl in tested.get(sid, set()):
+                            ok = True; break
+                        for prv in prev_levels:
+                            pl = prv.lower()
+                            if pl == cl:
+                                ok = True; break
+                            pg, pterm = std_info.get(pl, (None, False))
+                            cg, _ = std_info.get(cl, (None, False))
+                            if not pg or not cg or pg != cg or pterm:
+                                ok = True; break  # قابل‌قضاوت نیست (رده متفاوت/سطح نامعلوم/سطح پایانی) → هشدار نده
+                            seq = [c.lower() for c in std_groups[pg]]
+                            pi = seq.index(pl)
+                            if pi + 1 < len(seq) and seq[pi + 1] == cl:
+                                ok = True; break
+                            if first_bad is None:
+                                expected = std_groups[pg][pi + 1] if pi + 1 < len(seq) else ''
+                                first_bad = (prv, expected, cur)
+                        if ok:
+                            break
+                    if not ok and first_bad:
+                        prv, expected, cur = first_bad
+                        level_sequence_warnings[sid] = {
+                            'previous_level': prv, 'expected_level': expected, 'current_level': cur,
+                            'previous_term': prev_title, 'current_term': cur_title,
+                            'text': (f'توالی سطوح رعایت نشده است! آخرین سطح این فرد در «{prev_title}»: {prv} بوده، پس در «{cur_title}» '
+                                     f'باید در سطح {expected or "—"} باشد (یا همان {prv} را تکرار کند) ولی در سطح {cur} قرار گرفته است.'),
+                        }
+            except Exception:
+                import logging
+                logging.getLogger(__name__).exception('level sequence check failed')
+
         results = []
         for entry in list(people.values())[:self.MAX_RESULTS]:
             person = entry['person']
@@ -1115,6 +1176,7 @@ class StudentStatusCheckView(APIView):
                     for item in entry.get('unregistered_records', [])
                 ],
                 'term_title': term.title if term else '',
+                'term_id': term.id if term else None,
                 'classes': classes_by_student.get(student_id, []) if is_student else [],
                 'ongoing_classes': ongoing_classes_by_student.get(student_id, []) if is_student else [],
                 'next_term_title': next_term.title if next_term and is_student else '',
@@ -1128,6 +1190,7 @@ class StudentStatusCheckView(APIView):
                 'disciplinary_count': disciplinary_count,
                 'disciplinary_warning': disciplinary_count >= 2,
                 'level_test_warning': level_test_warning(person),
+                'level_sequence_warning': level_sequence_warnings.get(student_id) if is_student else None,
                 'approved': not reasons,
                 'verdict': 'approved' if not reasons else 'rejected',
                 'reasons': [r['text'] for r in reasons],

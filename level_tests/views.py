@@ -612,3 +612,108 @@ class LevelTestDetailView(APIView):
         obj.new_leads.update(needs_level_test=False, needs_level_test_marked_at=None, level_test=None)
         obj.delete()
         return Response({'message': 'حذف شد'})
+
+
+class LevelTestRegistrationStatsView(APIView):
+    """
+    GET: آمار تعیین‌سطح‌شده‌هایی که بعد از تعیین سطح ثبت‌نام قطعی کرده‌اند + آمار کلاس مقصدشان.
+    «ثبت‌نام‌کرده» = ثبت‌نام قطعیِ او (غیر از انتقالیِ تأییدنشده) در کلاسی از ترمی که بعد از تاریخ تعیین سطح تمام نشده؛
+    اولین چنین ثبت‌نامی کلاس مقصد حساب می‌شود. تطبیق فرد: پروندهٔ دانش‌آموز ثبت‌شده، کد ملی، یا شماره همراه (۱۰ رقم آخر) + نام.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        try:
+            return self._compute(request)
+        except Exception as exc:  # علت واقعی به‌جای خطای مبهم به پنل برگردد
+            import logging
+            logging.getLogger(__name__).exception('%s failed', self.__class__.__name__)
+            return Response({'error': f'خطای سرور: {type(exc).__name__}: {exc}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    def _compute(self, request):
+        if not can_view_menu(request.user, 'level-tests'):
+            return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
+        from class_management.models import ClassSlotEnrollment
+        from leads.views import _lead_digits, _lead_name
+        tests = list(LevelTest.objects.filter(status=LevelTest.Status.COMPLETED).order_by('-id'))
+        students = list(User.objects.filter(role='student').only('id', 'first_name', 'last_name', 'national_code', 'phone', 'phone2'))
+        by_code, by_phone = {}, {}
+        for st in students:
+            code = _lead_digits(st.national_code)
+            if code:
+                by_code.setdefault(code.zfill(10), []).append(st)
+            for ph in (st.phone, st.phone2):
+                ph = _lead_digits(ph)[-10:]
+                if len(ph) == 10:
+                    by_phone.setdefault(ph, []).append(st)
+        enrolls = {}
+        qs = ClassSlotEnrollment.objects.exclude(is_carryover=True, carryover_confirmed=False).select_related('class_slot__term').order_by('id')
+        for e in qs:
+            enrolls.setdefault(e.student_id, []).append(e)
+
+        def student_of(t):
+            if t.student_id:
+                return t.student_id
+            name = _lead_name(t.first_name, t.last_name)
+            code = _lead_digits(t.national_code)
+            if code:
+                found = by_code.get(code.zfill(10))
+                if found:
+                    return found[0].id
+            ph = _lead_digits(t.phone)[-10:]
+            cands = by_phone.get(ph, []) if len(ph) == 10 else []
+            same = [c for c in cands if _lead_name(c.first_name, c.last_name) == name]
+            return (same or cands or [None])[0].id if (same or cands) else None
+
+        age_labels = dict(LevelTest.AgeGroup.choices)
+        people, by_age, by_class, by_term = [], {}, {}, {}
+        for t in tests:
+            test_day = timezone.localtime(t.test_date).date() if t.test_date else timezone.localtime(t.created_at).date()
+            sid = student_of(t)
+            chosen = None
+            for e in enrolls.get(sid, []) if sid else []:
+                term = e.class_slot.term
+                if term is None or (term.end_date and term.end_date < test_day):
+                    continue
+                chosen = e
+                break
+            slot = chosen.class_slot if chosen else None
+            age = age_labels.get(t.age_group, 'نامشخص')
+            agg = by_age.setdefault(age, {'age_group': age, 'completed': 0, 'registered': 0})
+            agg['completed'] += 1
+            term_key = slot.term_id if slot and slot.term else None
+            term_label = slot.term.title if slot and slot.term else 'بدون ترم / ثبت‌نام‌نشده'
+            term_agg = by_term.setdefault(term_key or 'none', {'term_id': term_key, 'term_title': term_label, 'completed': 0, 'registered': 0})
+            term_agg['completed'] += 1
+            row = {
+                'id': t.id, 'name': f'{t.first_name} {t.last_name}'.strip(), 'national_code': t.national_code, 'phone': t.phone,
+                'age_group': age, 'level': t.level or '', 'test_date': t.test_date_jalali or '',
+                'registered': bool(chosen),
+                'class_number': slot.number if slot else None, 'class_level': (slot.assigned_level or '') if slot else '',
+                'day': slot.day_type_display if slot else '', 'time_slot': (slot.time_slot or '') if slot else '',
+                'teacher': (slot.teacher_name or '') if slot else '', 'term_title': slot.term.title if slot and slot.term else '',
+            }
+            people.append(row)
+            if chosen:
+                agg['registered'] += 1
+                term_agg['registered'] += 1
+                key = slot.id
+                c = by_class.setdefault(key, {
+                    'class_slot': slot.id, 'number': slot.number, 'level': slot.assigned_level or '', 'day': row['day'],
+                    'time_slot': row['time_slot'], 'teacher': row['teacher'], 'term_title': row['term_title'], 'count': 0, 'names': [],
+                })
+                c['count'] += 1
+                c['names'].append(row['name'])
+        total, reg = len(people), sum(1 for p in people if p['registered'])
+        for a in by_age.values():
+            a['percent'] = round(a['registered'] * 100 / a['completed'], 1) if a['completed'] else 0
+        for item in by_term.values():
+            item['not_registered'] = item['completed'] - item['registered']
+            item['percent'] = round(item['registered'] * 100 / item['completed'], 1) if item['completed'] else 0
+        return Response({
+            'totals': {'completed': total, 'registered': reg, 'not_registered': total - reg, 'percent': round(reg * 100 / total, 1) if total else 0},
+            'by_age_group': list(by_age.values()),
+            'by_term': list(by_term.values()),
+            'by_class': sorted(by_class.values(), key=lambda c: (-c['count'], c['number'] or 0)),
+            'people': people,
+        })

@@ -520,12 +520,12 @@ class UnregisteredStudentSerializer(serializers.ModelSerializer):
             'followup_count', 'last_followup_at_jalali', 'latest_level', 'followups',
             'submitted_by_name', 'term', 'term_title', 'claims_registered', 'claim_reviewed',
             'is_dropout', 'dropout_from_term', 'dropout_from_term_title',
-            'is_misplaced', 'misplaced_from_slot', 'misplaced_class_number', 'attendance_transfer',
+            'is_misplaced', 'misplaced_from_slot', 'misplaced_class_number', 'attendance_transfer', 'relocation_note',
             'also_debtor', 'also_debtor_amount', 'assigned_to', 'assigned_to_name', 'gender', 'has_current_class',
             'class_slot', 'class_slot_number', 'class_slot_level', 'class_slot_day', 'class_slot_time', 'class_slot_teacher', 'class_status', 'class_status_text', 'class_true_text',
             'created_at', 'created_at_jalali', 'updated_at',
         ]
-        read_only_fields = ['status', 'registered_at', 'created_at', 'updated_at', 'is_dropout', 'dropout_from_term', 'is_misplaced', 'misplaced_from_slot', 'attendance_transfer']
+        read_only_fields = ['status', 'registered_at', 'created_at', 'updated_at', 'is_dropout', 'dropout_from_term', 'is_misplaced', 'misplaced_from_slot', 'attendance_transfer', 'relocation_note']
 
     def get_submitted_by_name(self, obj):
         if not obj.submitted_by:

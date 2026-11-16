@@ -207,6 +207,12 @@ def roster_attendance_payload(slot, session_count=DEFAULT_SESSION_COUNT):
         attendance_transfer='attending', status=UnregisteredStudent.Status.TRACKING,
     ).values_list('first_name', 'last_name', 'national_code', 'phone'))
 
+    # «کلاً نیامده»: در رستر می‌ماند ولی با نشان قرمز دیده می‌شود
+    never_came_people = set(UnregisteredStudent.objects.filter(
+        term_id=slot.term_id, misplaced_from_slot=slot,
+        attendance_transfer='never_came', status=UnregisteredStudent.Status.TRACKING,
+    ).values_list('first_name', 'last_name', 'national_code', 'phone'))
+
     def _identity(student):
         return (
             student.first_name, student.last_name,
@@ -218,6 +224,9 @@ def roster_attendance_payload(slot, session_count=DEFAULT_SESSION_COUNT):
 
     def attending_in_followup(student):
         return _identity(student) in attending_transferred
+
+    def never_came_in_followup(student):
+        return _identity(student) in never_came_people
     attendance_by_student = {}
     if enrolled and sessions:
         attendance_rows = ClassAttendance.objects.filter(
@@ -263,6 +272,7 @@ def roster_attendance_payload(slot, session_count=DEFAULT_SESSION_COUNT):
             'followup_transfer_available': needs_follow_up,
             'registration_note': 'این فرد هنوز ثبت‌نام نکرده' if needs_follow_up else '',
             'followup_transferred': bool(needs_follow_up and attending_in_followup(student)),
+            'followup_never_came': bool(never_came_in_followup(student)),
             'sessions': rows,
         })
         roster_student_ids.add(student.id)
@@ -317,6 +327,7 @@ def roster_attendance_payload(slot, session_count=DEFAULT_SESSION_COUNT):
                 'followup_transfer_available': needs_follow_up,
                 'registration_note': 'این فرد هنوز ثبت‌نام نکرده' if needs_follow_up else '',
                 'followup_transferred': bool(needs_follow_up and attending_in_followup(student)),
+                'followup_never_came': bool(never_came_in_followup(student)),
                 'sessions': rows,
             })
             roster_student_ids.add(student.id)

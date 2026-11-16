@@ -558,3 +558,16 @@ class UserHotkeySetting(models.Model):
 
     def __str__(self):
         return f'میانبرهای {self.user_id}'
+
+
+class IdentityContent(models.Model):
+    """متن‌های ویرایش‌شدهٔ «شناسنامهٔ برنامه» (فقط یک رکورد). meta/sections خالی یعنی متن پیش‌فرضِ داخل برنامه؛
+    descriptions توضیح دستی مدل/View/فایل‌ها با کلیدهایی مثل model:app.Name، view:app.Name، file:مسیر."""
+    meta = models.JSONField(default=dict, blank=True)
+    sections = models.JSONField(null=True, blank=True)
+    descriptions = models.JSONField(default=dict, blank=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    updated_by = models.ForeignKey('accounts.User', on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
+
+    def __str__(self):
+        return 'محتوای شناسنامه'
