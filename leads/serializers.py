@@ -2,6 +2,25 @@ from rest_framework import serializers
 from .models import NewLead, NewLeadFollowup, UnregisteredStudent, UnregisteredStudentFollowup, Debtor, DebtorFollowup, DiscountedPerson, normalize_national_code, normalize_phone
 
 
+def current_unregistered_tuition(item, tariff_cache=None):
+    """تعرفهٔ فعلیِ سطح را برمی‌گرداند؛ در نبود تعرفه، مبلغ ثبت‌شدهٔ فرد ملاک است."""
+    level = getattr(item, 'latest_level', None) or getattr(item, 'class_level', '')
+    if level:
+        try:
+            if tariff_cache is not None and level in tariff_cache:
+                current_amount = tariff_cache[level]
+            else:
+                from class_management.carryover import _tuition_for_level
+                current_amount = int(_tuition_for_level(level) or 0)
+                if tariff_cache is not None:
+                    tariff_cache[level] = current_amount
+            if current_amount > 0:
+                return current_amount
+        except Exception:
+            pass
+    return item.tuition_price
+
+
 class NewLeadFollowupSerializer(serializers.ModelSerializer):
     followed_up_at_jalali = serializers.ReadOnlyField()
     followed_up_by_name = serializers.SerializerMethodField()
@@ -134,6 +153,40 @@ def _norm_phone(value):
     return digits[-10:] if len(digits) >= 10 else digits
 
 
+def _debt_breakdown(d):
+    """بدهی یک رکورد بدهکار را به اقلام ساده (شهریه/کتاب/...) تقسیم می‌کند: [(عنوان, مبلغ)].
+    بدهی‌های اضافه‌شده بعدی در description به شکل «[بدهی جدید تاریخ — N تومان] متن» ذخیره شده‌اند."""
+    import re
+    desc = d.description or ''
+    total = int(d.debt_amount or 0)
+    def label_of(text):
+        t = (text or '').strip()
+        for key, name in (('کتاب', 'کتاب'), ('شهریه', 'شهریه'), ('جزوه', 'جزوه'), ('جریمه', 'جریمه')):
+            if key in t:
+                return name
+        t = re.sub(r'^بدهی\s*', '', t).strip()
+        return (t[:30] or 'بدهی')
+    items = []
+    added = 0
+    base_lines = []
+    for line in desc.split('\n'):
+        m = re.match(r'^\[بدهی جدید[^\]]*?(?:—\s*([\d,]+)\s*تومان)?\]\s*(.*)$', line.strip())
+        if m:
+            amt = int((m.group(1) or '0').replace(',', '') or 0)
+            if amt:
+                items.append((label_of(m.group(2)), amt))
+                added += amt
+        elif line.strip():
+            base_lines.append(line.strip())
+    base_amount = max(0, total - added)
+    if base_amount or not items:
+        items.insert(0, (label_of(' '.join(base_lines)), base_amount))
+    merged = {}
+    for name, amt in items:
+        merged[name] = merged.get(name, 0) + amt
+    return list(merged.items())
+
+
 class _CrossListIndex:
     """
     فهرست «بازِ» طرف مقابل برای تشخیص فردی که هم بدهکار است و هم ثبت‌نام‌نشده.
@@ -147,29 +200,52 @@ class _CrossListIndex:
             rows = Debtor.objects.filter(status=Debtor.Status.PENDING).select_related('student')
             for d in rows:
                 code = getattr(d.student, 'national_code', '') if d.student_id else ''
-                self.items.append((_norm_digits(code), _norm_phone(d.phone), _norm_name(d.first_name, d.last_name), d.debt_amount or 0))
+                self.items.append((_norm_digits(code), _norm_phone(d.phone), _norm_name(d.first_name, d.last_name), d.debt_amount or 0, _debt_breakdown(d),
+                                   {'id': d.pk, 'term': d.term_id, 'created': d.created_at.date() if d.created_at else None, 'carried': bool(d.carried_from_term_id)}))
         else:
             from .models import UnregisteredStudent
             rows = UnregisteredStudent.objects.filter(status=UnregisteredStudent.Status.TRACKING)
             for u in rows:
-                self.items.append((_norm_digits(u.national_code), _norm_phone(u.phone), _norm_name(u.first_name, u.last_name), u.tuition_price or 0))
+                self.items.append((_norm_digits(u.national_code), _norm_phone(u.phone), _norm_name(u.first_name, u.last_name), u.tuition_price or 0, '', {}))
 
     def match(self, code, phone, first, last):
+        return [amount for amount, _desc, _prev, _id in self.match_items(code, phone, first, last)]
+
+    def match_items(self, code, phone, first, last, ref=None):
         code = _norm_digits(code)
         phone = _norm_phone(phone)
         name = _norm_name(first, last)
         found = []
-        for c, p, n, amount in self.items:
+        for c, p, n, amount, desc, meta in self.items:
             # کد ملیِ هر دو طرف موجود باشد ملاک قطعی است. اگر فقط یک طرف کد دارد،
             # شماره همراه و نام کاملِ مشترک امکان match می‌دهد؛ کدهای متفاوت هرگز با هم یکی نمی‌شوند.
             if code and c:
+                # اگر هر دو کد ملی موجودند، فقط برابری دقیق کد ملی معتبر است.
                 matched = code == c
+            elif code or c:
+                # کد ملی فقط در یک سمت هست: تطبیقِ نام به‌تنهایی ممنوع؛
+                # شماره همراه و نام کامل هر دو باید برابر باشند.
+                matched = bool(phone and p and phone == p and name and n == name)
             elif phone and p:
+                # در نبود کد ملی، موبایلِ مشترک به‌علاوهٔ نام کامل ملاک است.
                 matched = bool(phone == p and name and n == name)
+            elif phone or p:
+                # اگر فقط یک سمت شماره دارد، نام یکسان دلیل کافی برای یکی‌گرفتن نیست.
+                matched = False
             else:
-                matched = bool(not c and not p and name and n == name)
+                # فقط وقتی هر دو فاقد شناسه و شماره‌اند، نام کاملِ یکسان پذیرفته می‌شود.
+                matched = bool(name and n == name)
             if matched:
-                found.append(amount)
+                previous = False
+                if ref is not None and meta:
+                    ref_term = getattr(ref, 'term_id', None)
+                    ref_created = getattr(ref, 'created_at', None)
+                    previous = bool(
+                        meta.get('carried')
+                        or (meta.get('term') and ref_term and meta['term'] != ref_term)
+                        or (meta.get('created') and ref_created and meta['created'] < ref_created.date())
+                    )
+                found.append((amount, desc, previous, (meta or {}).get('id')))
         return found
 
 
@@ -351,6 +427,7 @@ def _classify_class(system_slot, reported_slot, reported_level, flagged=False, c
 
 
 class UnregisteredStudentSerializer(serializers.ModelSerializer):
+    current_tuition = serializers.SerializerMethodField()
     has_current_class = serializers.SerializerMethodField()
     is_misplaced = serializers.SerializerMethodField()
 
@@ -372,6 +449,10 @@ class UnregisteredStudentSerializer(serializers.ModelSerializer):
 
     def get_is_misplaced(self, obj):
         return self._misplaced_now(obj)
+
+    def get_current_tuition(self, obj):
+        cache = self.__dict__.setdefault('_current_tuition_tariffs', {})
+        return current_unregistered_tuition(obj, cache)
 
     def get_has_current_class(self, obj):
         if obj.status == 'registered':
@@ -489,6 +570,9 @@ class UnregisteredStudentSerializer(serializers.ModelSerializer):
     misplaced_class_number = serializers.SerializerMethodField()
     also_debtor = serializers.SerializerMethodField()
     also_debtor_amount = serializers.SerializerMethodField()
+    also_debtor_text = serializers.SerializerMethodField()
+    also_debtor_book = serializers.SerializerMethodField()
+    previous_debtor_ids = serializers.SerializerMethodField()
     assigned_to_name = serializers.SerializerMethodField()
 
     def get_assigned_to_name(self, obj):
@@ -506,6 +590,41 @@ class UnregisteredStudentSerializer(serializers.ModelSerializer):
     def get_also_debtor_amount(self, obj):
         return sum(self._debtor_matches(obj))
 
+    def _debtor_items(self, obj):
+        if not hasattr(self, '_debtor_index'):
+            self._debtor_index = _CrossListIndex('debtor')
+        return self._debtor_index.match_items(obj.national_code, obj.phone, obj.first_name, obj.last_name, ref=obj)
+
+    def get_previous_debtor_ids(self, obj):
+        return [i for _a, _d, prev, i in self._debtor_items(obj) if prev and i]
+
+    def get_also_debtor_book(self, obj):
+        return any(
+            str(name).strip() == 'کتاب' and int(amount or 0) > 0
+            for _total, breakdown, _is_previous, _debtor_id in self._debtor_items(obj)
+            for name, amount in breakdown
+        )
+
+    def get_also_debtor_text(self, obj):
+        # متن ساده: «بدهی قبلی: بابت شهریه … و بابت کتاب …» + «بدهی فعلی: …» + «جمع کل بدهی: …»
+        def fmt(parts):
+            return ' و '.join(f'بابت {name} {int(amt):,} تومان' for name, amt in parts)
+        previous, current, total = {}, {}, 0
+        for amount, breakdown, is_prev, _id in self._debtor_items(obj):
+            total += max(0, int(amount or 0))
+            target = previous if is_prev else current
+            for name, amt in breakdown:
+                if int(amt or 0) > 0:
+                    target[name] = target.get(name, 0) + int(amt)
+        out = []
+        if previous:
+            out.append('بدهی قبلی: ' + fmt(previous.items()))
+        if current:
+            out.append(('بدهی فعلی: ' if previous else 'بدهی: ') + fmt(current.items()))
+        if out:
+            out.append(f'جمع کل بدهی: {total:,} تومان')
+        return ' | '.join(out)
+
     def get_misplaced_class_number(self, obj):
         return obj.misplaced_from_slot.number if self._misplaced_now(obj) else None
 
@@ -515,13 +634,13 @@ class UnregisteredStudentSerializer(serializers.ModelSerializer):
     class Meta:
         model = UnregisteredStudent
         fields = [
-            'id', 'first_name', 'last_name', 'class_level', 'national_code', 'phone', 'tuition_price', 'row_description',
-            'status', 'status_display', 'not_coming', 'registered_at', 'registered_at_jalali',
-            'followup_count', 'last_followup_at_jalali', 'latest_level', 'followups',
+            'id', 'first_name', 'last_name', 'class_level', 'national_code', 'phone', 'tuition_price', 'current_tuition', 'row_description',
+            'status', 'status_display', 'not_coming', 'contacted', 'registered_at', 'registered_at_jalali',
+            'followup_count', 'last_followup_at_jalali', 'latest_level', 'followups', 'respondent', 'respondent',
             'submitted_by_name', 'term', 'term_title', 'claims_registered', 'claim_reviewed',
             'is_dropout', 'dropout_from_term', 'dropout_from_term_title',
             'is_misplaced', 'misplaced_from_slot', 'misplaced_class_number', 'attendance_transfer', 'relocation_note',
-            'also_debtor', 'also_debtor_amount', 'assigned_to', 'assigned_to_name', 'gender', 'has_current_class',
+            'also_debtor', 'also_debtor_amount', 'also_debtor_text', 'also_debtor_book', 'previous_debtor_ids', 'assigned_to', 'assigned_to_name', 'gender', 'has_current_class',
             'class_slot', 'class_slot_number', 'class_slot_level', 'class_slot_day', 'class_slot_time', 'class_slot_teacher', 'class_status', 'class_status_text', 'class_true_text',
             'created_at', 'created_at_jalali', 'updated_at',
         ]
@@ -566,9 +685,16 @@ class DebtorSerializer(serializers.ModelSerializer):
     class_status_text = serializers.SerializerMethodField()
     class_true_text = serializers.SerializerMethodField()
     also_unregistered = serializers.SerializerMethodField()
+    gender = serializers.SerializerMethodField()
+    next_level = serializers.SerializerMethodField()
+    also_unregistered_tuition = serializers.SerializerMethodField()
     unregistered_student_id = serializers.SerializerMethodField()
     assigned_to_name = serializers.SerializerMethodField()
     national_code = serializers.SerializerMethodField()
+    debt_breakdown = serializers.SerializerMethodField()
+
+    def get_debt_breakdown(self, obj):
+        return [{'name': name, 'amount': int(amount or 0)} for name, amount in _debt_breakdown(obj)]
 
     def get_national_code(self, obj):
         if obj.student_id and obj.student and obj.student.national_code:
@@ -612,6 +738,8 @@ class DebtorSerializer(serializers.ModelSerializer):
                     index['by_phone_name'].setdefault((row_phone, row_name), []).append(row)
                 if not row_code and not row_phone and row_name:
                     index['by_uncoded_name'].setdefault(row_name, []).append(row)
+                if row_name:
+                    index.setdefault('by_name', {}).setdefault(row_name, []).append(row)
             self.__dict__['_open_unregistered_index'] = index
 
         code = _norm_digits(getattr(obj.student, 'national_code', '') if obj.student_id else '')
@@ -627,6 +755,12 @@ class DebtorSerializer(serializers.ModelSerializer):
         else:
             candidates = list(index['by_uncoded_name'].get(name, []))
 
+        if not candidates and name:
+            # کد/شماره‌ها نخوانده‌اند: نام کامل یکسان (و بدون تناقض در شماره همراه) کافی است
+            candidates = [r for r in index.get('by_name', {}).get(name, [])
+                          if not (phone and _norm_phone(r.phone) and _norm_phone(r.phone) != phone)
+                          and not (code and _norm_digits(r.national_code) and _norm_digits(r.national_code) != code)]
+            code = ''
         if obj.term_id:
             same_term = [r for r in candidates if r.term_id == obj.term_id]
             if same_term:
@@ -638,6 +772,27 @@ class DebtorSerializer(serializers.ModelSerializer):
 
     def get_also_unregistered(self, obj):
         return self._unregistered_counterpart(obj) is not None
+
+    def get_next_level(self, obj):
+        # کلاس/سطح بدهکار = یک سطح بالاتر از سطح ترم قبلی‌اش
+        try:
+            from class_management.views import _next_level_for_carryover
+            return _next_level_for_carryover(obj.class_level)[0] or ''
+        except Exception:
+            return ''
+
+    def get_also_unregistered_tuition(self, obj):
+        match = self._unregistered_counterpart(obj)
+        cache = self.__dict__.setdefault('_current_tuition_tariffs', {})
+        return current_unregistered_tuition(match, cache) if match else None
+
+    def get_gender(self, obj):
+        g = getattr(obj.student, 'gender', '') if obj.student_id else ''
+        if g in ('male', 'female'):
+            return g
+        match = self._unregistered_counterpart(obj)
+        g = (getattr(match, 'gender', '') or '') if match else ''
+        return g if g in ('male', 'female') else ''
 
     def get_unregistered_student_id(self, obj):
         match = self._unregistered_counterpart(obj)
@@ -716,7 +871,8 @@ class DebtorSerializer(serializers.ModelSerializer):
         reported_slot, cands, exact = reported_candidates(u) if u else (None, [], False)
         level = ''
         if u and not (u.is_misplaced and not reported_slot):
-            level = u.class_level
+            # برای توضیح زیر ردیف، آخرین سطح همان ترم را ملاک بگیر؛ class_level می‌تواند سطح قبلی باشد.
+            level = u.latest_level or u.class_level
         cache[obj.pk] = (slot, _classify_class(slot, reported_slot, level, flagged=bool(u and u.is_misplaced), candidates=cands, exact=exact))
         return cache[obj.pk]
 
@@ -753,11 +909,11 @@ class DebtorSerializer(serializers.ModelSerializer):
         model = Debtor
         fields = [
             'id', 'first_name', 'last_name', 'national_code', 'phone', 'class_level', 'debt_amount', 'description', 'row_description',
-            'status', 'status_display', 'settled_at', 'settled_at_jalali', 'not_coming',
+            'status', 'status_display', 'settled_at', 'settled_at_jalali', 'not_coming', 'contacted', 'respondent', 'respondent',
             'followup_count', 'last_followup_at_jalali', 'followups',
             'term', 'term_title', 'claims_settled', 'claim_reviewed', 'created_at', 'created_at_jalali', 'updated_at',
             'student', 'awaiting_registration', 'carried_from_term', 'carried_from_term_title',
-            'source_slot', 'source_slot_number', 'class_slot_number', 'class_slot_level', 'class_slot_day', 'class_slot_time', 'class_slot_teacher', 'class_status', 'class_status_text', 'class_true_text', 'also_unregistered', 'unregistered_student_id', 'assigned_to', 'assigned_to_name',
+            'source_slot', 'source_slot_number', 'class_slot_number', 'class_slot_level', 'class_slot_day', 'class_slot_time', 'class_slot_teacher', 'class_status', 'class_status_text', 'class_true_text', 'also_unregistered', 'gender', 'next_level', 'also_unregistered_tuition', 'unregistered_student_id', 'assigned_to', 'assigned_to_name', 'debt_breakdown',
         ]
         read_only_fields = ['status', 'settled_at', 'created_at', 'updated_at', 'student', 'awaiting_registration', 'carried_from_term', 'source_slot']
         extra_kwargs = {'phone': {'required': False, 'allow_blank': True}, 'debt_amount': {'required': False}}

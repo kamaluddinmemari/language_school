@@ -375,7 +375,11 @@ class UnregisteredStudentListView(generics.ListCreateAPIView):
 
     def create(self, request, *args, **kwargs):
         # انتقال گروهیِ «منتظر ثبت‌نام» روی همین مسیرِ همیشه‌موجود (بدون نیاز به مسیر تازه در urls.py)
-        if isinstance(request.data, dict) and request.data.get('bulk_from_waiting'):
+        if isinstance(request.data, dict) and (
+            request.data.get('bulk_from_waiting')
+            or request.data.get('restore_last_waiting')
+            or request.data.get('restore_last_waiting_preview')
+        ):
             return WaitingTransferView().post(request)
         from accounts.models import User
         from accounts.services import sync_student_from_lead
@@ -398,8 +402,10 @@ class UnregisteredStudentListView(generics.ListCreateAPIView):
             data['gender'] = {'girls': 'female', 'boys': 'male'}.get(picked_slot.gender, '')
             if not data.get('term') and picked_slot.term_id:
                 data['term'] = picked_slot.term_id
+        # برای انتقال از «منتظر ثبت‌نام» ممکن است هنوز کلاس/روز مقصد مشخص نشده باشد؛
+        # فرد باید بدون خطا وارد پیگیری شود و کلاس بعداً قابل تکمیل باشد.
         if not str(data.get('class_level') or '').strip():
-            return Response({'error': 'کلاسی را که فرد در آن قرار دارد انتخاب کنید (سطح از کلاس خودکار پر می‌شود)'}, status=status.HTTP_400_BAD_REQUEST)
+            data['class_level'] = 'نامشخص'
         data['phone'] = str(data.get('phone') or '').strip()
         data['national_code'] = str(data.get('national_code') or '').strip()
         term = data.get('term') or get_current_term()
@@ -469,6 +475,8 @@ class UnregisteredStudentDetailView(generics.RetrieveUpdateDestroyAPIView):
     def update(self, request, *args, **kwargs):
         if not can_edit_menu(request.user, "followups"):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
+        if request.data.get('contacted') is True or str(request.data.get('contacted', '')).lower() in ('1', 'true', 'yes'):
+            return Response({'error': 'ثبت تیک تماس فقط با دکمهٔ «پیگیری» یا «جواب نداد» مجاز است؛ تیک موجود را می‌توانید بردارید.'}, status=status.HTTP_400_BAD_REQUEST)
         return super().update(request, *args, **kwargs)
 
     def destroy(self, request, *args, **kwargs):
@@ -491,6 +499,9 @@ class UnregisteredStudentFollowupView(APIView):
         UnregisteredStudentFollowup.objects.create(
             student=student, followed_up_by=request.user, note=request.data.get('note', '')
         )
+        if not student.contacted:
+            student.contacted = True
+            student.save(update_fields=['contacted', 'updated_at'])
         return Response(UnregisteredStudentSerializer(student).data, status=status.HTTP_201_CREATED)
 
 
@@ -848,7 +859,9 @@ class UnregisteredStudentStatsView(APIView):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         archive = str(request.query_params.get('archive') or '').lower() in ('1', 'true', 'yes')
         qs = _term_scoped_stats_qs(UnregisteredStudent.objects.all(), request.query_params.get('term_id'), UnregisteredStudent.Status.REGISTERED, archive=archive)
-        tracking = qs.filter(status=UnregisteredStudent.Status.TRACKING)
+        tracking_all = qs.filter(status=UnregisteredStudent.Status.TRACKING)
+        tracking_not_coming = tracking_all.filter(not_coming=True)
+        tracking = tracking_all.filter(not_coming=False)
         registered = qs.filter(status=UnregisteredStudent.Status.REGISTERED)
         now_local = timezone.localtime(timezone.now())
         import jdatetime
@@ -857,23 +870,41 @@ class UnregisteredStudentStatsView(APIView):
         level_price = {}  # شهریهٔ هر سطح فقط یک‌بار محاسبه شود
 
         def potential_price(s):
-            # اگر شهریه‌ی پیشنهادی ثبت نشده باشد، شهریه‌ی تعریف‌شده‌ی همان سطح محاسبه می‌شود
-            if s.tuition_price:
-                return s.tuition_price
+            # اگر برای خود فرد مبلغ شهریه ثبت شده باشد همان مبلغ قطعیِ مبنای
+            # آمار است؛ تعرفهٔ سطح فقط برای ردیف‌هایی استفاده می‌شود که مبلغ
+            # اختصاصی ندارند. به این ترتیب تغییر تعرفه یا latest_level جمع را
+            # برای افراد دارای مبلغ ثبت‌شده تغییر نمی‌دهد.
+            try:
+                stored = max(int(s.tuition_price or 0), 0)
+                if stored > 0:
+                    return stored
+            except (TypeError, ValueError):
+                pass
             try:
                 level = s.latest_level or s.class_level
                 if level not in level_price:
                     level_price[level] = int(_tuition_for_level(level) or 0)
-                return level_price[level]
+                if level_price[level] > 0:
+                    return level_price[level]
             except Exception:
+                pass
+            return int(s.tuition_price or 0)
+
+        def realized_price(s):
+            # محقق‌شده فقط مبلغی است که هنگام ثبت‌نام واقعاً برای همین ردیف ثبت شده؛
+            # تعرفهٔ فعلی یا بدهیِ جداگانه نباید مبلغ وصول‌شده محسوب شود.
+            try:
+                return max(int(s.tuition_price or 0), 0)
+            except (TypeError, ValueError):
                 return 0
+
         return Response({
             'total': qs.count(),
             'tracking_count': tracking.count(),
+            'not_coming_count': tracking_not_coming.count(),
             'registered_count': registered.count(),
-            'total_tuition_potential': sum(potential_price(s) for s in tracking) + sum(
-                d.debt_amount for d in _term_scoped_stats_qs(Debtor.objects.all(), request.query_params.get('term_id'), Debtor.Status.SETTLED, archive=archive).filter(status=Debtor.Status.PENDING, awaiting_registration=True)),
-            'total_tuition_registered': sum(s.tuition_price or 0 for s in registered),
+            'total_tuition_potential': sum(potential_price(s) for s in tracking),
+            'total_tuition_registered': sum(realized_price(s) for s in registered),
             'generated_at_jalali': jdatetime.datetime.fromgregorian(datetime=now_local).strftime('%Y/%m/%d - %H:%M:%S'),
         })
 
@@ -1143,6 +1174,8 @@ class DebtorDetailView(generics.RetrieveUpdateDestroyAPIView):
     def update(self, request, *args, **kwargs):
         if not can_edit_menu(request.user, "followups"):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
+        if request.data.get('contacted') is True or str(request.data.get('contacted', '')).lower() in ('1', 'true', 'yes'):
+            return Response({'error': 'ثبت تیک تماس فقط با دکمهٔ «پیگیری» یا «جواب نداد» مجاز است؛ تیک موجود را می‌توانید بردارید.'}, status=status.HTTP_400_BAD_REQUEST)
         return super().update(request, *args, **kwargs)
 
     def destroy(self, request, *args, **kwargs):
@@ -1162,6 +1195,9 @@ class DebtorFollowupView(APIView):
         except Debtor.DoesNotExist:
             return Response({'error': 'مورد پیدا نشد'}, status=status.HTTP_404_NOT_FOUND)
         DebtorFollowup.objects.create(debtor=debtor, followed_up_by=request.user, note=request.data.get('note', ''))
+        if not debtor.contacted:
+            debtor.contacted = True
+            debtor.save(update_fields=['contacted', 'updated_at'])
         return Response(DebtorSerializer(debtor).data, status=status.HTTP_201_CREATED)
 
 
@@ -1524,13 +1560,16 @@ class DebtorStatsView(APIView):
         archive = str(request.query_params.get('archive') or '').lower() in ('1', 'true', 'yes')
         qs = _term_scoped_stats_qs(Debtor.objects.all(), request.query_params.get('term_id'), Debtor.Status.SETTLED, archive=archive)
         # «منتظر ثبت‌نام»های انتقالی در واقع ثبت‌نام‌نشده‌اند و در جمع بدهی‌ها نمی‌آیند
-        pending = qs.filter(status=Debtor.Status.PENDING, awaiting_registration=False)
+        pending_all = qs.filter(status=Debtor.Status.PENDING, awaiting_registration=False)
+        pending_not_coming = pending_all.filter(not_coming=True)
+        pending = pending_all.filter(not_coming=False)
         settled = qs.filter(status=Debtor.Status.SETTLED)
         now_local = timezone.localtime(timezone.now())
         import jdatetime
         return Response({
             'total': qs.count(),
             'pending_count': pending.count(),
+            'not_coming_count': pending_not_coming.count(),
             'settled_count': settled.count(),
             'total_debt_pending': sum(d.debt_amount for d in pending),
             'total_debt_settled': sum(d.debt_amount for d in settled),
@@ -2081,9 +2120,69 @@ class WaitingTransferView(APIView):
     """
     permission_classes = [IsAuthenticated]
     NOTE = 'منتقل‌شده از فهرست منتظر ثبت‌نام — نیازمند پیگیری'
+    BATCH_PREFIX = '__WAITING_TRANSFER_BATCH_'
 
     def post(self, request):
         from django.db import transaction, IntegrityError
+        import re
+        from uuid import uuid4
+        from datetime import timedelta
+        if isinstance(request.data, dict) and request.data.get('restore_last_waiting'):
+            if request.user.role not in ('admin', 'office', 'employee') and not can_edit_menu(request.user, 'followups'):
+                return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
+            from class_management.models import Term
+            term_id = request.data.get('term')
+            term = Term.objects.filter(pk=term_id).first() if term_id not in (None, '') else get_current_term()
+            if term is None:
+                return Response({'error': 'ترم مقصد پیدا نشد'}, status=status.HTTP_400_BAD_REQUEST)
+            active_rows = UnregisteredStudent.objects.filter(term=term, status=UnregisteredStudent.Status.TRACKING)
+            requested_marker = str(request.data.get('restore_batch_marker') or '').strip()
+            latest = active_rows.filter(row_description__contains=requested_marker).order_by('-created_at', '-id').first() if requested_marker else None
+            if not latest:
+                latest = active_rows.filter(row_description__contains=self.BATCH_PREFIX).order_by('-created_at', '-id').first()
+            if not latest:
+                latest = active_rows.filter(row_description__contains=self.NOTE).order_by('-created_at', '-id').first()
+            if not latest:
+                return Response({'restored': 0, 'message': 'آخرین گروه انتقال‌یافته پیدا نشد'})
+            match = re.search(r'__WAITING_TRANSFER_BATCH_[0-9a-f]+__', latest.row_description or '')
+            marker = match.group(0) if match else None
+            if marker:
+                rows = list(active_rows.filter(
+                    row_description__contains=marker,
+                ).prefetch_related('followups', 'reported_slot'))
+            else:
+                # سازگاری با انتقال‌های قدیمی که هنوز شناسهٔ گروه نداشتند؛
+                # فقط رکوردهای حداکثر ۱۰ ثانیهٔ آخرِ همان انتقال انتخاب می‌شوند.
+                rows = list(active_rows.filter(
+                    row_description__contains=self.NOTE,
+                    created_at__gte=latest.created_at - timedelta(seconds=10),
+                ).prefetch_related('followups', 'reported_slot'))
+            if request.data.get('restore_last_waiting_preview'):
+                preview = []
+                for item in rows:
+                    slot = getattr(item, 'reported_slot', None)
+                    preview.append({
+                        'id': item.id,
+                        'name': f'{item.first_name} {item.last_name}'.strip(),
+                        'phone': item.phone or '',
+                        'national_code': item.national_code or '',
+                        'class_level': item.class_level or '',
+                        'destination_class': getattr(slot, 'number', None) or 'مشخص نشده',
+                        'destination_day': getattr(slot, 'day_display', None) or getattr(slot, 'day', None) or 'مشخص نشده',
+                        'transferred_at': item.created_at_jalali or 'نامشخص',
+                    })
+                return Response({'preview': preview, 'count': len(preview), 'batch_marker': marker or ''})
+            restored = 0
+            for item in rows:
+                description = (item.row_description or '').replace(marker or '', '').replace(self.NOTE, '')
+                description = '\n'.join(line.strip() for line in description.splitlines() if line.strip()).strip()
+                if not item.followups.exists() and not description:
+                    item.delete()
+                else:
+                    item.row_description = description
+                    item.save(update_fields=['row_description', 'updated_at'])
+                restored += 1
+            return Response({'restored': restored, 'message': 'آخرین گروه به فهرست منتظر ثبت‌نام بازگردانده شد'})
         if request.user.role not in ('admin', 'office', 'employee') and not can_edit_menu(request.user, 'followups'):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         rows = request.data.get('rows') or []
@@ -2099,6 +2198,7 @@ class WaitingTransferView(APIView):
         digits = lambda v: ''.join(ch for ch in str(v or '').translate(str.maketrans('۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩', '01234567890123456789')) if ch.isdigit())
         moved = already = marked = 0
         failures = []
+        batch_marker = f'{self.BATCH_PREFIX}{uuid4().hex}__'
         for raw in rows[:500]:
             raw = raw if isinstance(raw, dict) else {}
             parts = str(raw.get('student_name') or '').strip().split()
@@ -2115,13 +2215,13 @@ class WaitingTransferView(APIView):
                     if existing:
                         already += 1
                         if existing.status != UnregisteredStudent.Status.REGISTERED and self.NOTE not in (existing.row_description or ''):
-                            existing.row_description = f'{existing.row_description}\n{self.NOTE}'.strip()
+                            existing.row_description = f'{existing.row_description}\n{self.NOTE}\n{batch_marker}'.strip()
                             existing.save()
                             marked += 1
                         continue
                     UnregisteredStudent.objects.create(
                         first_name=first, last_name=last, class_level=level, national_code=national, phone=phone,
-                        term=term, row_description=self.NOTE, gender=gender, submitted_by=request.user,
+                        term=term, row_description=f'{self.NOTE}\n{batch_marker}', gender=gender, submitted_by=request.user,
                     )
                     moved += 1
             except IntegrityError:

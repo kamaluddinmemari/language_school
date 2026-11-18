@@ -1161,6 +1161,28 @@ class StudentStatusCheckView(APIView):
                 import logging
                 logging.getLogger(__name__).exception('level sequence check failed')
 
+        # «آخرین سطح» هر فرد: سطحِ نزدیک‌ترین منبع بین آخرین ثبت‌نام در کلاس و آخرین تعیین‌سطحِ تکمیل‌شده (مثل منطق پیشنهاد سطح)
+        last_level_by_student = {}
+        try:
+            from level_tests.models import LevelTest as _LastLT
+            if student_ids:
+                _enr = {}
+                for _e in ClassSlotEnrollment.objects.filter(student_id__in=student_ids).select_related('class_slot').order_by('created_at', 'id'):
+                    if _e.class_slot_id and _e.class_slot.assigned_level:
+                        _enr[_e.student_id] = (_e.created_at, _e.class_slot.assigned_level)
+                _tst = {}
+                for _t in _LastLT.objects.filter(student_id__in=student_ids, status=_LastLT.Status.COMPLETED).order_by('updated_at', 'id'):
+                    if _t.level:
+                        _tst[_t.student_id] = (_t.updated_at, _t.level)
+                for _sid in student_ids:
+                    _a, _b = _enr.get(_sid), _tst.get(_sid)
+                    _pick = _a if (_a and (not _b or _a[0] >= _b[0])) else _b
+                    if _pick:
+                        last_level_by_student[_sid] = _pick[1]
+        except Exception:
+            import logging
+            logging.getLogger(__name__).exception('last level lookup failed')
+
         results = []
         for entry in list(people.values())[:self.MAX_RESULTS]:
             person = entry['person']
@@ -1183,6 +1205,9 @@ class StudentStatusCheckView(APIView):
                 'next_classes': next_classes_by_student.get(student_id, []) if is_student else [],
                 'enrollment_state': enrollment_state_by_student.get(student_id, 'none') if is_student else 'none',
                 'enrollment_pending_label': 'هنوز ثبت‌نام نکرده' if enrollment_state_by_student.get(student_id) == 'pending_carryover' else '',
+                'last_level': (last_level_by_student.get(student_id) if is_student else '')
+                              or next((r.class_level for r in entry.get('unregistered_records', []) if r.class_level), '')
+                              or (getattr(person, 'language_level', '') or ''),
                 'name': f'{person.first_name} {person.last_name}'.strip(),
                 'national_code': person.national_code or '',
                 'phone': person.phone or '',

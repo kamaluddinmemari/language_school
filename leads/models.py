@@ -274,6 +274,9 @@ class UnregisteredStudent(models.Model):
 
     status = models.CharField(max_length=10, choices=Status.choices, default=Status.TRACKING)
     not_coming = models.BooleanField(default=False, help_text='علامت‌گذاری شده که فرد کلاً نمی‌آید')
+    contacted = models.BooleanField(default=False, help_text='برای این فرد تماس گرفته شده است')
+    respondent = models.CharField(max_length=10, blank=True, default='', choices=[('self', 'خود فرد'), ('father', 'پدر'), ('mother', 'مادر')], help_text='فرد پاسخ‌گو در تماس')
+    respondent = models.CharField(max_length=10, blank=True, default='', choices=[('self', 'خود فرد'), ('father', 'پدر'), ('mother', 'مادر')], help_text='فرد پاسخ‌گو در تماس')
     registered_at = models.DateTimeField(null=True, blank=True)
     term = models.ForeignKey(
         'class_management.Term', on_delete=models.SET_NULL, null=True, blank=True, related_name='+',
@@ -412,6 +415,9 @@ class Debtor(models.Model):
     status = models.CharField(max_length=10, choices=Status.choices, default=Status.PENDING)
     settled_at = models.DateTimeField(null=True, blank=True)
     not_coming = models.BooleanField(default=False, help_text='علامت‌گذاری شده که فرد کلاً نمی‌آید')
+    contacted = models.BooleanField(default=False, help_text='برای این فرد تماس گرفته شده است')
+    respondent = models.CharField(max_length=10, blank=True, default='', choices=[('self', 'خود فرد'), ('father', 'پدر'), ('mother', 'مادر')], help_text='فرد پاسخ‌گو در تماس')
+    respondent = models.CharField(max_length=10, blank=True, default='', choices=[('self', 'خود فرد'), ('father', 'پدر'), ('mother', 'مادر')], help_text='فرد پاسخ‌گو در تماس')
     term = models.ForeignKey(
         'class_management.Term', on_delete=models.SET_NULL, null=True, blank=True, related_name='+',
         help_text='ترمی که این فرد در آن ثبت شده — برای فیلتر ترمی در صفحه‌ی پیگیری',
