@@ -2,7 +2,10 @@ from rest_framework import generics, status
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
+from rest_framework.parsers import MultiPartParser, FormParser
 from django.utils import timezone
+from datetime import timedelta
+from django.utils.dateparse import parse_datetime
 from django.db import models
 from accounts.models import User
 from django.conf import settings
@@ -233,11 +236,13 @@ class DailyTaskListCreateView(APIView):
 
     def get(self, request):
         today = timezone.localdate()
+        archive_cutoff = timezone.now() - timedelta(days=5)
+        archived_ids = DailyTask.objects.filter(is_information=False).annotate(last_completion=models.Max('completions__completed_at')).filter(last_completion__lte=archive_cutoff).values('pk')
         qs = DailyTask.objects.filter(is_active=True, start_date__lte=today).filter(
             models.Q(end_date__isnull=True) | models.Q(end_date__gte=today)
-        ).prefetch_related('assigned_to', 'completions', 'replies')
+        ).filter(archived_at__isnull=True).exclude(pk__in=archived_ids).prefetch_related('assigned_to', 'completions', 'replies')
         if request.user.role not in TASK_MANAGER_ROLES:
-            qs = qs.filter(models.Q(assigned_to__isnull=True) | models.Q(assigned_to=request.user)).distinct()
+            qs = qs.filter(models.Q(audience_mode='normal') | models.Q(assigned_to__isnull=True) | models.Q(assigned_to=request.user)).distinct()
         return Response(DailyTaskSerializer(qs, many=True, context={'request': request}).data)
 
     def post(self, request):
@@ -290,6 +295,63 @@ class DailyTaskDetailView(APIView):
         return Response({'message': 'دستور کاری حذف شد'})
 
 
+class DailyTaskArchiveView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        cutoff = timezone.now() - timedelta(days=5)
+        qs = DailyTask.objects.filter(is_active=True, is_information=False).annotate(
+            last_completion=models.Max('completions__completed_at')
+        ).filter(models.Q(archived_at__isnull=False) | models.Q(last_completion__lte=cutoff)).order_by('-archived_at', '-last_completion').prefetch_related('assigned_to', 'completions', 'replies')
+        if request.user.role not in TASK_MANAGER_ROLES:
+            qs = qs.filter(models.Q(audience_mode='normal') | models.Q(assigned_to__isnull=True) | models.Q(assigned_to=request.user)).distinct()
+        return Response(DailyTaskSerializer(qs, many=True, context={'request': request, 'archive_mode': True}).data)
+
+    def post(self, request):
+        if request.data.get('action') == 'delete':
+            return self._permanently_delete(request)
+        if request.user.role not in TASK_MANAGER_ROLES:
+            return Response({'error': 'فقط مدیر می‌تواند دستور را به بایگانی منتقل کند'}, status=status.HTTP_403_FORBIDDEN)
+        task_id = request.data.get('task_id')
+        task = DailyTask.objects.filter(pk=task_id, is_active=True, is_information=False).first()
+        if not task:
+            return Response({'error': 'دستور کاری پیدا نشد'}, status=status.HTTP_404_NOT_FOUND)
+        target = request.user
+        employee_id = request.data.get('employee_id')
+        if employee_id:
+            target = User.objects.filter(pk=employee_id, role__in=('office', 'employee'), is_active=True).first()
+            if not target:
+                return Response({'error': 'کارمند انتخاب‌شده معتبر نیست'}, status=status.HTTP_400_BAD_REQUEST)
+        is_self_manager = target.pk == request.user.pk and request.user.role in TASK_MANAGER_ROLES
+        if not is_self_manager and task.assigned_to.exists() and not task.assigned_to.filter(pk=target.pk).exists():
+            return Response({'error': 'این دستور به این کارمند ارجاع نشده است'}, status=status.HTTP_403_FORBIDDEN)
+        if not DailyTaskCompletion.objects.filter(task=task, employee=target, completed_on=timezone.localdate()).exists():
+            return Response({'error': 'ابتدا دستور را برای این کارمند انجام‌شده ثبت کنید'}, status=status.HTTP_400_BAD_REQUEST)
+        task.archived_at = timezone.now()
+        task.save(update_fields=['archived_at'])
+        return Response({'archived': True, 'task_id': task.pk})
+
+    def _permanently_delete(self, request):
+        if request.user.role not in TASK_MANAGER_ROLES:
+            return Response({'error': 'فقط مدیر می‌تواند موارد بایگانی را برای همیشه حذف کند'}, status=status.HTTP_403_FORBIDDEN)
+        raw_ids = request.data.get('task_ids', [])
+        if not isinstance(raw_ids, list) or not raw_ids:
+            return Response({'error': 'فهرست دستورهای انتخاب‌شده خالی است'}, status=status.HTTP_400_BAD_REQUEST)
+        cutoff = timezone.now() - timedelta(days=5)
+        archived_ids = list(DailyTask.objects.filter(pk__in=raw_ids, is_active=True, is_information=False).annotate(
+            last_completion=models.Max('completions__completed_at')
+        ).filter(models.Q(archived_at__isnull=False) | models.Q(last_completion__lte=cutoff)).values_list('pk', flat=True))
+        if not archived_ids:
+            return Response({'deleted': 0})
+        for reply in DailyTaskReply.objects.filter(task_id__in=archived_ids).exclude(attachment=''):
+            reply.attachment.delete(save=False)
+        deleted, _ = DailyTask.objects.filter(pk__in=archived_ids).delete()
+        return Response({'deleted': deleted})
+
+
+    def delete(self, request):
+        return self._permanently_delete(request)
+
 class DailyTaskStaffView(APIView):
     permission_classes = [IsAuthenticated]
     def get(self, request):
@@ -307,6 +369,8 @@ class DailyTaskCompleteView(APIView):
         task = DailyTask.objects.filter(pk=pk, is_active=True).first()
         if not task:
             return Response({'error': 'دستور کاری پیدا نشد'}, status=status.HTTP_404_NOT_FOUND)
+        if task.is_information:
+            return Response({'error': 'این مورد اطلاع‌رسانی است و ثبت انجام ندارد'}, status=status.HTTP_400_BAD_REQUEST)
         today = timezone.localdate()
         if not (task.start_date <= today and (not task.end_date or today <= task.end_date)):
             return Response({'error': 'این دستور در بازهٔ امروز فعال نیست'}, status=status.HTTP_400_BAD_REQUEST)
@@ -323,6 +387,9 @@ class DailyTaskCompleteView(APIView):
         is_self_manager = target.pk == request.user.pk and request.user.role in TASK_MANAGER_ROLES
         if not is_self_manager and task.assigned_to.exists() and not task.assigned_to.filter(pk=target.pk).exists():
             return Response({'error': 'این دستور به این کارمند ارجاع نشده است'}, status=status.HTTP_403_FORBIDDEN)
+        if request.data.get('completed') is False or str(request.data.get('completed', '')).lower() in ('0', 'false', 'off'):
+            DailyTaskCompletion.objects.filter(task=task, employee=target, completed_on=today).delete()
+            return Response({'completed': False, 'employee_id': target.pk})
         note = str(request.data.get('note') or '').strip()[:4000]
         completion, created = DailyTaskCompletion.objects.get_or_create(
             task=task, employee=target, completed_on=today, defaults={'note': note}
@@ -333,16 +400,41 @@ class DailyTaskCompleteView(APIView):
         return Response(DailyTaskCompletionSerializer(completion).data)
 
 
+    def delete(self, request, pk):
+        if request.user.role not in TASK_STAFF_ROLES:
+            return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
+        task = DailyTask.objects.filter(pk=pk, is_active=True).first()
+        if not task:
+            return Response({'error': 'دستور کاری پیدا نشد'}, status=status.HTTP_404_NOT_FOUND)
+        today = timezone.localdate()
+        if not (task.start_date <= today and (not task.end_date or today <= task.end_date)):
+            return Response({'error': 'این دستور در بازهٔ امروز فعال نیست'}, status=status.HTTP_400_BAD_REQUEST)
+        target = request.user
+        requested_employee = request.data.get('employee_id')
+        if request.user.role in TASK_MANAGER_ROLES and requested_employee:
+            target = User.objects.filter(pk=requested_employee, role__in=('office', 'employee'), is_active=True).first()
+            if not target:
+                return Response({'error': 'کارمند انتخاب‌شده معتبر نیست'}, status=status.HTTP_400_BAD_REQUEST)
+        elif requested_employee and str(requested_employee) != str(request.user.pk):
+            return Response({'error': 'هر کارمند فقط می‌تواند وضعیت انجام خودش را بازگرداند'}, status=status.HTTP_403_FORBIDDEN)
+        is_self_manager = target.pk == request.user.pk and request.user.role in TASK_MANAGER_ROLES
+        if not is_self_manager and task.assigned_to.exists() and not task.assigned_to.filter(pk=target.pk).exists():
+            return Response({'error': 'این دستور به این کارمند ارجاع نشده است'}, status=status.HTTP_403_FORBIDDEN)
+        DailyTaskCompletion.objects.filter(task=task, employee=target, completed_on=today).delete()
+        return Response({'completed': False, 'employee_id': target.pk})
+
+
 class DailyTaskReplyCreateView(APIView):
     """POST: پاسخ/توضیح روی یک دستور (با parent اختیاری برای حالت ریپلای)."""
     permission_classes = [IsAuthenticated]
+    parser_classes = [MultiPartParser, FormParser]
     def post(self, request, pk):
         if request.user.role not in TASK_STAFF_ROLES:
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
         task = DailyTask.objects.filter(pk=pk, is_active=True).first()
         if not task:
             return Response({'error': 'دستور کاری پیدا نشد'}, status=status.HTTP_404_NOT_FOUND)
-        if not _task_manager(request.user) and task.assigned_to.exists() and not task.assigned_to.filter(pk=request.user.pk).exists():
+        if not _task_manager(request.user) and task.audience_mode == 'confidential' and task.assigned_to.exists() and not task.assigned_to.filter(pk=request.user.pk).exists():
             return Response({'error': 'این دستور به شما ارجاع نشده است'}, status=status.HTTP_403_FORBIDDEN)
         body = str(request.data.get('body') or '').strip()[:4000]
         if not body:
@@ -357,16 +449,40 @@ class DailyTaskReplyCreateView(APIView):
             if not parent:
                 return Response({'error': 'پیام مورد نظر برای ریپلای پیدا نشد'}, status=status.HTTP_400_BAD_REQUEST)
         try:
-            reply = DailyTaskReply.objects.create(task=task, author=request.user, parent=parent, body=body)
+            reply = DailyTaskReply.objects.create(
+                task=task, author=request.user, parent=parent, body=body,
+                attachment=request.FILES.get('attachment'),
+                scheduled_at=parse_datetime(str(request.data.get('scheduled_at'))) if request.data.get('scheduled_at') else None,
+            )
             return Response(DailyTaskReplySerializer(reply, context={'request': request}).data, status=status.HTTP_201_CREATED)
         except Exception as exc:
             import logging
             logging.getLogger(__name__).exception('daily task reply failed')
-            return Response({'error': f'ثبت پاسخ انجام نشد ({type(exc).__name__}). احتمالاً باید python manage.py migrate اجرا و سرور restart شود.'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            return Response({'error': f'ثبت پاسخ انجام نشد: {exc or type(exc).__name__}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
 class DailyTaskReplyDetailView(APIView):
     permission_classes = [IsAuthenticated]
+    parser_classes = [MultiPartParser, FormParser]
+    def patch(self, request, pk):
+        reply = DailyTaskReply.objects.select_related('task').filter(pk=pk).first()
+        if not reply:
+            return Response({'error': 'پاسخ پیدا نشد'}, status=status.HTTP_404_NOT_FOUND)
+        if reply.author_id != request.user.pk and not _task_manager(request.user):
+            return Response({'error': 'فقط نویسنده یا مدیر می‌تواند ویرایش کند'}, status=status.HTTP_403_FORBIDDEN)
+        body = str(request.data.get('body', reply.body) or '').strip()[:4000]
+        if not body:
+            return Response({'error': 'متن پاسخ خالی است'}, status=status.HTTP_400_BAD_REQUEST)
+        reply.body = body
+        if str(request.data.get('remove_attachment', '')).lower() in ('1', 'true', 'yes') and reply.attachment:
+            reply.attachment.delete(save=False)
+            reply.attachment = None
+        if 'scheduled_at' in request.data:
+            reply.scheduled_at = parse_datetime(str(request.data.get('scheduled_at'))) if request.data.get('scheduled_at') else None
+        if request.FILES.get('attachment'):
+            reply.attachment = request.FILES['attachment']
+        reply.save()
+        return Response(DailyTaskReplySerializer(reply, context={'request': request}).data)
     def delete(self, request, pk):
         reply = DailyTaskReply.objects.filter(pk=pk).first()
         if not reply:

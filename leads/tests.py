@@ -177,6 +177,32 @@ class NationalCodeIdentityTests(TestCase):
         self.assertEqual(other_row.status, UnregisteredStudent.Status.TRACKING)
         self.assertEqual(previous_row.status, UnregisteredStudent.Status.REGISTERED)
 
+    def test_matching_registered_row_with_persian_national_code_digits(self):
+        record = UnregisteredStudent.objects.create(
+            first_name='رها', last_name='مقدسی', phone='09120000077',
+            national_code='۱۱۱۱۱۱۱۱۱۱', class_level='A1', term=self.term,
+        )
+
+        auto_mark_unregistered_registered(self.registered, term_id=self.term.pk, slot_id=self.slot.pk)
+
+        record.refresh_from_db()
+        self.assertEqual(record.status, UnregisteredStudent.Status.REGISTERED)
+
+    def test_pending_payment_enrollment_removes_followup_row(self):
+        record = UnregisteredStudent.objects.create(
+            first_name=self.registered.first_name, last_name=self.registered.last_name,
+            phone=self.registered.phone, national_code=self.registered.national_code,
+            class_level='A1', term=self.term,
+        )
+
+        ClassSlotEnrollment.objects.create(
+            class_slot=self.slot, student=self.registered, payment_method='card',
+            tuition_amount=100000, payment_verified=False,
+        )
+
+        record.refresh_from_db()
+        self.assertEqual(record.status, UnregisteredStudent.Status.REGISTERED)
+
     def test_resolve_and_sync_do_not_fallback_to_shared_phone_when_code_is_given(self):
         record = UnregisteredStudent(
             first_name='رها', last_name='مقدسی', phone='09120000077',

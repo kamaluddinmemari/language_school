@@ -1086,7 +1086,7 @@ from django.dispatch import receiver as _receiver
 @_receiver(_post_save, sender=ClassSlotEnrollment)
 def _auto_clear_unregistered(sender, instance, **kwargs):
     # انتقالیِ خاکستری هنوز ثبت‌نام قطعی نیست؛ انتقالیِ تأییدشده ثبت‌نام قطعی است.
-    if (instance.is_carryover and not instance.carryover_confirmed) or not instance.payment_verified:
+    if instance.is_carryover and not instance.carryover_confirmed:
         return
     try:
         from leads.models import auto_mark_unregistered_registered

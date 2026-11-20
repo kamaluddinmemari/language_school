@@ -63,6 +63,9 @@ REPEAT_FOREVER_DATE = _dt.date(2999, 12, 31)
 
 class DailyTask(models.Model):
     """دستور روزانه یا بازه‌ای برای یک یا همهٔ کارکنان اداری."""
+    class AudienceMode(models.TextChoices):
+        NORMAL = 'normal', 'عادی'
+        CONFIDENTIAL = 'confidential', 'محرمانه'
     title = models.CharField(max_length=180)
     body = models.TextField()
     link_label = models.CharField(max_length=80, blank=True, default='اینجا')
@@ -72,6 +75,10 @@ class DailyTask(models.Model):
     end_date = models.DateField(null=True, blank=True)
     end_time = models.TimeField(null=True, blank=True)
     assigned_to = models.ManyToManyField(User, blank=True, related_name='daily_tasks', help_text='خالی = مشترک برای همه کارکنان')
+    audience_mode = models.CharField(max_length=20, choices=AudienceMode.choices, default=AudienceMode.NORMAL)
+    is_information = models.BooleanField(default=False, help_text='دستور اطلاع‌رسانی است و تیک انجام ندارد')
+    show_body_with_title = models.BooleanField(default=False, help_text='متن پیام در کنار عنوان دستور اطلاع‌رسانی نمایش داده شود')
+    archived_at = models.DateTimeField(null=True, blank=True)
     is_active = models.BooleanField(default=True)
     created_by = models.ForeignKey(User, null=True, blank=True, on_delete=models.SET_NULL, related_name='created_daily_tasks')
     created_at = models.DateTimeField(auto_now_add=True)
@@ -103,8 +110,11 @@ class DailyTaskReply(models.Model):
     author = models.ForeignKey(User, on_delete=models.CASCADE, related_name='daily_task_replies')
     parent = models.ForeignKey('self', null=True, blank=True, on_delete=models.SET_NULL, related_name='children')
     body = models.TextField()
+    attachment = models.FileField(upload_to='daily-task-replies/%Y/%m/', null=True, blank=True)
+    scheduled_at = models.DateTimeField(null=True, blank=True)
     created_on = models.DateField(default=timezone.localdate)
     created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
     class Meta:
         ordering = ['created_at', 'id']
     @property

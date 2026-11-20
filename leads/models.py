@@ -76,13 +76,14 @@ def auto_mark_unregistered_registered(student, term_id=None, slot_id=None):
     first = (getattr(student, 'first_name', '') or '').strip()
     last = (getattr(student, 'last_name', '') or '').strip()
     if national:
+        # کد ملی ممکن است با رقم فارسی/عربی ذخیره شده باشد و برابری SQL آن را پیدا نکند.
+        # نام کامل فقط کاندیدا می‌سازد؛ پایین‌تر کد و تلفن نرمال‌شده دقیق تطبیق داده می‌شوند.
         q = Q(national_code=national)
-        # رکوردهای قدیمی ممکن است کد ملی را با رقم فارسی/عربی یا اصلاً خالی ذخیره کرده باشند.
-        # با موبایل و نام هم کاندید می‌گیریم، ولی کد ملیِ غیرخالی و متفاوت را پایین‌تر رد می‌کنیم.
-        if phone_key and first and last:
-            q |= Q(phone=phone, first_name=first, last_name=last)
+        if first and last:
+            q |= Q(first_name=first, last_name=last)
     elif phone and first and last:
-        q = Q(phone=phone, first_name=first, last_name=last)
+        # شماره‌های قدیمی ممکن است با +98، رقم فارسی یا فاصله ذخیره شده باشند.
+        q = Q(phone=phone, first_name=first, last_name=last) | Q(first_name=first, last_name=last)
     elif first and last:
         q = Q(first_name=first, last_name=last)
     else:
@@ -117,6 +118,77 @@ def auto_mark_unregistered_registered(student, term_id=None, slot_id=None):
         row.save()
         count += 1
     return count
+
+
+_UNREGISTERED_RECONCILE_AT = {}
+
+
+def reconcile_unregistered_for_term(term_id):
+    """ثبت‌نام‌های موجود را هم گروهی با فهرست پیگیری تطبیق می‌دهد؛ برای ترمیم داده‌های قدیمیِ جاافتاده از signal."""
+    if not term_id:
+        return 0
+    import time
+    now = time.monotonic()
+    if now - _UNREGISTERED_RECONCILE_AT.get(str(term_id), 0) < 15:
+        return 0
+    from django.db.models import Q
+    from class_management.models import ClassSlotEnrollment, Term
+    term = Term.objects.filter(pk=term_id).first()
+    if not term:
+        return 0
+    earlier_terms = Term.objects.filter(
+        Q(year__lt=term.year) | Q(year=term.year, term_number__lt=term.term_number)
+    )
+    enrollments = ClassSlotEnrollment.objects.filter(
+        class_slot__term_id=term.pk, student__role='student',
+    ).exclude(is_carryover=True, carryover_confirmed=False).select_related('student').only(
+        'student_id', 'student__national_code', 'student__phone', 'student__first_name', 'student__last_name',
+    )
+    codes, phone_names, phone_name_codes, names = set(), set(), {}, set()
+    for enrollment in enrollments:
+        person = enrollment.student
+        code = normalize_national_code(person.national_code)
+        phone = normalize_phone(person.phone)
+        name = ' '.join(f'{person.first_name or ""} {person.last_name or ""}'.replace('ي', 'ی').replace('ك', 'ک').split()).casefold()
+        if not name:
+            continue
+        if code:
+            codes.add(code)
+        if phone:
+            phone_names.add((phone, name))
+            phone_name_codes.setdefault((phone, name), set())
+            if code:
+                phone_name_codes[(phone, name)].add(code)
+        else:
+            names.add(name)
+    if not codes and not phone_names and not names:
+        _UNREGISTERED_RECONCILE_AT[str(term_id)] = now
+        return 0
+    records = UnregisteredStudent.objects.filter(status=UnregisteredStudent.Status.TRACKING).filter(
+        Q(term_id=term.pk) | Q(term__in=earlier_terms) | Q(term__isnull=True)
+    ).only('id', 'national_code', 'phone', 'first_name', 'last_name', 'term_id')
+    changed, timestamp = [], timezone.now()
+    for row in records.iterator(chunk_size=1000):
+        row_code = normalize_national_code(row.national_code)
+        row_phone = normalize_phone(row.phone)
+        row_name = ' '.join(f'{row.first_name or ""} {row.last_name or ""}'.replace('ي', 'ی').replace('ك', 'ک').split()).casefold()
+        matched = row_code in codes if row_code else False
+        if not matched and row_phone and row_name and (row_phone, row_name) in phone_names:
+            # کد ملی‌های غیرخالی و متفاوت همیشه اشخاص مستقل هستند.
+            matching_codes = phone_name_codes.get((row_phone, row_name), set())
+            matched = not row_code or not matching_codes
+        if not matched and not row_code and not row_phone and row_name in names:
+            matched = True
+        if matched:
+            row.status = UnregisteredStudent.Status.REGISTERED
+            row.registered_at = timestamp
+            if not row.term_id:
+                row.term_id = term.pk
+            changed.append(row)
+    if changed:
+        UnregisteredStudent.objects.bulk_update(changed, ['status', 'registered_at', 'term'])
+    _UNREGISTERED_RECONCILE_AT[str(term_id)] = now
+    return len(changed)
 
 
 def get_current_term():

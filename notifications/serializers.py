@@ -52,10 +52,12 @@ class DailyTaskReplySerializer(serializers.ModelSerializer):
     created_at_jalali = serializers.ReadOnlyField()
     parent_preview = serializers.SerializerMethodField()
     mine = serializers.SerializerMethodField()
+    attachment_url = serializers.SerializerMethodField()
+    edited = serializers.SerializerMethodField()
     class Meta:
         model = DailyTaskReply
-        fields = ['id', 'task', 'author', 'author_name', 'author_role', 'parent', 'parent_preview', 'body', 'created_on', 'created_at', 'created_at_jalali', 'mine']
-        read_only_fields = fields
+        fields = ['id', 'task', 'author', 'author_name', 'author_role', 'parent', 'parent_preview', 'body', 'attachment', 'attachment_url', 'scheduled_at', 'created_on', 'created_at', 'updated_at', 'created_at_jalali', 'mine', 'edited']
+        read_only_fields = ['id', 'task', 'author', 'author_name', 'author_role', 'parent_preview', 'attachment_url', 'created_on', 'created_at', 'updated_at', 'created_at_jalali', 'mine', 'edited']
     def get_author_name(self, obj): return obj.author.get_full_name() or obj.author.username
     def get_parent_preview(self, obj):
         if not obj.parent_id: return None
@@ -64,6 +66,13 @@ class DailyTaskReplySerializer(serializers.ModelSerializer):
     def get_mine(self, obj):
         request = self.context.get('request')
         return bool(request and obj.author_id == request.user.pk)
+    def get_attachment_url(self, obj):
+        if not obj.attachment:
+            return None
+        request = self.context.get('request')
+        return request.build_absolute_uri(obj.attachment.url) if request else obj.attachment.url
+    def get_edited(self, obj):
+        return obj.updated_at > obj.created_at
 
 
 class DailyTaskSerializer(serializers.ModelSerializer):
@@ -74,10 +83,21 @@ class DailyTaskSerializer(serializers.ModelSerializer):
     completed_at_jalali = serializers.SerializerMethodField()
     completion_details = serializers.SerializerMethodField()
     assigned_to_me = serializers.SerializerMethodField()
+    audience_label = serializers.SerializerMethodField()
+    archive_completed_at = serializers.SerializerMethodField()
+    archive_completed_by = serializers.SerializerMethodField()
     class Meta:
         model = DailyTask
-        fields = ['id', 'title', 'body', 'link_label', 'link_url', 'start_date', 'start_time', 'end_date', 'end_time', 'repeat_daily', 'assigned_to', 'assigned_employee_names', 'is_active', 'created_at', 'completed', 'completed_at_jalali', 'completion_details', 'assigned_to_me', 'replies']
-        read_only_fields = ['created_at', 'assigned_employee_names', 'completed', 'completed_at_jalali', 'completion_details', 'assigned_to_me', 'replies']
+        fields = ['id', 'title', 'body', 'link_label', 'link_url', 'start_date', 'start_time', 'end_date', 'end_time', 'repeat_daily', 'assigned_to', 'assigned_employee_names', 'audience_mode', 'audience_label', 'is_information', 'show_body_with_title', 'is_active', 'created_at', 'archive_completed_at', 'archive_completed_by', 'completed', 'completed_at_jalali', 'completion_details', 'assigned_to_me', 'replies']
+        read_only_fields = ['created_at', 'assigned_employee_names', 'audience_label', 'completed', 'completed_at_jalali', 'completion_details', 'assigned_to_me', 'replies']
+    def get_archive_completion(self, obj):
+        return obj.completions.select_related('employee').order_by('-completed_at').first()
+    def get_archive_completed_at(self, obj):
+        completion = self.get_archive_completion(obj)
+        return completion.completed_at_jalali if completion else None
+    def get_archive_completed_by(self, obj):
+        completion = self.get_archive_completion(obj)
+        return (completion.employee.get_full_name() or completion.employee.username) if completion else None
     def get_repeat_daily(self, obj):
         from .models import REPEAT_FOREVER_DATE
         return obj.end_date == REPEAT_FOREVER_DATE
@@ -89,14 +109,18 @@ class DailyTaskSerializer(serializers.ModelSerializer):
     def _replies(self, obj):
         from django.utils import timezone
         request = self.context['request']
-        qs = obj.replies.select_related('author', 'parent', 'parent__author')
+        qs = obj.replies.select_related('author', 'parent', 'parent__author').filter(models.Q(scheduled_at__isnull=True) | models.Q(scheduled_at__lte=timezone.now()))
         if self.get_repeat_daily(obj):
             qs = qs.filter(created_on=timezone.localdate())  # دستور تکراری: هر روز گفتگو از نو
-        if request.user.role not in MANAGER_ROLES:
-            qs = qs.filter(models.Q(author=request.user) | models.Q(author__role__in=MANAGER_ROLES))
+        # دسترسی به خود دستور در view کنترل شده است؛ همه اعضای مجاز گفتگو
+        # باید پاسخ‌های همکاران را نیز ببینند تا بتوانند به هر پاسخ ریپلای کنند.
         return DailyTaskReplySerializer(qs, many=True, context=self.context).data
     def get_assigned_employee_names(self, obj):
         return [u.get_full_name() or u.username for u in obj.assigned_to.all()]
+    def get_audience_label(self, obj):
+        names = self.get_assigned_employee_names(obj)
+        recipient = 'همه' if not names else '، '.join(names)
+        return f"{'محرمانه' if obj.audience_mode == 'confidential' else 'عادی'} — دریافت‌کننده: {recipient}"
     def get_assigned_to_me(self, obj):
         # بدون ارجاع = عمومی (برای همه)؛ وگرنه فقط اگر نام کاربر در فهرست ارجاع باشد
         assigned = list(obj.assigned_to.all())

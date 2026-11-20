@@ -6,7 +6,7 @@ from .views import (
     ContactFeedbackCreateView, MyContactFeedbackListView,
     AdminContactFeedbackListView, AdminContactFeedbackDetailView, MarkContactFeedbackSeenView,
     WebPushPublicKeyView, WebPushSubscribeView, WebPushUnsubscribeView,
-    DailyTaskListCreateView, DailyTaskDetailView, DailyTaskStaffView, DailyTaskCompleteView,
+    DailyTaskListCreateView, DailyTaskDetailView, DailyTaskStaffView, DailyTaskCompleteView, DailyTaskArchiveView,
     DailyTaskReplyCreateView, DailyTaskReplyDetailView,
 )
 
@@ -25,6 +25,7 @@ urlpatterns = [
     path('web-push/subscribe/', WebPushSubscribeView.as_view(), name='web_push_subscribe'),
     path('web-push/unsubscribe/', WebPushUnsubscribeView.as_view(), name='web_push_unsubscribe'),
     path('daily-tasks/staff/', DailyTaskStaffView.as_view(), name='daily_task_staff'),
+    path('daily-tasks/archive/', DailyTaskArchiveView.as_view(), name='daily_task_archive'),
     path('daily-tasks/', DailyTaskListCreateView.as_view(), name='daily_task_list_create'),
     path('daily-tasks/<int:pk>/', DailyTaskDetailView.as_view(), name='daily_task_detail'),
     path('daily-tasks/<int:pk>/replies/', DailyTaskReplyCreateView.as_view(), name='daily_task_reply_create'),

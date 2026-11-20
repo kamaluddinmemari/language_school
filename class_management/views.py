@@ -3571,7 +3571,7 @@ class TermEnrollmentComparisonView(APIView):
             )
         }
         sets = {
-            term.id: {'all': set(), 'levels': {}, 'genders': {}, 'days': {}}
+            term.id: {'all': set(), 'levels': {}, 'genders': {}, 'level_genders': {}, 'days': {}}
             for term in ordered_terms
         }
         enrollments = ClassSlotEnrollment.objects.filter(
@@ -3590,6 +3590,7 @@ class TermEnrollmentComparisonView(APIView):
             gender = student_gender if student_gender in ('female', 'male') else 'unknown'
             day = slot.get_day_type_display() or 'نامشخص'
             bucket['levels'].setdefault(level, set()).add(person_key)
+            bucket['level_genders'].setdefault(level, {}).setdefault(gender, set()).add(person_key)
             bucket['genders'].setdefault(gender, set()).add(person_key)
             bucket['days'].setdefault(day, set()).add(person_key)
 
@@ -3624,6 +3625,7 @@ class TermEnrollmentComparisonView(APIView):
             'start_date': term.start_date.isoformat() if term.start_date else None,
             'total': len(sets[term.id]['all']),
             'levels': {level: len(sets[term.id]['levels'].get(level, set())) for level in levels + extra_levels},
+            'level_genders': {level: {gender: len(sets[term.id]['level_genders'].get(level, {}).get(gender, set())) for gender in ('female', 'male', 'unknown')} for level in levels + extra_levels},
             'genders': {gender: len(sets[term.id]['genders'].get(gender, set())) for gender in ('female', 'male', 'unknown')},
             'days': {day: len(sets[term.id]['days'].get(day, set())) for day in days},
         } for term in ordered_terms]
@@ -3636,6 +3638,254 @@ class TermEnrollmentComparisonView(APIView):
             'generated_at': timezone.now().isoformat(),
         })
 
+
+class TermEnrollmentTimelineView(APIView):
+    """سری زمانی تجمعی ثبت‌نام قطعی ترم، با تفکیک روز/سطح/جنسیت."""
+    permission_classes = [IsAuthenticated]
+    def get(self, request):
+        if not (can_view_menu(request.user, 'class-management') or can_edit_menu(request.user, 'class-management')):
+            return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
+        try:
+            term = Term.objects.get(pk=request.query_params.get('term_id'))
+        except (Term.DoesNotExist, TypeError, ValueError):
+            return Response({'error': 'ترم انتخاب‌شده پیدا نشد'}, status=status.HTTP_404_NOT_FOUND)
+        annual_mode = str(request.query_params.get('annual') or '').lower() in ('1', 'true', 'yes')
+        timeline_terms = [term]
+        if annual_mode:
+            timeline_terms = list(Term.objects.filter(year=term.year).order_by('term_number', 'id'))
+            first_term = timeline_terms[0] if timeline_terms else term
+            start = first_term.pre_registration_start or first_term.start_date
+            end = timezone.localdate()
+        else:
+            start = parse_date(request.query_params.get('date_from') or '') or term.pre_registration_start or term.start_date
+            end = parse_date(request.query_params.get('date_to') or '') or term.end_date
+        if not start or not end or end < start:
+            return Response({'error': 'بازهٔ تاریخی معتبر نیست'}, status=status.HTTP_400_BAD_REQUEST)
+        timeline_term_ids = [item.id for item in timeline_terms]
+        # ملاک roster و آمار کل دقیقاً با TermEnrollmentComparisonView یکسان است:
+        # دانش‌آموز یکتا با ثبت‌نام تاییدشده و انتقالِ قطعی.
+        term_by_id = {item.id: item for item in timeline_terms}
+        roster_by_person = {}
+        people_by_date = {}
+        level_names = set()
+        confirmed_enrollments = ClassSlotEnrollment.objects.filter(
+            class_slot__term_id__in=timeline_term_ids, student__role='student', payment_verified=True
+        ).filter(Q(is_carryover=False) | Q(carryover_confirmed=True)).select_related(
+            'student', 'class_slot'
+        ).order_by('created_at', 'id')
+        for enrollment in confirmed_enrollments:
+            student = enrollment.student
+            source_term_id = enrollment.class_slot.term_id
+            identity = _wl_digits(student.national_code) or f'id:{student.id}'
+            person_key = (source_term_id, identity)
+            registered_at = enrollment.created_at
+            if timezone.is_naive(registered_at):
+                registered_at = timezone.make_aware(registered_at, timezone.get_current_timezone())
+            source_term = term_by_id.get(source_term_id)
+            # برای انتقال تاییدشده، تاریخ زمانِ تایید جداگانه ذخیره نمی‌شود؛ اگر ردیف انتقالی پیش از
+            # شروع پیش‌ثبت‌نام ساخته شده باشد، آن را در شروع پیش‌ثبت‌نام ثبت می‌کنیم تا از آمار ترم حذف نشود.
+            if (enrollment.is_carryover and enrollment.carryover_confirmed and source_term
+                    and source_term.pre_registration_start
+                    and timezone.localtime(registered_at).date() < source_term.pre_registration_start):
+                registered_at = timezone.make_aware(
+                    datetime.combine(source_term.pre_registration_start, datetime.min.time()),
+                    timezone.get_current_timezone(),
+                )
+            level = (enrollment.class_slot.assigned_level or '').strip() or 'بدون سطح'
+            gender = student.gender if student.gender in ('female', 'male') else 'unknown'
+            previous = roster_by_person.get(person_key)
+            if previous is None or registered_at < previous['registered_at']:
+                roster_by_person[person_key] = {
+                    'registered_at': registered_at, 'level': level, 'gender': gender,
+                }
+        for (source_term_id, identity), person in roster_by_person.items():
+            registered_date = timezone.localtime(person['registered_at']).date()
+            level_names.add(person['level'])
+            if start <= registered_date <= end:
+                series_key = f'{source_term_id}:{identity}' if annual_mode else identity
+                people_by_date.setdefault(registered_date, {}).setdefault(series_key, {
+                    'level': person['level'], 'gender': person['gender'],
+                })
+        summary = {'total': 0, 'female': 0, 'male': 0, 'unknown': 0, 'by_level': {}, 'by_level_gender': {}}
+        for person in roster_by_person.values():
+            level, gender = person['level'], person['gender']
+            summary['total'] += 1
+            summary[gender] += 1
+            summary['by_level'][level] = summary['by_level'].get(level, 0) + 1
+            summary['by_level_gender'].setdefault(level, {'female': 0, 'male': 0, 'unknown': 0})[gender] += 1
+        points = []
+        # سری زمانی ثبت‌نام از روز آغاز بازه با صفر شروع می‌شود.
+        totals = {'total': 0, 'female': 0, 'male': 0, 'unknown': 0, 'by_level': {}, 'by_level_gender': {}}
+        cursor = start
+        while cursor <= end:
+            day_people = people_by_date.get(cursor, {})
+            added = {'total': 0, 'female': 0, 'male': 0, 'unknown': 0, 'by_level': {}, 'by_level_gender': {}}
+            for person in day_people.values():
+                level, gender = person['level'], person['gender']
+                added['total'] += 1
+                added[gender] += 1
+                added['by_level'][level] = added['by_level'].get(level, 0) + 1
+                added['by_level_gender'].setdefault(level, {'female': 0, 'male': 0, 'unknown': 0})[gender] += 1
+            totals['total'] += added['total']
+            for gender in ('female', 'male', 'unknown'):
+                totals[gender] += added[gender]
+            for level, count in added['by_level'].items():
+                totals['by_level'][level] = totals['by_level'].get(level, 0) + count
+                bucket = totals['by_level_gender'].setdefault(level, {'female': 0, 'male': 0, 'unknown': 0})
+                for gender in ('female', 'male', 'unknown'):
+                    bucket[gender] += added['by_level_gender'][level][gender]
+            points.append({'date': cursor.isoformat(), 'date_jalali': jdatetime.date.fromgregorian(date=cursor).strftime('%Y/%m/%d'),
+                'new': added, 'cumulative': {**totals, 'by_level': dict(totals['by_level']), 'by_level_gender': {k: dict(v) for k, v in totals['by_level_gender'].items()}}})
+            cursor += timedelta(days=1)
+        cumulative_by_date = {point['date']: point['cumulative'] for point in points}
+        session_groups = {}
+        for slot in ClassSlot.objects.filter(term_id__in=timeline_term_ids).select_related('term').prefetch_related('term__holidays'):
+            for session_no, session_day in enumerate(session_dates_for_slot(slot), start=1):
+                if start <= session_day <= end:
+                    key = (slot.term_id, session_no, session_day)
+                    session_groups[key] = session_groups.get(key, 0) + 1
+        sessions = []
+        for (session_term_id, session_no, session_day), classes_count in sorted(
+                session_groups.items(), key=lambda item: (item[0][2], item[0][0], item[0][1])):
+            cumulative = cumulative_by_date.get(session_day.isoformat()) or {}
+            session_term = term_by_id.get(session_term_id)
+            sessions.append({'term_id': session_term_id,
+                'term_number': session_term.term_number if session_term else None,
+                'session_number': session_no, 'date': session_day.isoformat(),
+                'date_jalali': jdatetime.date.fromgregorian(date=session_day).strftime('%Y/%m/%d'),
+                'classes_count': classes_count, 'cumulative': cumulative})
+        pre_registration_periods = [
+            {'term_id': item.id, 'term_number': item.term_number, 'term_title': item.title,
+             'start': item.pre_registration_start.isoformat(),
+             'end': item.pre_registration_end.isoformat(),
+             'start_jalali': item.pre_registration_start_jalali,
+             'end_jalali': item.pre_registration_end_jalali}
+            for item in timeline_terms if item.pre_registration_start and item.pre_registration_end
+        ]
+        term_markers = [
+            {'term_id': item.id, 'term_number': item.term_number, 'term_title': item.title,
+             'date': item.start_date.isoformat(),
+             'date_jalali': item.start_date_jalali}
+            for item in timeline_terms if item.start_date and start <= item.start_date <= end
+        ]
+        scope_label = (f'سال تحصیلی {term.year} — از آغاز ترم {timeline_terms[0].term_number if timeline_terms else term.term_number} موجود تا امروز' if annual_mode else f'آمار {term.title}')
+        return Response({'term_id': term.id, 'term_title': term.title, 'year': term.year, 'annual_scope': annual_mode,
+            'scope_label': scope_label, 'term_ids': timeline_term_ids,
+            'date_from': start.isoformat(), 'date_to': end.isoformat(),
+            'date_from_jalali': jdatetime.date.fromgregorian(date=start).strftime('%Y/%m/%d'),
+            'date_to_jalali': jdatetime.date.fromgregorian(date=end).strftime('%Y/%m/%d'),
+            'levels': sorted(level_names), 'summary': summary, 'points': points, 'sessions': sessions, 'baseline_total': 0,
+            'pre_registration_periods': pre_registration_periods, 'term_markers': term_markers,
+            'pre_registration_start': term.pre_registration_start.isoformat() if term.pre_registration_start else None,
+            'pre_registration_end': term.pre_registration_end.isoformat() if term.pre_registration_end else None,
+            'pre_registration_start_jalali': term.pre_registration_start_jalali or '',
+            'pre_registration_end_jalali': term.pre_registration_end_jalali or '',
+            'count_basis': ('کارت‌ها: افراد یکتای ثبت‌نام‌قطعی در ترم‌های موجود سال (هر فرد در هر ترم یک‌بار)؛ خط: روند ثبت‌نام تا امروز.' if annual_mode else 'کارت‌ها: کل زبان‌آموزان یکتای ثبت‌نام‌قطعی همین ترم، هم‌مبنای مقایسهٔ ترم‌ها؛ خط: روند ثبت‌نام در بازهٔ انتخابی.')})
+
+class TermRegistrationTimingView(APIView):
+    """رتبه‌بندی ثبت‌نام‌های زود/دیر هر ترم و مقایسهٔ ترم‌های یک‌سال اخیر."""
+    permission_classes = [IsAuthenticated]
+    def get(self, request):
+        search_query = (request.query_params.get('q') or '').strip()
+        has_class_access = can_view_menu(request.user, 'class-management') or can_edit_menu(request.user, 'class-management')
+        status_search_roles = {'admin', 'office', 'employee', 'evaluator'}
+        if not has_class_access and not (search_query and request.user.role in status_search_roles):
+            return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
+        try:
+            selected = Term.objects.get(pk=request.query_params.get('term_id'))
+        except (Term.DoesNotExist, TypeError, ValueError):
+            return Response({'error': 'ترم انتخاب‌شده پیدا نشد'}, status=status.HTTP_404_NOT_FOUND)
+        from leads.models import NewLead, UnregisteredStudent
+        def summarize(term):
+            start = term.pre_registration_start or term.start_date
+            end = term.end_date
+            if not start or not end or end < start:
+                return {'term_id': term.id, 'term_title': term.title, 'total': 0, 'earliest': [], 'latest': []}
+            timestamps = {}
+            def remember(national_code, phone, first_name, last_name, value):
+                if not value:
+                    return
+                key = _registered_person_key(national_code, phone, first_name, last_name)
+                if key:
+                    if timezone.is_naive(value):
+                        value = timezone.make_aware(value, timezone.get_current_timezone())
+                    old = timestamps.get(key)
+                    if old is None or value < old:
+                        timestamps[key] = value
+            enrollments = ClassSlotEnrollment.objects.filter(class_slot__term=term, payment_verified=True).filter(
+                Q(is_carryover=False) | Q(carryover_confirmed=True)
+            ).select_related('student').order_by('created_at')
+            for en in enrollments:
+                st = en.student
+                remember(st.national_code, st.phone, st.first_name, st.last_name, en.created_at)
+            for lead in UnregisteredStudent.objects.filter(term=term, status=UnregisteredStudent.Status.REGISTERED).exclude(registered_at__isnull=True):
+                remember(lead.national_code, lead.phone, lead.first_name, lead.last_name, lead.registered_at)
+            for lead in NewLead.objects.filter(term=term, status=NewLead.Status.REGISTERED).exclude(registered_at__isnull=True):
+                remember(lead.national_code, lead.phone, lead.first_name, lead.last_name, lead.registered_at)
+            for test in LevelTest.objects.filter(status=LevelTest.Status.COMPLETED, assigned_class_slot__term=term).select_related('assigned_class_slot'):
+                remember(test.national_code, test.phone, test.first_name, test.last_name, test.updated_at)
+            people = []
+            for row in build_term_registered_rows(term):
+                if _wl_registration_state(row) != 'registered':
+                    continue
+                key = row.get('key') or _registered_person_key(row.get('national_code'), row.get('phone'), row.get('student_name', '').split(' ')[0], ' '.join(row.get('student_name', '').split(' ')[1:]))
+                dt = timestamps.get(key)
+                if dt is None:
+                    raw = str(row.get('registered_at') or '').split(' ')[0].replace('-', '/')
+                    try:
+                        y, m, d = [int(part) for part in raw.split('/')[:3]]
+                        fallback_date = jdatetime.date(y, m, d).togregorian()
+                        dt = timezone.make_aware(datetime.combine(fallback_date, datetime.min.time()), timezone.get_current_timezone())
+                    except (ValueError, TypeError):
+                        continue
+                local_dt = timezone.localtime(dt)
+                if local_dt.date() < start or local_dt.date() > end:
+                    continue
+                jalali_dt = jdatetime.datetime.fromgregorian(datetime=local_dt)
+                people.append({
+                    'student_name': row.get('student_name') or '', 'national_code': row.get('national_code') or '',
+                    'phone': row.get('phone') or '', 'gender': row.get('student_gender') or 'unknown',
+                    'level': row.get('level') or 'بدون سطح', 'class_number': row.get('class_number') or '',
+                    'day': row.get('day') or '', 'time': row.get('time') or '', 'teacher': row.get('teacher') or '',
+                    'registered_at': local_dt.isoformat(), 'registered_at_jalali': jalali_dt.strftime('%Y/%m/%d - %H:%M'),
+                    '_sort': local_dt,
+                })
+            people.sort(key=lambda item: (item['_sort'], item['student_name']))
+            earliest = people[:30]
+            earliest_keys = {(item['national_code'], item['phone'], item['registered_at']) for item in earliest}
+            latest = [item for item in reversed(people) if (item['national_code'], item['phone'], item['registered_at']) not in earliest_keys][:30]
+            def public(items):
+                return [{k: v for k, v in item.items() if k != '_sort'} for item in items]
+            return {
+                'term_id': term.id, 'term_title': term.title, 'total': len(people),
+                'earliest': public(earliest), 'latest': public(latest),
+                'first_registration': earliest[0]['registered_at_jalali'] if earliest else '',
+                'last_registration': latest[0]['registered_at_jalali'] if latest else '',
+            }
+        selected_start = selected.pre_registration_start or selected.start_date
+        cutoff = selected_start - timedelta(days=365) if selected_start else selected.start_date - timedelta(days=365)
+        past_terms = list(Term.objects.filter(start_date__gte=cutoff, start_date__lte=selected.start_date).order_by('start_date', 'id'))
+        if selected.id not in {term.id for term in past_terms}:
+            past_terms.append(selected)
+            past_terms.sort(key=lambda term: (term.start_date, term.id))
+        comparisons = [summarize(term) for term in past_terms]
+        focus = next((item for item in comparisons if item['term_id'] == selected.id), None) or summarize(selected)
+        if search_query:
+            search_digits = _wl_digits(search_query)
+            search_name = _wl_name(search_query)
+            def matches(person):
+                code, phone = _wl_digits(person.get('national_code')), _wl_digits(person.get('phone'))
+                if search_digits:
+                    return search_digits in code or search_digits in phone
+                return bool(search_name and search_name in _wl_name(person.get('student_name')))
+            limited = []
+            for term_data in comparisons:
+                limited.append({'term_id': term_data['term_id'], 'term_title': term_data['term_title'],
+                    'earliest': [person for person in term_data['earliest'] if matches(person)],
+                    'latest': [person for person in term_data['latest'] if matches(person)]})
+            focus = next((item for item in limited if item['term_id'] == selected.id), {'term_id': selected.id, 'term_title': selected.title, 'earliest': [], 'latest': []})
+            return Response({'term_id': selected.id, 'term_title': selected.title, 'terms': limited, 'focus': focus, 'search_limited': True})
+        return Response({'term_id': selected.id, 'term_title': selected.title, 'terms': comparisons, 'focus': focus})
 
 class LevelProgressionSkipReportView(APIView):
     """گزارش زبان‌آموزانی که در ترم جاری از سطح ثبت‌نام‌شدهٔ قبلی، سطحی را جا انداخته‌اند."""

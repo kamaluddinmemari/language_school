@@ -361,6 +361,9 @@ class UnregisteredStudentListView(generics.ListCreateAPIView):
                 term = Term.objects.get(pk=int(term_id))
             except (Term.DoesNotExist, ValueError, TypeError):
                 return qs.none()
+            if str(self.request.query_params.get('archive') or '').lower() not in ('1', 'true', 'yes'):
+                from .models import reconcile_unregistered_for_term
+                reconcile_unregistered_for_term(term.pk)
             earlier_terms = Term.objects.filter(
                 Q(year__lt=term.year) | Q(year=term.year, term_number__lt=term.term_number)
             )
@@ -375,6 +378,16 @@ class UnregisteredStudentListView(generics.ListCreateAPIView):
 
     def create(self, request, *args, **kwargs):
         # انتقال گروهیِ «منتظر ثبت‌نام» روی همین مسیرِ همیشه‌موجود (بدون نیاز به مسیر تازه در urls.py)
+        if isinstance(request.data, dict) and request.data.get('bulk_clear_assignments'):
+            if not can_edit_menu(request.user, "followups"):
+                return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
+            ids = request.data.get('ids') or []
+            if not isinstance(ids, list) or not ids:
+                return Response({'error': 'شناسه‌ای برای حذف ارجاع ارسال نشده است'}, status=status.HTTP_400_BAD_REQUEST)
+            cleared = UnregisteredStudent.objects.filter(
+                pk__in=ids[:5000], status=UnregisteredStudent.Status.TRACKING,
+            ).exclude(assigned_to__isnull=True).update(assigned_to=None)
+            return Response({'cleared': cleared})
         if isinstance(request.data, dict) and (
             request.data.get('bulk_from_waiting')
             or request.data.get('restore_last_waiting')
@@ -475,6 +488,12 @@ class UnregisteredStudentDetailView(generics.RetrieveUpdateDestroyAPIView):
     def update(self, request, *args, **kwargs):
         if not can_edit_menu(request.user, "followups"):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
+        if request.data.get('return_to_followup'):
+            instance = self.get_object()
+            instance.status = UnregisteredStudent.Status.TRACKING
+            instance.registered_at = None
+            instance.save(update_fields=['status', 'registered_at', 'updated_at'])
+            return Response(self.get_serializer(instance).data)
         if request.data.get('contacted') is True or str(request.data.get('contacted', '')).lower() in ('1', 'true', 'yes'):
             return Response({'error': 'ثبت تیک تماس فقط با دکمهٔ «پیگیری» یا «جواب نداد» مجاز است؛ تیک موجود را می‌توانید بردارید.'}, status=status.HTTP_400_BAD_REQUEST)
         return super().update(request, *args, **kwargs)
@@ -866,6 +885,7 @@ class UnregisteredStudentStatsView(APIView):
         now_local = timezone.localtime(timezone.now())
         import jdatetime
         from class_management.carryover import _tuition_for_level
+        from class_management.models import ClassSlotEnrollment
 
         level_price = {}  # شهریهٔ هر سطح فقط یک‌بار محاسبه شود
 
@@ -890,21 +910,69 @@ class UnregisteredStudentStatsView(APIView):
                 pass
             return int(s.tuition_price or 0)
 
-        def realized_price(s):
-            # محقق‌شده فقط مبلغی است که هنگام ثبت‌نام واقعاً برای همین ردیف ثبت شده؛
-            # تعرفهٔ فعلی یا بدهیِ جداگانه نباید مبلغ وصول‌شده محسوب شود.
-            try:
-                return max(int(s.tuition_price or 0), 0)
-            except (TypeError, ValueError):
-                return 0
+        def realized_tuition_by_registered_level():
+            # فقط افراد یکتای ثبت‌نام‌شده در همین فهرست و enrollment قطعیِ کلاس شمرده می‌شوند؛
+            # مبلغ بر اساس تعرفهٔ مصوب سطحِ کلاس است، نه tuition_price پیشنهادیِ سرنخ یا مبلغ پرداختیِ ممکن است تخفیف‌خورده باشد.
+            lead_rows = list(registered.only('national_code', 'phone', 'first_name', 'last_name'))
+            codes, phone_names, phone_names_without_code, names_without_contact = set(), set(), set(), set()
+            for lead in lead_rows:
+                code = _lead_digits(lead.national_code)
+                phone = _lead_digits(lead.phone)[-10:]
+                name = _lead_name(lead.first_name, lead.last_name)
+                if code:
+                    codes.add(code)
+                if phone and name:
+                    phone_names.add((phone, name))
+                    if not code:
+                        phone_names_without_code.add((phone, name))
+                elif name and not code:
+                    names_without_contact.add(name)
+
+            enrollments = ClassSlotEnrollment.objects.filter(
+                student__role='student',
+            ).select_related('student', 'class_slot').order_by('-payment_verified', '-created_at')
+            selected_term_id = request.query_params.get('term_id')
+            if selected_term_id and str(selected_term_id).isdigit():
+                enrollments = enrollments.filter(class_slot__term_id=int(selected_term_id))
+            enrollments = enrollments.filter(payment_verified=True).exclude(
+                is_carryover=True, carryover_confirmed=False,
+            )
+
+            seen_students, total = set(), 0
+            for enrollment in enrollments.iterator(chunk_size=1000):
+                student = enrollment.student
+                if student.pk in seen_students:
+                    continue
+                code = _lead_digits(student.national_code)
+                phone = _lead_digits(student.phone)[-10:]
+                name = _lead_name(student.first_name, student.last_name)
+                matched = bool(code and code in codes)
+                if not matched and phone and name:
+                    matched = (phone, name) in (phone_names_without_code if code else phone_names)
+                if not matched and not code and not phone and name:
+                    matched = name in names_without_contact
+                if not matched:
+                    continue
+
+                seen_students.add(student.pk)
+                level = str(enrollment.class_slot.assigned_level or student.latest_level or '').strip()
+                if level not in level_price:
+                    try:
+                        level_price[level] = max(int(_tuition_for_level(level) or 0), 0)
+                    except Exception:
+                        level_price[level] = 0
+                total += level_price[level]
+            return len(seen_students), total
+
+        realized_registered_count, realized_registered_tuition = realized_tuition_by_registered_level()
 
         return Response({
             'total': qs.count(),
             'tracking_count': tracking.count(),
             'not_coming_count': tracking_not_coming.count(),
-            'registered_count': registered.count(),
+            'registered_count': realized_registered_count,
             'total_tuition_potential': sum(potential_price(s) for s in tracking),
-            'total_tuition_registered': sum(realized_price(s) for s in registered),
+            'total_tuition_registered': realized_registered_tuition,
             'generated_at_jalali': jdatetime.datetime.fromgregorian(datetime=now_local).strftime('%Y/%m/%d - %H:%M:%S'),
         })
 
@@ -1054,6 +1122,14 @@ class DebtorListView(generics.ListCreateAPIView):
         from .models import get_current_term
         if not can_edit_menu(request.user, "followups"):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
+        if isinstance(request.data, dict) and request.data.get('bulk_clear_assignments'):
+            ids = request.data.get('ids') or []
+            if not isinstance(ids, list) or not ids:
+                return Response({'error': 'شناسه‌ای برای حذف ارجاع ارسال نشده است'}, status=status.HTTP_400_BAD_REQUEST)
+            cleared = Debtor.objects.filter(
+                pk__in=ids[:5000], status=Debtor.Status.PENDING,
+            ).exclude(assigned_to__isnull=True).update(assigned_to=None)
+            return Response({'cleared': cleared})
         data = request.data.copy()
         data.pop('confirm_new_term', None)
         data.pop('confirm_merge', None)
@@ -1174,6 +1250,12 @@ class DebtorDetailView(generics.RetrieveUpdateDestroyAPIView):
     def update(self, request, *args, **kwargs):
         if not can_edit_menu(request.user, "followups"):
             return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
+        if request.data.get('return_to_followup'):
+            instance = self.get_object()
+            instance.status = UnregisteredStudent.Status.TRACKING
+            instance.registered_at = None
+            instance.save(update_fields=['status', 'registered_at', 'updated_at'])
+            return Response(self.get_serializer(instance).data)
         if request.data.get('contacted') is True or str(request.data.get('contacted', '')).lower() in ('1', 'true', 'yes'):
             return Response({'error': 'ثبت تیک تماس فقط با دکمهٔ «پیگیری» یا «جواب نداد» مجاز است؛ تیک موجود را می‌توانید بردارید.'}, status=status.HTTP_400_BAD_REQUEST)
         return super().update(request, *args, **kwargs)
@@ -2127,7 +2209,10 @@ class WaitingTransferView(APIView):
         import re
         from uuid import uuid4
         from datetime import timedelta
-        if isinstance(request.data, dict) and request.data.get('restore_last_waiting'):
+        if isinstance(request.data, dict) and (
+            request.data.get('restore_last_waiting')
+            or request.data.get('restore_last_waiting_preview')
+        ):
             if request.user.role not in ('admin', 'office', 'employee') and not can_edit_menu(request.user, 'followups'):
                 return Response({'error': 'دسترسی ندارید'}, status=status.HTTP_403_FORBIDDEN)
             from class_management.models import Term
@@ -2138,6 +2223,10 @@ class WaitingTransferView(APIView):
             active_rows = UnregisteredStudent.objects.filter(term=term, status=UnregisteredStudent.Status.TRACKING)
             requested_marker = str(request.data.get('restore_batch_marker') or '').strip()
             latest = active_rows.filter(row_description__contains=requested_marker).order_by('-created_at', '-id').first() if requested_marker else None
+            # در مرحلهٔ تأیید، فقط همان گروهی که پیش‌نمایش شده قابل بازگردانی است؛
+            # هرگز در صورت حذف/تغییر گروه، به‌صورت خاموش سراغ گروه جدیدتر نرو.
+            if requested_marker and not latest:
+                return Response({'restored': 0, 'message': 'گروه پیش‌نمایش‌داده‌شده دیگر در فهرست فعال نیست؛ پیش‌نمایش را دوباره بگیرید.'})
             if not latest:
                 latest = active_rows.filter(row_description__contains=self.BATCH_PREFIX).order_by('-created_at', '-id').first()
             if not latest:
